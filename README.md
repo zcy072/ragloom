@@ -176,3 +176,7 @@ SMOKE_ADMIN_PASSWORD='<管理员密码>' ./scripts/smoke-test.sh     # 部署冒
 ```
 
 检查全部在容器内运行。后端约 30 个测试文件，覆盖鉴权、索引并发与任务恢复、检索与上下文恢复、文档解析、模型密钥加密、OpenAPI 契约等；前端有 Node 单元测试和 Playwright 端到端测试。`contracts/openapi.json` 是接口快照，修改接口后用 `scripts/openapi_snapshot.py` 更新。
+
+## 许可证
+
+[MIT](LICENSE)
