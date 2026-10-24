@@ -1,0 +1,3676 @@
+{
+  "components": {
+    "schemas": {
+      "Body_upload_document_api_documents__kb_name__post": {
+        "properties": {
+          "file": {
+            "format": "binary",
+            "title": "File",
+            "type": "string"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
+          },
+          "parser_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parser Mode"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_document_api_documents__kb_name__post",
+        "type": "object"
+      },
+      "ChatHistoryMessage": {
+        "description": "One persisted message returned by the history endpoint.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/ChatSource"
+            },
+            "title": "Sources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "role",
+          "content",
+          "sources"
+        ],
+        "title": "ChatHistoryMessage",
+        "type": "object"
+      },
+      "ChatRequest": {
+        "additionalProperties": false,
+        "description": "One question with optional session, image, model, and filters.",
+        "properties": {
+          "filters": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filters"
+          },
+          "image_base64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Base64"
+          },
+          "image_mime": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Mime"
+          },
+          "kb_name": {
+            "title": "Kb Name",
+            "type": "string"
+          },
+          "model_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Provider"
+          },
+          "new_session": {
+            "default": false,
+            "title": "New Session",
+            "type": "boolean"
+          },
+          "question": {
+            "maxLength": 4000,
+            "title": "Question",
+            "type": "string"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          }
+        },
+        "required": [
+          "question",
+          "kb_name"
+        ],
+        "title": "ChatRequest",
+        "type": "object"
+      },
+      "ChatSessionSummary": {
+        "description": "One owned conversation shown in the session list.",
+        "properties": {
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kb_name": {
+            "title": "Kb Name",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "kb_name",
+          "title",
+          "date"
+        ],
+        "title": "ChatSessionSummary",
+        "type": "object"
+      },
+      "ChatSessionTitleRequest": {
+        "additionalProperties": false,
+        "description": "New display title for one chat session.",
+        "properties": {
+          "title": {
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "ChatSessionTitleRequest",
+        "type": "object"
+      },
+      "ChatSource": {
+        "description": "Citation data shared by prompts, SSE events, and persisted history.",
+        "properties": {
+          "citation_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Citation Ids",
+            "type": "array"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "context_title": {
+            "title": "Context Title",
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/CitationEvidence"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "kb_name": {
+            "title": "Kb Name",
+            "type": "string"
+          },
+          "page": {
+            "title": "Page",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "citation_ids",
+          "source",
+          "page",
+          "context_title",
+          "content"
+        ],
+        "title": "ChatSource",
+        "type": "object"
+      },
+      "ChunkConfigRequest": {
+        "additionalProperties": false,
+        "description": "Requested parent chunk size and overlap for future index builds.",
+        "properties": {
+          "chunk_overlap": {
+            "default": 150,
+            "minimum": 0.0,
+            "title": "Chunk Overlap",
+            "type": "integer"
+          },
+          "chunk_size": {
+            "default": 800,
+            "maximum": 4000.0,
+            "minimum": 100.0,
+            "title": "Chunk Size",
+            "type": "integer"
+          }
+        },
+        "title": "ChunkConfigRequest",
+        "type": "object"
+      },
+      "ChunkConfigResponse": {
+        "additionalProperties": false,
+        "description": "Effective chunk configuration and whether indexes are stale.",
+        "properties": {
+          "chunk_overlap": {
+            "title": "Chunk Overlap",
+            "type": "integer"
+          },
+          "chunk_size": {
+            "title": "Chunk Size",
+            "type": "integer"
+          },
+          "index_needs_rebuild": {
+            "title": "Index Needs Rebuild",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "chunk_size",
+          "chunk_overlap",
+          "index_needs_rebuild"
+        ],
+        "title": "ChunkConfigResponse",
+        "type": "object"
+      },
+      "CitationEvidence": {
+        "description": "One citation snapshot; PDF page_numbers are one-based.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "context_title": {
+            "title": "Context Title",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "kb_name": {
+            "title": "Kb Name",
+            "type": "string"
+          },
+          "page": {
+            "title": "Page",
+            "type": "string"
+          },
+          "page_numbers": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Page Numbers",
+            "type": "array"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "source",
+          "kb_name",
+          "page",
+          "page_numbers",
+          "context_title",
+          "content"
+        ],
+        "title": "CitationEvidence",
+        "type": "object"
+      },
+      "DashboardFileType": {
+        "additionalProperties": false,
+        "description": "Dashboard document count grouped by file type.",
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "ext": {
+            "title": "Ext",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ext",
+          "count"
+        ],
+        "title": "DashboardFileType",
+        "type": "object"
+      },
+      "DashboardKnowledgeBase": {
+        "additionalProperties": false,
+        "description": "Dashboard processing and size statistics for one knowledge base.",
+        "properties": {
+          "docs": {
+            "title": "Docs",
+            "type": "integer"
+          },
+          "fail": {
+            "title": "Fail",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "processing": {
+            "title": "Processing",
+            "type": "integer"
+          },
+          "size": {
+            "title": "Size",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "integer"
+          },
+          "types": {
+            "items": {
+              "$ref": "#/components/schemas/DashboardFileType"
+            },
+            "title": "Types",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "docs",
+          "size",
+          "success",
+          "fail",
+          "processing",
+          "types"
+        ],
+        "title": "DashboardKnowledgeBase",
+        "type": "object"
+      },
+      "DashboardLinePoint": {
+        "additionalProperties": false,
+        "description": "Dated session and answer counts consumed by trend charts.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "会话数": {
+            "title": "会话数",
+            "type": "integer"
+          },
+          "回答数": {
+            "title": "回答数",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "会话数",
+          "回答数"
+        ],
+        "title": "DashboardLinePoint",
+        "type": "object"
+      },
+      "DashboardPiePoint": {
+        "additionalProperties": false,
+        "description": "Named value consumed by dashboard pie charts.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ],
+        "title": "DashboardPiePoint",
+        "type": "object"
+      },
+      "DashboardStatsResponse": {
+        "additionalProperties": false,
+        "description": "Complete dashboard totals, breakdowns, and recent trends.",
+        "properties": {
+          "docs": {
+            "title": "Docs",
+            "type": "integer"
+          },
+          "kb_list": {
+            "items": {
+              "$ref": "#/components/schemas/DashboardKnowledgeBase"
+            },
+            "title": "Kb List",
+            "type": "array"
+          },
+          "kbs": {
+            "title": "Kbs",
+            "type": "integer"
+          },
+          "line_data": {
+            "items": {
+              "$ref": "#/components/schemas/DashboardLinePoint"
+            },
+            "title": "Line Data",
+            "type": "array"
+          },
+          "pie_data": {
+            "items": {
+              "$ref": "#/components/schemas/DashboardPiePoint"
+            },
+            "title": "Pie Data",
+            "type": "array"
+          },
+          "size": {
+            "title": "Size",
+            "type": "string"
+          },
+          "tasks": {
+            "title": "Tasks",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kbs",
+          "docs",
+          "size",
+          "tasks",
+          "kb_list",
+          "pie_data",
+          "line_data"
+        ],
+        "title": "DashboardStatsResponse",
+        "type": "object"
+      },
+      "DocumentFilterOptionsResponse": {
+        "additionalProperties": false,
+        "description": "Distinct metadata values available to retrieval filters.",
+        "properties": {
+          "document_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Document Types",
+            "type": "array"
+          },
+          "sources": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "sources",
+          "document_types",
+          "tags"
+        ],
+        "title": "DocumentFilterOptionsResponse",
+        "type": "object"
+      },
+      "DocumentFormatResponse": {
+        "additionalProperties": false,
+        "description": "Supported extension and the parser modes it permits.",
+        "properties": {
+          "extension": {
+            "title": "Extension",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "extension",
+          "label"
+        ],
+        "title": "DocumentFormatResponse",
+        "type": "object"
+      },
+      "DocumentMetadataRequest": {
+        "additionalProperties": false,
+        "description": "Editable metadata used for document-level retrieval filters.",
+        "properties": {
+          "document_type": {
+            "default": "",
+            "maxLength": 80,
+            "title": "Document Type",
+            "type": "string"
+          },
+          "effective_date": {
+            "default": "",
+            "maxLength": 10,
+            "title": "Effective Date",
+            "type": "string"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Tags"
+          }
+        },
+        "title": "DocumentMetadataRequest",
+        "type": "object"
+      },
+      "DocumentMetadataResponse": {
+        "additionalProperties": false,
+        "description": "Normalized metadata persisted for one document.",
+        "properties": {
+          "document_type": {
+            "title": "Document Type",
+            "type": "string"
+          },
+          "effective_date": {
+            "title": "Effective Date",
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "document_type",
+          "tags",
+          "effective_date"
+        ],
+        "title": "DocumentMetadataResponse",
+        "type": "object"
+      },
+      "DocumentMetadataUpdateResponse": {
+        "additionalProperties": false,
+        "description": "Metadata update result with normalized persisted values.",
+        "properties": {
+          "metadata": {
+            "$ref": "#/components/schemas/DocumentMetadataResponse"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "metadata"
+        ],
+        "title": "DocumentMetadataUpdateResponse",
+        "type": "object"
+      },
+      "DocumentParserOption": {
+        "additionalProperties": false,
+        "description": "One parser mode exposed to the document upload UI.",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "extensions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Extensions",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "unavailable_reason": {
+            "default": "",
+            "title": "Unavailable Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "available",
+          "extensions"
+        ],
+        "title": "DocumentParserOption",
+        "type": "object"
+      },
+      "DocumentParserOptionsResponse": {
+        "additionalProperties": false,
+        "description": "Default parser and all parser choices supported by the backend.",
+        "properties": {
+          "document": {
+            "items": {
+              "$ref": "#/components/schemas/DocumentParserOption"
+            },
+            "title": "Document",
+            "type": "array"
+          },
+          "pdf": {
+            "items": {
+              "$ref": "#/components/schemas/DocumentParserOption"
+            },
+            "title": "Pdf",
+            "type": "array"
+          }
+        },
+        "required": [
+          "document",
+          "pdf"
+        ],
+        "title": "DocumentParserOptionsResponse",
+        "type": "object"
+      },
+      "DocumentParserRequest": {
+        "additionalProperties": false,
+        "description": "Request to change the parser used for one document.",
+        "properties": {
+          "parser_mode": {
+            "enum": [
+              "native_text",
+              "mineru_cloud",
+              "paddle_ocr",
+              "vision_model"
+            ],
+            "title": "Parser Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "parser_mode"
+        ],
+        "title": "DocumentParserRequest",
+        "type": "object"
+      },
+      "DocumentParserUpdateResponse": {
+        "additionalProperties": false,
+        "description": "Parser update result confirming the queued refresh job.",
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "parser_mode": {
+            "title": "Parser Mode",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "parser_mode"
+        ],
+        "title": "DocumentParserUpdateResponse",
+        "type": "object"
+      },
+      "DocumentResponse": {
+        "additionalProperties": false,
+        "description": "Document list item with processing state, parser, and metadata.",
+        "properties": {
+          "document_type": {
+            "title": "Document Type",
+            "type": "string"
+          },
+          "effective_date": {
+            "title": "Effective Date",
+            "type": "string"
+          },
+          "error_message": {
+            "title": "Error Message",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "index_job_id": {
+            "title": "Index Job Id",
+            "type": "string"
+          },
+          "parser_mode": {
+            "title": "Parser Mode",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "uploaded_at": {
+            "title": "Uploaded At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "filename",
+          "path",
+          "size",
+          "uploaded_at",
+          "status",
+          "error_message",
+          "index_job_id",
+          "document_type",
+          "tags",
+          "effective_date",
+          "parser_mode"
+        ],
+        "title": "DocumentResponse",
+        "type": "object"
+      },
+      "DocumentUploadResponse": {
+        "additionalProperties": false,
+        "description": "Upload result with stored filename and parser mode.",
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DocumentMetadataResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "parser_mode": {
+            "title": "Parser Mode",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "metadata",
+          "parser_mode"
+        ],
+        "title": "DocumentUploadResponse",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "IndexJobResponse": {
+        "additionalProperties": false,
+        "description": "Public state and timestamps for one durable indexing job.",
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "error_message": {
+            "default": "",
+            "title": "Error Message",
+            "type": "string"
+          },
+          "filename": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filename"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "process",
+              "rebuild",
+              "delete"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "completed",
+              "failed",
+              "superseded",
+              "interrupted"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "operation",
+          "status",
+          "created_at"
+        ],
+        "title": "IndexJobResponse",
+        "type": "object"
+      },
+      "JobResponse": {
+        "additionalProperties": false,
+        "description": "Successful mutation response exposing its durable index job ID.",
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "title": "JobResponse",
+        "type": "object"
+      },
+      "KnowledgeBaseNameRequest": {
+        "additionalProperties": false,
+        "description": "Validated knowledge-base name used by create and rename operations.",
+        "properties": {
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "KnowledgeBaseNameRequest",
+        "type": "object"
+      },
+      "KnowledgeBaseSummary": {
+        "additionalProperties": false,
+        "description": "Knowledge-base list item with its document count.",
+        "properties": {
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "docs": {
+            "title": "Docs",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "date",
+          "docs"
+        ],
+        "title": "KnowledgeBaseSummary",
+        "type": "object"
+      },
+      "LoginRequest": {
+        "additionalProperties": false,
+        "description": "Credentials submitted by an account.",
+        "properties": {
+          "password": {
+            "title": "Password",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "title": "LoginRequest",
+        "type": "object"
+      },
+      "ModelActivationResponse": {
+        "additionalProperties": false,
+        "description": "Response confirming the newly active provider.",
+        "properties": {
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "title": "ModelActivationResponse",
+        "type": "object"
+      },
+      "ModelCheckResponse": {
+        "additionalProperties": false,
+        "description": "Provider readiness result used by the configuration UI.",
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "is_active": {
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          }
+        },
+        "required": [
+          "configured",
+          "provider",
+          "model",
+          "is_active"
+        ],
+        "title": "ModelCheckResponse",
+        "type": "object"
+      },
+      "ModelConfigRequest": {
+        "additionalProperties": false,
+        "description": "Editable OpenAI-compatible provider configuration.",
+        "properties": {
+          "api_key": {
+            "default": "",
+            "title": "Api Key",
+            "type": "string"
+          },
+          "base_url": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Base Url",
+            "type": "string"
+          },
+          "clear_api_key": {
+            "default": false,
+            "title": "Clear Api Key",
+            "type": "boolean"
+          },
+          "default_model": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Default Model",
+            "type": "string"
+          },
+          "provider": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "base_url",
+          "default_model"
+        ],
+        "title": "ModelConfigRequest",
+        "type": "object"
+      },
+      "ModelConfigResponse": {
+        "additionalProperties": false,
+        "description": "Public provider settings with only API-key presence exposed.",
+        "properties": {
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "default_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Model"
+          },
+          "is_active": {
+            "enum": [
+              0,
+              1
+            ],
+            "title": "Is Active",
+            "type": "integer"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "configured",
+          "base_url",
+          "default_model",
+          "is_active"
+        ],
+        "title": "ModelConfigResponse",
+        "type": "object"
+      },
+      "ModelSaveResponse": {
+        "additionalProperties": false,
+        "description": "Model save result indicating whether the provider became active.",
+        "properties": {
+          "is_active": {
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "is_active"
+        ],
+        "title": "ModelSaveResponse",
+        "type": "object"
+      },
+      "PasswordChangeRequest": {
+        "additionalProperties": false,
+        "description": "Password-change payload for the current account.",
+        "properties": {
+          "new_password": {
+            "title": "New Password",
+            "type": "string"
+          },
+          "old_password": {
+            "title": "Old Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "old_password",
+          "new_password"
+        ],
+        "title": "PasswordChangeRequest",
+        "type": "object"
+      },
+      "RebuildResponse": {
+        "additionalProperties": false,
+        "description": "Confirmation that a complete knowledge-base rebuild was queued.",
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "rebuilding": {
+            "title": "Rebuilding",
+            "type": "boolean"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "rebuilding"
+        ],
+        "title": "RebuildResponse",
+        "type": "object"
+      },
+      "RegistrationRequest": {
+        "additionalProperties": false,
+        "description": "New user registration awaiting administrator approval.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "password": {
+            "title": "Password",
+            "type": "string"
+          },
+          "phone": {
+            "title": "Phone",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "name",
+          "phone",
+          "password"
+        ],
+        "title": "RegistrationRequest",
+        "type": "object"
+      },
+      "RetrievalConfigRequest": {
+        "additionalProperties": false,
+        "description": "Retrieval behavior that can change without rebuilding indexes.",
+        "properties": {
+          "query_rewrite_enabled": {
+            "title": "Query Rewrite Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "query_rewrite_enabled"
+        ],
+        "title": "RetrievalConfigRequest",
+        "type": "object"
+      },
+      "RetrievalConfigResponse": {
+        "additionalProperties": false,
+        "description": "Current retrieval behavior for one knowledge base.",
+        "properties": {
+          "query_rewrite_enabled": {
+            "title": "Query Rewrite Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "query_rewrite_enabled"
+        ],
+        "title": "RetrievalConfigResponse",
+        "type": "object"
+      },
+      "RoleCreateRequest": {
+        "additionalProperties": false,
+        "description": "Name and description for a new role.",
+        "properties": {
+          "description": {
+            "default": "",
+            "maxLength": 500,
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "RoleCreateRequest",
+        "type": "object"
+      },
+      "RolePageResponse": {
+        "additionalProperties": false,
+        "description": "One page of role administration results and its resolved page metadata.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RoleResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "page": {
+            "minimum": 1.0,
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_size": {
+            "minimum": 1.0,
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "total_pages": {
+            "minimum": 1.0,
+            "title": "Total Pages",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "page",
+          "page_size",
+          "total_pages"
+        ],
+        "title": "RolePageResponse",
+        "type": "object"
+      },
+      "RolePermissionsRequest": {
+        "additionalProperties": false,
+        "description": "Complete replacement permission sets for one role.",
+        "properties": {
+          "knowledge_base_permissions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Knowledge Base Permissions",
+            "type": "array"
+          },
+          "menu_permissions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Menu Permissions",
+            "type": "array"
+          }
+        },
+        "title": "RolePermissionsRequest",
+        "type": "object"
+      },
+      "RoleResponse": {
+        "additionalProperties": false,
+        "description": "Role details and its menu and knowledge-base permissions.",
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "knowledge_base_permissions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Knowledge Base Permissions",
+            "type": "array"
+          },
+          "menu_permissions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Menu Permissions",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "menu_permissions",
+          "knowledge_base_permissions"
+        ],
+        "title": "RoleResponse",
+        "type": "object"
+      },
+      "SuccessResponse": {
+        "additionalProperties": false,
+        "description": "Common response returned by successful mutation endpoints.",
+        "properties": {
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "title": "SuccessResponse",
+        "type": "object"
+      },
+      "UserPageResponse": {
+        "additionalProperties": false,
+        "description": "One page of user administration results and its resolved page metadata.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/UserResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "page": {
+            "minimum": 1.0,
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_size": {
+            "minimum": 1.0,
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "total_pages": {
+            "minimum": 1.0,
+            "title": "Total Pages",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "page",
+          "page_size",
+          "total_pages"
+        ],
+        "title": "UserPageResponse",
+        "type": "object"
+      },
+      "UserResponse": {
+        "additionalProperties": false,
+        "description": "User administration list item with its resolved role.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "phone": {
+            "title": "Phone",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "time": {
+            "title": "Time",
+            "type": "string"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "phone",
+          "status",
+          "role",
+          "time",
+          "username"
+        ],
+        "title": "UserResponse",
+        "type": "object"
+      },
+      "UserRoleRequest": {
+        "additionalProperties": false,
+        "description": "Role assignment for one user account.",
+        "properties": {
+          "role_id": {
+            "exclusiveMinimum": 0.0,
+            "title": "Role Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "role_id"
+        ],
+        "title": "UserRoleRequest",
+        "type": "object"
+      },
+      "UserStatusRequest": {
+        "additionalProperties": false,
+        "description": "Approval or enabled status assigned to one user account.",
+        "properties": {
+          "status": {
+            "enum": [
+              "审核中",
+              "正常",
+              "停用"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "UserStatusRequest",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "title": "RAGLoom API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/change_password": {
+      "post": {
+        "description": "Change the authenticated account's password and invalidate its old token.",
+        "operationId": "change_password_api_change_password_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordChangeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Change Password Api Change Password Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Change Password",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/chat": {
+      "post": {
+        "description": "针对指定问题和知识库，以 SSE 方式流式返回 RAG 回答。",
+        "operationId": "stream_chat_answer_api_chat_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Stream Chat Answer",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/chat/sessions": {
+      "get": {
+        "description": "返回当前用户拥有且仍有知识库访问权限的聊天会话。",
+        "operationId": "get_chat_sessions_api_chat_sessions_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ChatSessionSummary"
+                  },
+                  "title": "Response Get Chat Sessions Api Chat Sessions Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Chat Sessions",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/chat/sessions/{session_id}": {
+      "delete": {
+        "description": "删除当前用户的指定聊天会话及其全部消息。",
+        "operationId": "delete_chat_session_api_chat_sessions__session_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Delete Chat Session Api Chat Sessions  Session Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Delete Chat Session",
+        "tags": [
+          "chat"
+        ]
+      },
+      "get": {
+        "description": "返回当前用户拥有的指定会话消息记录。",
+        "operationId": "get_chat_session_messages_api_chat_sessions__session_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ChatHistoryMessage"
+                  },
+                  "title": "Response Get Chat Session Messages Api Chat Sessions  Session Id  Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Chat Session Messages",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/chat/sessions/{session_id}/title": {
+      "put": {
+        "description": "修改当前用户拥有的指定会话的标题。",
+        "operationId": "rename_chat_session_api_chat_sessions__session_id__title_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatSessionTitleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Rename Chat Session",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/dashboard/stats": {
+      "get": {
+        "description": "返回仪表盘所需的文档数量、容量和近 30 天问答趋势。",
+        "operationId": "dashboard_stats_api_dashboard_stats_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardStatsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Dashboard Stats",
+        "tags": [
+          "knowledge-bases"
+        ]
+      }
+    },
+    "/api/document_formats": {
+      "get": {
+        "description": "返回允许上传的文件格式及每种格式支持的解析方式。",
+        "operationId": "list_document_formats_api_document_formats_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DocumentFormatResponse"
+                  },
+                  "title": "Response List Document Formats Api Document Formats Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Document Formats",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/document_parsers": {
+      "get": {
+        "description": "返回后端当前支持和可用的文档解析方式。",
+        "operationId": "list_document_parsers_api_document_parsers_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentParserOptionsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Document Parsers",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/documents/{kb_name}": {
+      "get": {
+        "description": "返回指定知识库中当前用户可见的文档记录。",
+        "operationId": "list_documents_api_documents__kb_name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kb_name",
+            "required": true,
+            "schema": {
+              "title": "Kb Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DocumentResponse"
+                  },
+                  "title": "Response List Documents Api Documents  Kb Name  Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Documents",
+        "tags": [
+          "documents"
+        ]
+      },
+      "post": {
+        "description": "保存上传文件和元数据，并创建异步解析与索引任务。",
+        "operationId": "upload_document_api_documents__kb_name__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kb_name",
+            "required": true,
+            "schema": {
+              "title": "Kb Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_document_api_documents__kb_name__post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentUploadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Upload Document",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/documents/{kb_name}/{filename}": {
+      "delete": {
+        "description": "删除文档关系数据，并创建持久化索引清理任务。",
+        "operationId": "delete_document_api_documents__kb_name___filename__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kb_name",
+            "required": true,
+            "schema": {
+              "title": "Kb Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "filename",
+            "required": true,
+            "schema": {
+              "title": "Filename",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Delete Document",
+        "tags": [
+          "documents"
+        ]
+      },
+      "get": {
+        "description": "返回原始文件；预览请求则以内联且安全的方式返回支持格式。",
+        "operationId": "download_document_api_documents__kb_name___filename__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kb_name",
+            "required": true,
+            "schema": {
+              "title": "Kb Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "filename",
+            "required": true,
+            "schema": {
+              "title": "Filename",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "preview",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Preview",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Download Document",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/documents/{kb_name}/{filename}/metadata": {
+      "put": {
+        "description": "保存由业务数据库负责的文档筛选元数据。",
+        "operationId": "update_document_metadata_api_documents__kb_name___filename__metadata_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kb_name",
+            "required": true,
+            "schema": {
+              "title": "Kb Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "filename",
+            "required": true,
+            "schema": {
+              "title": "Filename",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocumentMetadataRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentMetadataUpdateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Document Metadata",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/documents/{kb_name}/{filename}/parser": {
+      "put": {
+        "description": "修改文档解析方式，并创建重新解析和索引任务。",
+        "operationId": "update_document_parser_api_documents__kb_name___filename__parser_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kb_name",
+            "required": true,
+            "schema": {
+              "title": "Kb Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "filename",
+            "required": true,
+            "schema": {
+              "title": "Filename",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocumentParserRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentParserUpdateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Document Parser",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/kbs": {
+      "get": {
+        "description": "按当前登录主体的读取权限过滤并返回知识库列表。",
+        "operationId": "list_knowledge_bases_api_kbs_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/KnowledgeBaseSummary"
+                  },
+                  "title": "Response List Knowledge Bases Api Kbs Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Knowledge Bases",
+        "tags": [
+          "knowledge-bases"
+        ]
+      },
+      "post": {
+        "description": "使用默认分块配置创建知识库。",
+        "operationId": "create_knowledge_base_api_kbs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KnowledgeBaseNameRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Knowledge Base",
+        "tags": [
+          "knowledge-bases"
+        ]
+      }
+    },
+    "/api/kbs/{name}": {
+      "delete": {
+        "description": "删除知识库的索引、关系数据、原始文件和检索缓存。",
+        "operationId": "delete_knowledge_base_api_kbs__name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Delete Knowledge Base",
+        "tags": [
+          "knowledge-bases"
+        ]
+      }
+    },
+    "/api/kbs/{name}/chunk_config": {
+      "get": {
+        "description": "返回当前生效的父子分块配置。",
+        "operationId": "get_kb_chunk_config_api_kbs__name__chunk_config_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChunkConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Kb Chunk Config",
+        "tags": [
+          "knowledge-bases"
+        ]
+      },
+      "put": {
+        "description": "保存分块大小，并安排完整索引重建任务。",
+        "operationId": "save_kb_chunk_config_api_kbs__name__chunk_config_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChunkConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RebuildResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Save Kb Chunk Config",
+        "tags": [
+          "knowledge-bases"
+        ]
+      }
+    },
+    "/api/kbs/{name}/document_filters": {
+      "get": {
+        "description": "返回可用于检索筛选的去重文档元数据值。",
+        "operationId": "get_document_filters_api_kbs__name__document_filters_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentFilterOptionsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Document Filters",
+        "tags": [
+          "knowledge-bases"
+        ]
+      }
+    },
+    "/api/kbs/{name}/index_jobs": {
+      "get": {
+        "description": "返回指定知识库最近的持久化索引任务。",
+        "operationId": "get_index_jobs_api_kbs__name__index_jobs_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/IndexJobResponse"
+                  },
+                  "title": "Response Get Index Jobs Api Kbs  Name  Index Jobs Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Index Jobs",
+        "tags": [
+          "knowledge-bases"
+        ]
+      }
+    },
+    "/api/kbs/{name}/rebuild": {
+      "post": {
+        "description": "显式安排 FTS5 和 Chroma 两类检索索引的完整重建。",
+        "operationId": "rebuild_knowledge_base_api_kbs__name__rebuild_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RebuildResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Rebuild Knowledge Base",
+        "tags": [
+          "knowledge-bases"
+        ]
+      }
+    },
+    "/api/kbs/{name}/retrieval_config": {
+      "get": {
+        "description": "返回影响查询检索行为的知识库配置。",
+        "operationId": "get_kb_retrieval_config_api_kbs__name__retrieval_config_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetrievalConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Kb Retrieval Config",
+        "tags": [
+          "knowledge-bases"
+        ]
+      },
+      "put": {
+        "description": "保存不需要重建索引的检索选项。",
+        "operationId": "save_kb_retrieval_config_api_kbs__name__retrieval_config_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetrievalConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetrievalConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Save Kb Retrieval Config",
+        "tags": [
+          "knowledge-bases"
+        ]
+      }
+    },
+    "/api/kbs/{old_name}": {
+      "put": {
+        "description": "重命名知识库的全部关联资源，失败时执行补偿回滚。",
+        "operationId": "rename_knowledge_base_api_kbs__old_name__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "old_name",
+            "required": true,
+            "schema": {
+              "title": "Old Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KnowledgeBaseNameRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Rename Knowledge Base",
+        "tags": [
+          "knowledge-bases"
+        ]
+      }
+    },
+    "/api/login": {
+      "post": {
+        "description": "Authenticate any active account through the same credential path.",
+        "operationId": "login_api_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Login Api Login Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Login",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/me": {
+      "get": {
+        "description": "返回当前账号实时的角色与权限，供前端在管理员改角色后刷新菜单。",
+        "operationId": "current_user_api_me_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Current User Api Me Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Current User",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/models": {
+      "get": {
+        "description": "返回可公开的模型服务商配置，不暴露加密后的 API Key。",
+        "operationId": "list_models_api_models_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ModelConfigResponse"
+                  },
+                  "title": "Response List Models Api Models Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Models",
+        "tags": [
+          "models"
+        ]
+      },
+      "post": {
+        "description": "保存一个模型服务商配置，并修正当前激活模型状态。",
+        "operationId": "save_model_api_models_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelSaveResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Save Model",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/models/check": {
+      "get": {
+        "description": "检查指定或当前默认模型配置，但不向前端暴露 API Key。",
+        "operationId": "check_model_config_api_models_check_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "provider",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Provider"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelCheckResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Check Model Config",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/models/{provider}/active": {
+      "put": {
+        "description": "把配置完整的服务商设为当前聊天模型。",
+        "operationId": "activate_model_api_models__provider__active_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "title": "Provider",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelActivationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Activate Model",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/register": {
+      "post": {
+        "description": "Submit a new account registration for review.",
+        "operationId": "register_user_api_register_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegistrationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Register User Api Register Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Register User",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/roles": {
+      "get": {
+        "description": "分页返回角色及其权限集合。",
+        "operationId": "list_roles_api_roles_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 10,
+              "title": "Page Size",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "query",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 80,
+              "title": "Query",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RolePageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Roles",
+        "tags": [
+          "roles"
+        ]
+      },
+      "post": {
+        "description": "创建一个初始不带任何权限的角色。",
+        "operationId": "create_role_api_roles_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoleCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Role",
+        "tags": [
+          "roles"
+        ]
+      }
+    },
+    "/api/roles/{role_id}": {
+      "delete": {
+        "description": "删除未被用户使用且不是系统内置的角色。",
+        "operationId": "delete_role_api_roles__role_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "role_id",
+            "required": true,
+            "schema": {
+              "title": "Role Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Delete Role",
+        "tags": [
+          "roles"
+        ]
+      },
+      "put": {
+        "description": "整体替换角色的菜单权限和知识库权限。",
+        "operationId": "update_role_api_roles__role_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "role_id",
+            "required": true,
+            "schema": {
+              "title": "Role Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RolePermissionsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Role",
+        "tags": [
+          "roles"
+        ]
+      }
+    },
+    "/api/users": {
+      "get": {
+        "description": "分页返回用户账号列表，并附带当前角色名称。",
+        "operationId": "list_users_api_users_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 10,
+              "title": "Page Size",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "query",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 80,
+              "title": "Query",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserPageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Users",
+        "tags": [
+          "users"
+        ]
+      }
+    },
+    "/api/users/{user_id}": {
+      "delete": {
+        "description": "删除用户账号及其拥有的聊天历史。",
+        "operationId": "delete_user_api_users__user_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "title": "User Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Delete User",
+        "tags": [
+          "users"
+        ]
+      }
+    },
+    "/api/users/{user_id}/role": {
+      "put": {
+        "description": "为用户账号分配一个已有角色。",
+        "operationId": "update_user_role_api_users__user_id__role_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "title": "User Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserRoleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update User Role",
+        "tags": [
+          "users"
+        ]
+      }
+    },
+    "/api/users/{user_id}/status": {
+      "put": {
+        "description": "修改用户账号的审核或启用状态。",
+        "operationId": "update_user_status_api_users__user_id__status_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "title": "User Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserStatusRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update User Status",
+        "tags": [
+          "users"
+        ]
+      }
+    }
+  }
+}

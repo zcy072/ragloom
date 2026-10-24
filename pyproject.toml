@@ -1,0 +1,73 @@
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = [
+    "frontend",
+    "storage",
+]
+
+[tool.ruff.lint]
+# Start with correctness and import hygiene. Broader rules can be enabled as
+# existing modules are brought under the formatter incrementally.
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.pyright]
+pythonVersion = "3.10"
+typeCheckingMode = "standard"
+include = [
+    "app_storage.py",
+    "services/chat/contracts.py",
+    "services/chat/persistence_contracts.py",
+    "services/chat/prompts.py",
+    "services/chat/rewrite.py",
+    "services/chat/sessions.py",
+    "services/chat/sources.py",
+    "services/core/contracts.py",
+    "services/core/config.py",
+    "services/core/container.py",
+    "services/core/errors.py",
+    "services/core/knowledge_bases.py",
+    "services/core/knowledge_base_settings.py",
+    "services/core/llm_config.py",
+    "services/core/model_providers.py",
+    "services/core/model_api_keys.py",
+    "services/core/model_use_cases.py",
+    "services/core/bootstrap.py",
+    "services/core/database_schema.py",
+    "services/core/sqlite_connections.py",
+    "services/core/settings.py",
+    "services/documents/contracts.py",
+    "services/documents/heading_patterns.py",
+    "services/documents/parser_modes.py",
+    "services/documents/store.py",
+    "services/documents/types.py",
+    "services/documents/use_cases.py",
+    "services/documents/visual_cache.py",
+    "services/documents/visual_candidates.py",
+    "services/documents/visual.py",
+    "services/documents/mineru/artifacts.py",
+    "services/documents/mineru/content.py",
+    "services/documents/mineru/errors.py",
+    "services/indexing/contracts.py",
+    "services/indexing/jobs.py",
+    "services/indexing/locks.py",
+    "services/indexing/schema.py",
+    "services/indexing/worker.py",
+    "services/knowledge_bases/use_cases.py",
+    "services/retrieval/source_state.py",
+    "services/retrieval/cache.py",
+    "services/retrieval/index_coordination.py",
+    "services/identity/accounts.py",
+    "services/identity/auth.py",
+    "services/identity/contracts.py",
+    "services/identity/pagination.py",
+    "services/identity/permissions.py",
+    "services/identity/rate_limit.py",
+    "services/identity/roles.py",
+    "services/identity/use_cases.py",
+]

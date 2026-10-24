@@ -1,0 +1,36 @@
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "vue-tsc --noEmit -p jsconfig.json",
+    "format": "prettier --write src tests *.js *.html",
+    "test:unit": "node --test tests/unit/*.test.js",
+    "preview": "vite preview",
+    "test:e2e": "playwright test",
+    "test:e2e:install": "playwright install --no-shell chromium"
+  },
+  "dependencies": {
+    "lucide-vue-next": "^0.577.0",
+    "markdown-it": "15.0.2",
+    "vue": "^3.5.38"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.55.1",
+    "@tailwindcss/vite": "^4.3.2",
+    "@vitejs/plugin-vue": "^6.0.7",
+    "eslint": "^10.8.0",
+    "eslint-plugin-vue": "^10.10.0",
+    "globals": "^16.3.0",
+    "prettier": "^3.6.2",
+    "tailwindcss": "^4.3.2",
+    "typescript": "^5.8.3",
+    "vite": "^8.1.0",
+    "vue-tsc": "^3.0.4"
+  }
+}

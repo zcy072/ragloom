@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.uv-cache/
+.uv-tools/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage/
+htmlcov/
+.env
+.env.*
+!.env.example
+
+# Node.js
+frontend/node_modules/
+frontend/dist/
+test-results/
+playwright-report/
+
+# 编辑器项目文件
+.idea/
+.vscode/
+.claude/
+
+# 日志 & 临时文件
+*.log
+*.sqlite3
+.DS_Store
+
+# 备份
+*_backup.*
+
+# 业务数据与模型缓存
+storage/
+
+# 打包文件
+*.tar
+*.tar.gz
+
+docs/

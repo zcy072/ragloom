@@ -1,0 +1,127 @@
+name: ragloom
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        DOCKER_LIBRARY_PREFIX: ${DOCKER_LIBRARY_PREFIX:-docker.m.daocloud.io/library}
+        # 默认使用官方 PyPI；可在命令前覆盖 PIP_INDEX_URL 测试其他源。
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        APP_UID: ${APP_UID:-1000}
+        APP_GID: ${APP_GID:-1000}
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    volumes:
+      - ./storage:/app/storage
+      - paddle_models:/home/app/.paddlex/official_models
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      HOME: /home/app
+      STORAGE_DIR: /app/storage
+      CHROMA_PATH: /app/storage/chroma
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      RETRIEVER_CACHE_MAX_SIZE: ${RETRIEVER_CACHE_MAX_SIZE:-8}
+      QUERY_EMBEDDING_CACHE_SIZE: ${QUERY_EMBEDDING_CACHE_SIZE:-64}
+      PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: "True"
+      MINERU_API_TOKEN: ${MINERU_API_TOKEN:-}
+      MINERU_API_BASE_URL: ${MINERU_API_BASE_URL:-https://mineru.net/api/v4}
+      MINERU_MODEL_VERSION: ${MINERU_MODEL_VERSION:-vlm}
+      MINERU_DOWNLOAD_ATTEMPTS: ${MINERU_DOWNLOAD_ATTEMPTS:-3}
+      MINERU_TIMEOUT_SECONDS: ${MINERU_TIMEOUT_SECONDS:-600}
+      MINERU_RESULTS_DIR: /app/storage/mineru_results
+      RAG_IMAGE_ANALYSIS: ${RAG_IMAGE_ANALYSIS:-auto}
+      RAG_VISION_PROVIDER: ${RAG_VISION_PROVIDER:-OpenAI}
+      RAG_VISION_MODEL: ${RAG_VISION_MODEL:-}
+      RAG_VISION_BASE_URL: ${RAG_VISION_BASE_URL:-}
+      RAG_VISION_API_KEY: ${RAG_VISION_API_KEY:-}
+      RAG_VISION_TIMEOUT_SECONDS: ${RAG_VISION_TIMEOUT_SECONDS:-60}
+      INDEX_WORKER_THREADS: ${INDEX_WORKER_THREADS:-3}
+      OCR_MAX_CONCURRENCY: ${OCR_MAX_CONCURRENCY:-1}
+      MINERU_MAX_CONCURRENCY: ${MINERU_MAX_CONCURRENCY:-3}
+      EMBEDDING_MAX_CONCURRENCY: ${EMBEDDING_MAX_CONCURRENCY:-2}
+      VISION_GLOBAL_MAX_CONCURRENCY: ${VISION_GLOBAL_MAX_CONCURRENCY:-6}
+      AUTH_SECRET_KEY: ${AUTH_SECRET_KEY:-}
+      MODEL_API_KEY_ENCRYPTION_KEY: ${MODEL_API_KEY_ENCRYPTION_KEY:-}
+      MODEL_API_KEY_PREVIOUS_ENCRYPTION_KEYS: ${MODEL_API_KEY_PREVIOUS_ENCRYPTION_KEYS:-}
+      AUTH_TOKEN_TTL_SECONDS: ${AUTH_TOKEN_TTL_SECONDS:-28800}
+      AUTH_LOGIN_MAX_FAILURES: ${AUTH_LOGIN_MAX_FAILURES:-5}
+      AUTH_LOGIN_WINDOW_SECONDS: ${AUTH_LOGIN_WINDOW_SECONDS:-900}
+      AUTH_CLIENT_MAX_FAILURES: ${AUTH_CLIENT_MAX_FAILURES:-20}
+      AUTH_CLIENT_WINDOW_SECONDS: ${AUTH_CLIENT_WINDOW_SECONDS:-300}
+      AUTH_REGISTER_MAX_ATTEMPTS: ${AUTH_REGISTER_MAX_ATTEMPTS:-5}
+      AUTH_REGISTER_WINDOW_SECONDS: ${AUTH_REGISTER_WINDOW_SECONDS:-3600}
+      AUTH_TRUST_X_REAL_IP: ${AUTH_TRUST_X_REAL_IP:-true}
+      INDEX_JOB_HISTORY_RETENTION_DAYS: ${INDEX_JOB_HISTORY_RETENTION_DAYS:-90}
+      INDEX_JOB_HISTORY_MAX_PER_KB: ${INDEX_JOB_HISTORY_MAX_PER_KB:-200}
+      CHAT_RETRIEVAL_PLANNING: ${CHAT_RETRIEVAL_PLANNING:-false}
+      CHAT_QUERY_VARIANT: ${CHAT_QUERY_VARIANT:-false}
+    ports:
+      - "8000:8000"
+    restart: always
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        DOCKER_LIBRARY_PREFIX: ${DOCKER_LIBRARY_PREFIX:-docker.m.daocloud.io/library}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com/}
+    ports:
+      - "8080:80"  # 外部使用 8080 端口访问，避免与宿主机默认 80 端口冲突
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    depends_on:
+      - backend
+    restart: always
+
+  frontend-check:
+    profiles: ["test"]
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: build
+      args:
+        DOCKER_LIBRARY_PREFIX: ${DOCKER_LIBRARY_PREFIX:-docker.m.daocloud.io/library}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com/}
+    # npm audit 固定用官方源：npmmirror 不提供审计接口。
+    command:
+      - sh
+      - -c
+      - npm run lint && npm run typecheck && npm run test:unit && npm run build && npm audit --registry=https://registry.npmjs.org
+
+  backend-check:
+    profiles: ["test"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: check
+      args:
+        DOCKER_LIBRARY_PREFIX: ${DOCKER_LIBRARY_PREFIX:-docker.m.daocloud.io/library}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        APP_UID: ${APP_UID:-1000}
+        APP_GID: ${APP_GID:-1000}
+    volumes:
+      - .:/app
+    environment:
+      PYTHONPYCACHEPREFIX: /tmp/pymodel-pycache
+      RUFF_CACHE_DIR: /tmp/ruff-cache
+      UV_CACHE_DIR: /tmp/uv-cache
+    command:
+      - sh
+      - -c
+      - ruff check api.py app_storage.py routers services tests && pyright && python -m compileall -q api.py app_storage.py routers services tests
+
+  e2e:
+    profiles: ["test"]
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.e2e
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com/}
+    ipc: host
+
+volumes:
+  paddle_models:
+    name: pymodel_paddle_models

@@ -1,0 +1,15 @@
+# Keep this tag aligned with @playwright/test in package-lock.json.
+FROM mcr.microsoft.com/playwright:v1.55.1-noble
+
+ARG NPM_REGISTRY=https://registry.npmmirror.com/
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm config set registry "${NPM_REGISTRY}" && npm ci
+
+COPY . .
+
+ENV CI=1
+
+CMD ["npm", "run", "test:e2e"]
