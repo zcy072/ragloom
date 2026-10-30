@@ -4,6 +4,7 @@
 
 **面向企业文档的 RAG 知识库与问答系统**
 
+[![CI](https://img.shields.io/github/actions/workflow/status/zcy072/ragloom/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/zcy072/ragloom/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
 ![Vue](https://img.shields.io/badge/Vue-3-4FC08D?style=flat-square&logo=vuedotjs&logoColor=white)
@@ -11,11 +12,30 @@
 ![Docker](https://img.shields.io/badge/Docker_Compose-2496ED?style=flat-square&logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
 
-[特性](#特性) · [架构](#架构) · [检索评测](#检索评测) · [快速开始](#快速开始) · [开发](#开发)
+[界面](#界面) · [特性](#特性) · [架构](#架构) · [检索评测](#检索评测) · [快速开始](#快速开始) · [开发](#开发)
 
 </div>
 
 RAGLoom 把 PDF、Word、Markdown 和图片解析、分块后写入 Milvus 混合索引，经混合召回、重排序和父块恢复生成带来源角标的流式回答，并内置权限管理、运行追踪与离线检索评测。
+
+## 界面
+
+<p align="center">
+  <img src="assets/chat.webp" alt="问答：带来源角标的流式回答" width="100%">
+</p>
+
+<table>
+  <tr>
+    <td width="33%"><img src="assets/trace.webp" alt="处理过程追踪"></td>
+    <td width="33%"><img src="assets/analytics.webp" alt="用户分析"></td>
+    <td width="33%"><img src="assets/ops.webp" alt="运行监控"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>处理过程：各阶段耗时、召回与重排明细</sub></td>
+    <td align="center"><sub>用户分析：提问趋势、时段分布、知识库使用</sub></td>
+    <td align="center"><sub>运行监控：依赖健康、索引任务、问答记录</sub></td>
+  </tr>
+</table>
 
 ## 特性
 
