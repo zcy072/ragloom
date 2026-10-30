@@ -12,7 +12,7 @@ from services.chat.persistence_contracts import (
 )
 from services.core import config as application_config
 from services.core import sqlite_connections as application_db
-from services.core.container import ApplicationContainer, get_application_container
+from services.core.container import ApplicationContainer, database_file
 from services.core.errors import AccessDeniedError, ResourceNotFoundError
 
 
@@ -74,25 +74,24 @@ def _session_summary_from_row(row: tuple[object, ...]) -> ChatSessionSummary:
 
 
 def _history_message_from_row(row: tuple[object, ...]) -> ChatHistoryMessage:
-    """把消息记录转换为聊天历史，并还原其中保存的来源列表。"""
+    """把消息记录转换为聊天历史，并还原来源列表；有追踪记录的回答带上追踪 ID 和评价。"""
     sources = cast(list[ChatSource], json.loads(str(row[2]))) if row[2] else []
-    return {
+    message: ChatHistoryMessage = {
         "role": str(row[0]),
         "content": str(row[1]),
         "sources": sources,
     }
-
-
-def _database_path(container: ApplicationContainer | None) -> str:
-    """从显式容器或默认容器中取得当前业务数据库路径。"""
-    return str((container or get_application_container()).database_path())
+    if row[3]:
+        message["trace_id"] = str(row[3])
+        message["feedback"] = int(cast(int, row[4]) or 0)
+    return message
 
 
 def list_owned_sessions(
     owner: SessionOwner, *, container: ApplicationContainer | None = None
 ) -> list[ChatSessionSummary]:
     """按最近更新时间返回一个账号拥有的全部会话。"""
-    with application_db.connect(_database_path(container)) as conn:
+    with application_db.connect(database_file(container)) as conn:
         rows = conn.execute(
             "SELECT id, username, kb_name, title, created_at FROM chat_sessions "
             "WHERE account_id = ? ORDER BY updated_at DESC",
@@ -108,7 +107,7 @@ def get_owned_session_kb(
     container: ApplicationContainer | None = None,
 ) -> str:
     """返回本人会话绑定的知识库；不存在或不属于本人时统一返回 404。"""
-    with application_db.connect(_database_path(container)) as conn:
+    with application_db.connect(database_file(container)) as conn:
         row = conn.execute(
             "SELECT kb_name FROM chat_sessions "
             "WHERE id = ? AND account_id = ?",
@@ -128,7 +127,7 @@ def load_owned_session_messages(
     container: ApplicationContainer | None = None,
 ) -> tuple[str, list[ChatHistoryMessage]]:
     """校验会话归属，并返回其知识库和按时间排序的消息。"""
-    with application_db.connect(_database_path(container)) as conn:
+    with application_db.connect(database_file(container)) as conn:
         row = conn.execute(
             "SELECT kb_name FROM chat_sessions "
             "WHERE id = ? AND account_id = ?",
@@ -139,8 +138,9 @@ def load_owned_session_messages(
                 "会话不存在或无权访问", code="chat_session_not_found"
             )
         message_rows = conn.execute(
-            "SELECT role, content, sources FROM chat_messages "
-            "WHERE session_id = ? ORDER BY id ASC",
+            "SELECT m.role, m.content, m.sources, t.id, t.feedback FROM chat_messages m "
+            "LEFT JOIN chat_traces t ON t.assistant_message_id = m.id "
+            "WHERE m.session_id = ? ORDER BY m.id ASC",
             (session_id,),
         ).fetchall()
     return str(row[0]), [_history_message_from_row(message) for message in message_rows]
@@ -153,7 +153,7 @@ def delete_owned_session(
     container: ApplicationContainer | None = None,
 ) -> None:
     """再次校验归属后，原子删除会话及其全部消息。"""
-    with application_db.connect(_database_path(container)) as conn:
+    with application_db.connect(database_file(container)) as conn:
         if not conn.execute(
             "SELECT 1 FROM chat_sessions "
             "WHERE id = ? AND account_id = ?",
@@ -164,6 +164,7 @@ def delete_owned_session(
             )
         conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM chat_session_memory WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM chat_traces WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
 
 
@@ -175,7 +176,7 @@ def rename_owned_session(
     container: ApplicationContainer | None = None,
 ) -> None:
     """校验归属后更新会话标题；标题的空值和长度由接口层的请求模型保证。"""
-    with application_db.connect(_database_path(container)) as conn:
+    with application_db.connect(database_file(container)) as conn:
         cursor = conn.execute(
             "UPDATE chat_sessions SET title = ? WHERE id = ? AND account_id = ?",
             (title, session_id, owner.account_id),
@@ -193,7 +194,7 @@ def save_user_message(
     container: ApplicationContainer | None = None,
 ) -> int:
     """在回答生成前保存用户消息，返回消息 ID；会话的第一条消息同时决定会话标题。"""
-    with application_db.connect(_database_path(container)) as conn:
+    with application_db.connect(database_file(container)) as conn:
         is_first_message = conn.execute(
             "SELECT 1 FROM chat_messages WHERE session_id = ? LIMIT 1",
             (session_id,),
@@ -219,7 +220,7 @@ def discard_user_message(
     container: ApplicationContainer | None = None,
 ) -> bool:
     """撤回没有得到任何回答的用户消息；会话因此变空时一并删除，返回会话是否已删除。"""
-    with application_db.connect(_database_path(container)) as conn:
+    with application_db.connect(database_file(container)) as conn:
         conn.execute(
             "DELETE FROM chat_messages WHERE id = ? AND session_id = ? AND role = 'user'",
             (message_id, session_id),
@@ -230,6 +231,7 @@ def discard_user_message(
         ).fetchone():
             return False
         conn.execute("DELETE FROM chat_session_memory WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM chat_traces WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
     return True
 
@@ -240,11 +242,11 @@ def save_assistant_message(
     sources: list[ChatSource],
     *,
     container: ApplicationContainer | None = None,
-) -> None:
-    """保存助手回答和引用，并同步会话的最近更新时间。"""
+) -> int:
+    """保存助手回答和引用，并同步会话的最近更新时间，返回消息 ID。"""
     now = application_config.db_now()
-    with application_db.connect(_database_path(container)) as conn:
-        conn.execute(
+    with application_db.connect(database_file(container)) as conn:
+        cursor = conn.execute(
             "INSERT INTO chat_messages (session_id, role, content, sources, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
             (
@@ -259,6 +261,7 @@ def save_assistant_message(
             "UPDATE chat_sessions SET updated_at = ? WHERE id = ?",
             (now, session_id),
         )
+    return int(cursor.lastrowid or 0)
 
 
 def resolve_session(
@@ -271,7 +274,7 @@ def resolve_session(
 ) -> SessionResolution:
     """解析或创建会话，并告知调用方是否需要在前置失败时清理新会话。"""
     created = False
-    with application_db.connect(_database_path(container)) as conn:
+    with application_db.connect(database_file(container)) as conn:
         if session_id:
             row = conn.execute(
                 "SELECT account_id, kb_name FROM chat_sessions WHERE id = ?",
@@ -408,7 +411,7 @@ def load_conversation_memory(
     container: ApplicationContainer | None = None,
 ) -> ConversationMemory:
     """读取会话摘要，并按消息数和字符数限制近期原文。"""
-    with application_db.connect(_database_path(container)) as conn:
+    with application_db.connect(database_file(container)) as conn:
         memory_row = conn.execute(
             "SELECT summary, summary_message_id FROM chat_session_memory WHERE session_id = ?",
             (session_id,),
@@ -449,7 +452,7 @@ def load_summary_batch(
     或者近期原文窗口因字符预算放不下较早的消息。后者既不在摘要里也不在提示词里，
     必须尽早并入摘要，否则这些轮次会被模型彻底遗忘。
     """
-    with application_db.connect(_database_path(container)) as conn:
+    with application_db.connect(database_file(container)) as conn:
         memory_row = conn.execute(
             "SELECT summary, summary_message_id FROM chat_session_memory WHERE session_id = ?",
             (session_id,),
@@ -489,7 +492,7 @@ def save_conversation_summary(
 ) -> bool:
     """以乐观并发方式保存摘要，旧状态已变化时放弃覆盖。"""
     now = application_config.db_now()
-    with application_db.connect(_database_path(container)) as conn:
+    with application_db.connect(database_file(container)) as conn:
         cursor = conn.execute(
             "INSERT INTO chat_session_memory "
             "(session_id, summary, summary_message_id, updated_at) "

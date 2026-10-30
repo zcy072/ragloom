@@ -24,7 +24,8 @@ const createComposable = ({
   chunks = [],
   chatStore = { activeSessionId: null },
   authorizedFetch = async () => streamResponse(chunks),
-  idleTimeoutMs
+  idleTimeoutMs,
+  webSearch
 }) => {
   const messages = ref([]);
   const newSessionPending = ref(true);
@@ -40,7 +41,8 @@ const createComposable = ({
       hasRetrievalFilters: ref(false),
       retrievalFilterPayload: () => ({}),
       newSessionPending,
-      loadSessions: async () => { sessionRefreshes += 1; }
+      loadSessions: async () => { sessionRefreshes += 1; },
+      ...(webSearch ? { webSearch } : {})
     },
     {
       store: chatStore,
@@ -269,4 +271,46 @@ test('answer text is flushed to the message even when updates are throttled', as
   await fixture.composable.send();
 
   assert.equal(fixture.messages.value[1].content, tokens.join(''));
+});
+
+test('stage events are collected live and attached to the answer with its trace ID', async () => {
+  const fixture = createComposable({
+    chunks: [
+      'data: {"stage":"plan","status":"ok","elapsed_ms":5,"detail":{}}\n\n',
+      'data: {"stage":"retrieval","status":"ok","elapsed_ms":20,"detail":{"candidates":3}}\n\n',
+      'data: {"chunk":"答"}\n\n',
+      'data: {"stage":"generate","status":"ok","elapsed_ms":30,"detail":{}}\n\n',
+      'data: {"sources":[],"session_id":"s","is_end":true,"final_answer":"答","trace_id":"t1"}\n\n'
+    ]
+  });
+  fixture.composable.input.value = '问题';
+
+  await fixture.composable.send();
+
+  const answer = fixture.messages.value[1];
+  assert.equal(fixture.messages.value.length, 2);
+  assert.deepEqual(answer.stages.map(stage => stage.stage), ['plan', 'retrieval', 'generate']);
+  assert.equal(answer.trace_id, 't1');
+  assert.equal(answer.feedback, 0);
+  assert.equal(fixture.composable.liveStages.value.length, 3);
+});
+
+test('the web search toggle is sent only when enabled', async () => {
+  const bodies = [];
+  const webSearch = ref(true);
+  const fixture = createComposable({
+    webSearch,
+    authorizedFetch: async (_path, options) => {
+      bodies.push(JSON.parse(options.body));
+      return streamResponse(['data: {"sources":[],"session_id":"s","is_end":true,"final_answer":"答"}\n\n']);
+    }
+  });
+  fixture.composable.input.value = '问题';
+  await fixture.composable.send();
+  webSearch.value = false;
+  fixture.composable.input.value = '问题二';
+  await fixture.composable.send();
+
+  assert.equal(bodies[0].web_search, true);
+  assert.equal('web_search' in bodies[1], false);
 });

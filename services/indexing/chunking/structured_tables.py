@@ -7,7 +7,7 @@
 
 import html
 import re
-from typing import Any
+from typing import Any, cast
 
 from services.documents.heading_patterns import APPENDIX_HEADING
 
@@ -45,7 +45,7 @@ def _html_table_cell_text(cell) -> str:
     """提取单元格文本，避免将编码后的比较符误认为 HTML 标记。"""
     from lxml import html as lxml_html
 
-    markup = lxml_html.tostring(cell, encoding="unicode", method="html")
+    markup = cast(str, lxml_html.tostring(cell, encoding="unicode", method="html"))
     markup = re.sub(r"<(?:br|/p|/div|/li)[^>]*>", "\n", markup, flags=re.IGNORECASE)
     text = html.unescape(_HTML_TAG.sub(" ", markup))
     return " ".join(text.split())

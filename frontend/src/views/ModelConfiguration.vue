@@ -60,14 +60,14 @@ const refreshModels = async () => {
     models.value = data.map(d => ({
       name: d.provider,
       configured: d.configured,
-      isActive: d.is_active === 1,
+      isActive: d.is_active,
       statusTag: d.configured ? '已配置' : '未配置',
       statusColor: d.configured ? 'text-orange-500 bg-orange-50 border-orange-100' : 'text-gray-400 bg-gray-50 border-gray-100',
       activeTag: d.is_active ? '当前默认' : '未激活',
       activeColor: d.is_active ? 'text-green-500 bg-green-50 border-green-100' : 'text-gray-400 bg-gray-50 border-gray-100',
       url: d.base_url,
       defaultModel: d.default_model,
-      keyPlaceholder: d.configured ? '已配置，留空不修改' : '',
+      keyPlaceholder: d.configured ? '已配置，留空不修改（修改 Base URL 时须重新填写）' : '',
       apiKey: ''
     }));
   } catch (error) {

@@ -35,7 +35,8 @@ export function useChatStream({
   hasRetrievalFilters,
   retrievalFilterPayload,
   newSessionPending,
-  loadSessions
+  loadSessions,
+  webSearch = null
 }, dependencies = {}) {
   const fetchChat = dependencies.authorizedFetch || authorizedFetch;
   const chatStore = dependencies.store || store;
@@ -43,6 +44,8 @@ export function useChatStream({
   const idleTimeoutMs = dependencies.idleTimeoutMs ?? STREAM_IDLE_TIMEOUT_MS;
   const input = ref('');
   const loading = ref(false);
+  // 本轮已完成的处理阶段；回答出现前显示进度，结束后随消息保存。
+  const liveStages = ref([]);
   const attachedImage = ref(null);
   // 已发送消息仍在使用的预览地址；组件卸载时统一释放。
   const sentPreviewUrls = new Set();
@@ -136,7 +139,8 @@ export function useChatStream({
         ...(newSessionPending.value ? { new_session: true } : {}),
         ...(imageBase64 ? { image_base64: imageBase64, image_mime: imageMime } : {}),
         ...(selectedModel.value ? { model_provider: selectedModel.value } : {}),
-        ...(hasRetrievalFilters.value ? { filters: retrievalFilterPayload() } : {})
+        ...(hasRetrievalFilters.value ? { filters: retrievalFilterPayload() } : {}),
+        ...(webSearch?.value ? { web_search: true } : {})
       };
       const response = await fetchChat('/api/chat', {
         method: 'POST',
@@ -164,6 +168,8 @@ export function useChatStream({
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let answer = '';
+      const stages = [];
+      liveStages.value = stages;
       let sessionCreated = false;
       let streamCompleted = false;
       // 每个 token 都重新渲染整段 Markdown 会让长回答越来越卡：这里先累积，
@@ -203,6 +209,11 @@ export function useChatStream({
 
             try {
               const data = JSON.parse(chunk.substring(6));
+              if (data.stage) {
+                stages.push(data);
+                liveStages.value = [...stages];
+                continue;
+              }
               if (data.chunk) {
                 // Reuse one assistant message while tokens stream to avoid reactive list churn.
                 if (answer === '') messages.value.push({ role: 'assistant', content: '', sources: [] });
@@ -217,6 +228,8 @@ export function useChatStream({
                   const failedMessage = messages.value[messages.value.length - 1];
                   failedMessage.content = `⚠️ ${data.error}`;
                   failedMessage.sources = [];
+                  failedMessage.stages = stages;
+                  if (data.trace_id) failedMessage.trace_id = data.trace_id;
                 } else {
                   // Sources and session ID are authoritative only in the terminal event.
                   if (answer === '') messages.value.push({ role: 'assistant', content: '', sources: [] });
@@ -225,6 +238,11 @@ export function useChatStream({
                   lastMessage.sources = data.sources || [];
                   if (data.interrupted) lastMessage.interrupted = true;
                   if (data.diagnostics && Object.keys(data.diagnostics).length) lastMessage.diagnostics = data.diagnostics;
+                  lastMessage.stages = stages;
+                  if (data.trace_id) {
+                    lastMessage.trace_id = data.trace_id;
+                    lastMessage.feedback = 0;
+                  }
                 }
                 if (!chatStore.activeSessionId && data.session_id && !sessionCreated) {
                   chatStore.activeSessionId = data.session_id;
@@ -299,6 +317,7 @@ export function useChatStream({
   return {
     input,
     loading,
+    liveStages,
     attachedImage,
     handleImageSelect,
     handleImagePaste,

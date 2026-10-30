@@ -37,3 +37,10 @@ test('grouped evidence exports each citation and its own page', () => {
   assert.ok(output.includes('[来源 2] 手册.pdf / 第 8 页'));
   assert.ok(output.includes('> 第二条'));
 });
+
+test('web sources export with their address', () => {
+  const output = sessionMarkdown([{ role: 'assistant', content: '[来源 1]', sources: [{
+    source: '政策解读', evidence: [{ id: 1, source: '政策解读', page: '政府网', content: '摘要', url: 'https://example.com/a b' }]
+  }] }], '会话', '库');
+  assert.ok(output.includes('[来源 1] 政策解读 / 政府网 <https://example.com/a%20b>'));
+});

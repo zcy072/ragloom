@@ -6,6 +6,7 @@ from routers import schemas
 from services.core import model_use_cases
 from services.core.container import get_application_container
 from services.identity import auth as auth_service
+from services.retrieval import retriever
 
 router = APIRouter(prefix="/api/models", tags=["models"])
 
@@ -13,7 +14,9 @@ router = APIRouter(prefix="/api/models", tags=["models"])
 @router.get("/check", response_model=schemas.ModelCheckResponse)
 def check_model_config(
     provider: str | None = None,
-    _principal: auth_service.Principal = Depends(auth_service.current_principal),
+    _principal: auth_service.Principal = Depends(
+        auth_service.require_menu_permission("模型配置")
+    ),
 ):
     """检查指定或当前默认模型配置，但不向前端暴露 API Key。"""
     return model_use_cases.check_model_config(
@@ -47,6 +50,8 @@ def save_model(
         default_model=data.default_model,
         model_providers=get_application_container().model_providers,
     )
+    # 缓存的检索器持有按旧 Key 创建的查询嵌入客户端；core 层不能依赖 retrieval，所以在这里清。
+    retriever.clear_retriever_cache()
     return {"status": "success", "is_active": is_active}
 
 

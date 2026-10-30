@@ -59,7 +59,7 @@ class DashboardTrendRow(NamedTuple):
     """Daily conversation counts consumed by dashboard charts."""
 
     date: str
-    session_count: int
+    question_count: int
     answer_count: int
 
 

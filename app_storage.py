@@ -3,14 +3,17 @@
 import logging
 from pathlib import Path
 
+from services.chat import runs as chat_runs
 from services.core import bootstrap as application_bootstrap
 from services.core import config as application_config
 from services.core import database_schema, model_api_keys
 from services.core.knowledge_base_settings import KnowledgeBaseSettings
 from services.core.knowledge_bases import KnowledgeBaseStore
 from services.core.model_providers import ModelProviderStore
+from services.core.settings import get_settings
 from services.documents import parser_modes
 from services.documents.store import DocumentStore
+from services.identity import login_events
 from services.identity import permissions as identity_permissions
 from services.indexing import jobs as index_job_store
 from services.indexing import workspace as index_workspace
@@ -59,8 +62,8 @@ index_jobs = index_job_store.IndexJobStore(
     application_config.validate_filename,
     vacuum_min_free_pages=application_config.SQLITE_VACUUM_MIN_FREE_PAGES,
     vacuum_min_free_ratio=application_config.SQLITE_VACUUM_MIN_FREE_RATIO,
-    history_retention_days=application_config.INDEX_JOB_HISTORY_RETENTION_DAYS,
-    history_max_per_kb=application_config.INDEX_JOB_HISTORY_MAX_PER_KB,
+    history_retention_days=lambda: get_settings().index_job_history_retention_days,
+    history_max_per_kb=lambda: get_settings().index_job_history_max_per_kb,
     logger=logger,
 )
 
@@ -100,5 +103,15 @@ def initialize_app_storage() -> None:
     index_workspace.sweep_stale_workspaces()
     bootstrap_defaults()
     index_jobs.redact_orphaned_filenames()
-    if index_jobs.prune_history():
-        index_jobs.compact_database()
+    prune_expired_history()
+
+
+def prune_expired_history() -> None:
+    """清理超过保留期的任务历史、问答运行记录和登录记录；启动时和运行期间定时调用。
+
+    最后尝试压缩数据库，回收删除知识库等操作留下的空闲页；空闲页不足阈值时跳过。
+    """
+    index_jobs.prune_history()
+    chat_runs.prune(db_file=DB_FILE)
+    login_events.prune(DB_FILE)
+    index_jobs.compact_database()

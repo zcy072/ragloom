@@ -4,7 +4,7 @@
 Recommended reading order for the main RAG path:
 
 1. ``documents`` turns uploaded files into normalized documents.
-2. ``indexing`` chunks those documents and writes FTS5/Chroma indexes.
+2. ``indexing`` chunks those documents and writes the Milvus chunk index.
 3. ``retrieval`` recalls evidence and restores answer-sized context.
 4. ``chat`` rewrites follow-ups, reranks evidence, and streams the answer.
 

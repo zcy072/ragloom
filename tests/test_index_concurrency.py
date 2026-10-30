@@ -19,7 +19,8 @@ try:
     from services.indexing import workspace as index_workspace
     from services.indexing.jobs import INDEX_JOB_COMPLETED, INDEX_JOB_FAILED, INDEX_JOB_SUPERSEDED
     from services.indexing.locks import knowledge_base_lock
-    from services.retrieval import source_state
+    from services.retrieval import parent_store
+    from services.retrieval.chunk_index import get_chunk_index
 except ModuleNotFoundError:
     app_storage = None
 
@@ -46,7 +47,7 @@ class IndexConcurrencyTest(IsolatedStorageTestCase):
         app_storage.initialize_database()
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             conn.execute(
-                "INSERT INTO knowledge_bases (name, created_at) VALUES (?, ?)",
+                "INSERT INTO knowledge_bases (name, kb_id, created_at) VALUES (?, lower(hex(randomblob(16))), ?)",
                 (KB, application_config.db_now()),
             )
         self.kb_dir = app_storage.documents.ensure_knowledge_base_dir(KB)
@@ -73,9 +74,13 @@ class IndexConcurrencyTest(IsolatedStorageTestCase):
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
-        upsert = patch.object(knowledge_base.chroma_index, "chroma_upsert_splits")
-        self.upsert = upsert.start()
-        self.addCleanup(upsert.stop)
+        self.index = get_chunk_index()
+        publish = patch.object(
+            self.index, "publish_source", wraps=self.index.publish_source
+        )
+        self.publish = publish.start()
+        self.addCleanup(publish.stop)
+        self.kb_id = app_storage.knowledge_bases.kb_id_for(KB)
         self.errors: list[BaseException] = []
 
     # -- helpers ---------------------------------------------------------
@@ -196,35 +201,64 @@ class IndexConcurrencyTest(IsolatedStorageTestCase):
             release.set()
         self._join(thread, prober)
 
-    def test_index_writes_are_exclusive(self):
+    def test_different_files_publish_concurrently(self):
+        # 两个发布都要到达屏障才能继续；仍按知识库串行时第一个会超时出错。
         barrier = threading.Barrier(2, timeout=WAIT)
-        self.on_load = lambda path, filename: barrier.wait()
-        original = knowledge_base.fts_index.update_fts5_index
-        guard = threading.Lock()
-        state = {"active": 0, "peak": 0}
+        original = self.index.publish_source
 
-        def tracked(*args, **kwargs):
-            with guard:
-                state["active"] += 1
-                state["peak"] = max(state["peak"], state["active"])
-            try:
-                threading.Event().wait(0.1)
-                return original(*args, **kwargs)
-            finally:
-                with guard:
-                    state["active"] -= 1
+        def meet_then_publish(*args, **kwargs):
+            barrier.wait()
+            return original(*args, **kwargs)
 
         first_id, first_path = self._add_document("甲.pdf")
         second_id, second_path = self._add_document("乙.pdf")
-        with patch.object(knowledge_base.fts_index, "update_fts5_index", side_effect=tracked):
+        with patch.object(self.index, "publish_source", side_effect=meet_then_publish):
             self._join(
                 self._start(first_id, "甲.pdf", first_path),
                 self._start(second_id, "乙.pdf", second_path),
             )
 
-        self.assertEqual(state["peak"], 1)
         self.assertEqual(self._document("甲.pdf")[0], "ready")
         self.assertEqual(self._document("乙.pdf")[0], "ready")
+
+    def test_upload_of_another_file_is_not_blocked_by_a_publish(self):
+        entered = threading.Event()
+        release = threading.Event()
+        original = self.index.publish_source
+
+        def block_then_publish(*args, **kwargs):
+            entered.set()
+            release.wait(WAIT)
+            return original(*args, **kwargs)
+
+        job_id, path = self._add_document("甲.pdf")
+        with patch.object(self.index, "publish_source", side_effect=block_then_publish):
+            thread = self._start(job_id, "甲.pdf", path)
+            self.assertTrue(entered.wait(WAIT))
+            try:
+                acquired = threading.Event()
+
+                def upload_other_file():
+                    from services.indexing.locks import document_lock
+
+                    with document_lock(KB, "乙.pdf"):
+                        acquired.set()
+
+                prober = threading.Thread(target=upload_other_file, daemon=True)
+                prober.start()
+                self.assertTrue(acquired.wait(WAIT), "发布甲时不应阻塞乙的上传")
+            finally:
+                release.set()
+            self._join(thread, prober)
+        self.assertEqual(self._document("甲.pdf")[0], "ready")
+
+    def test_finished_job_does_not_take_the_knowledge_base_lock_when_it_still_exists(self):
+        job_id, path = self._add_document("甲.pdf")
+        with patch.object(knowledge_base, "knowledge_base_lock") as kb_lock:
+            self._run(job_id, "甲.pdf", path)
+
+        kb_lock.assert_not_called()
+        self.assertEqual(self._document("甲.pdf")[0], "ready")
 
     def test_reupload_during_parse_supersedes_the_old_job(self):
         entered = threading.Event()
@@ -251,14 +285,48 @@ class IndexConcurrencyTest(IsolatedStorageTestCase):
         self.assertEqual(self._job_status(old_id), INDEX_JOB_SUPERSEDED)
         status, _error, owner = self._document("甲.pdf")
         self.assertEqual((status, owner), ("processing", new_id))
-        self.assertFalse(os.path.exists(knowledge_base.fts_index.fts_db_path(KB)))
-        self.upsert.assert_not_called()
+        self.assertEqual(self.index.available_routes(self.kb_id, None), set())
+        self.publish.assert_not_called()
         self._assert_workspace_removed(old_id)
 
         self._run(new_id, "甲.pdf", path)
         self.assertEqual(seen, [b"v1", b"v2"])
         self.assertEqual(self._document("甲.pdf")[0], "ready")
         self.assertEqual(self._job_status(new_id), INDEX_JOB_COMPLETED)
+
+    def test_job_superseded_during_parse_skips_embedding(self):
+        entered = threading.Event()
+        release = threading.Event()
+        embedded: list[int] = []
+
+        class CountingEmbeddings(FakeEmbeddings):
+            def embed_documents(self, texts):
+                embedded.append(len(texts))
+                return super().embed_documents(texts)
+
+        def block(path, filename):
+            entered.set()
+            release.wait(WAIT)
+
+        self.embeddings = CountingEmbeddings()
+        self.on_load = block
+        old_id, path = self._add_document("甲.pdf", b"v1")
+        thread = self._start(old_id, "甲.pdf", path)
+        self.assertTrue(entered.wait(WAIT))
+
+        new_id = self._reupload("甲.pdf", b"v2")
+        self.on_load = lambda path, filename: None
+        release.set()
+        self._join(thread)
+
+        self.assertEqual(embedded, [], "被替代的任务不应再调用嵌入服务")
+        self.assertEqual(self._job_status(old_id), INDEX_JOB_SUPERSEDED)
+        self.assertEqual(self._document("甲.pdf")[2], new_id)
+        self._assert_workspace_removed(old_id)
+
+        self._run(new_id, "甲.pdf", path)
+        self.assertEqual(len(embedded), 1)
+        self.assertEqual(self._document("甲.pdf")[0], "ready")
 
     def test_delete_during_parse_supersedes_without_residue(self):
         entered = threading.Event()
@@ -283,7 +351,7 @@ class IndexConcurrencyTest(IsolatedStorageTestCase):
 
         self.assertEqual(self._job_status(job_id), INDEX_JOB_SUPERSEDED)
         self.assertIsNone(self._document("甲.pdf"))
-        self.assertFalse(os.path.exists(knowledge_base.fts_index.fts_db_path(KB)))
+        self.assertEqual(self.index.available_routes(self.kb_id, None), set())
         formal = mineru_client.result_dir_for_document(path)
         self.assertFalse(formal.exists(), "被替代的任务不应发布结果目录")
         self._assert_workspace_removed(job_id)
@@ -376,27 +444,27 @@ class IndexConcurrencyTest(IsolatedStorageTestCase):
         self.assertEqual(self._job_status(job_id), INDEX_JOB_FAILED)
         self._assert_workspace_removed(job_id)
 
-    def test_embedding_failure_degrades_the_document_to_fts_only(self):
+    def test_embedding_failure_marks_the_document_error(self):
         self.embeddings = BrokenEmbeddings()
-        job_id, path = self._add_document("甲.pdf")
-
-        self._run(job_id, "甲.pdf", path)
-
-        self.assertEqual(self._document("甲.pdf")[0], "ready")
-        self.upsert.assert_not_called()
-        self.assertIn("甲.pdf", source_state.chroma_disabled_sources(KB))
-        self.assertTrue(os.path.exists(knowledge_base.fts_index.fts_db_path(KB)))
-
-    def test_missing_fts_with_other_ready_documents_requires_full_rebuild(self):
-        self._add_document("旧.pdf", status="ready")
         job_id, path = self._add_document("甲.pdf")
 
         self._run(job_id, "甲.pdf", path)
 
         status, error, _owner = self._document("甲.pdf")
         self.assertEqual(status, "error")
-        self.assertIn("完整重建", error)
-        self.assertFalse(os.path.exists(knowledge_base.fts_index.fts_db_path(KB)))
+        self.assertIn("embedding unavailable", error)
+        self.assertEqual(self._job_status(job_id), INDEX_JOB_FAILED)
+        self.publish.assert_not_called()
+        self.assertEqual(self.index.available_routes(self.kb_id, None), set())
+
+    def test_successful_job_publishes_chunks_and_parent_rows(self):
+        job_id, path = self._add_document("甲.pdf")
+
+        self._run(job_id, "甲.pdf", path)
+
+        self.assertEqual(self._document("甲.pdf")[0], "ready")
+        self.publish.assert_called_once()
+        self.assertTrue(self.index.available_routes(self.kb_id, ["甲.pdf"]))
 
     def test_missing_source_file_fails_the_job(self):
         job_id, path = self._add_document("甲.pdf")
@@ -425,9 +493,9 @@ class IndexConcurrencyTest(IsolatedStorageTestCase):
         self.assertIn("492", error)
         self.assertEqual(self._job_status(job_id), INDEX_JOB_COMPLETED)
         self.assertEqual(
-            {call.args[2] for call in self.upsert.call_args_list}, {"好.pdf"}
+            {call.args[1] for call in self.publish.call_args_list}, {"好.pdf"}
         )
-        self.assertTrue(os.path.exists(knowledge_base.fts_index.fts_db_path(KB)))
+        self.assertTrue(self.index.available_routes(self.kb_id, ["好.pdf"]))
 
     def test_rebuild_with_only_failing_documents_fails_the_job(self):
         def fail(path, filename):
@@ -442,7 +510,7 @@ class IndexConcurrencyTest(IsolatedStorageTestCase):
         status, error, _owner = self._document("坏.pdf")
         self.assertEqual((status, error), ("error", "无法解析"))
         self.assertEqual(self._job_status(job_id), INDEX_JOB_FAILED)
-        self.upsert.assert_not_called()
+        self.publish.assert_not_called()
 
     def test_rebuild_marks_each_document_ready_as_soon_as_it_finishes(self):
         release = threading.Event()
@@ -469,7 +537,7 @@ class IndexConcurrencyTest(IsolatedStorageTestCase):
             while self._document("快.pdf")[0] != "ready" and time.monotonic() < deadline:
                 time.sleep(0.02)
             self.assertEqual(self._document("快.pdf")[0], "ready")
-            self.assertEqual(self._document("慢.pdf")[0], "processing")
+            self.assertEqual(self._document("慢.pdf")[0], "rebuilding")
             self.assertEqual(self._job_status(job_id), "running")
         finally:
             release.set()
@@ -478,16 +546,84 @@ class IndexConcurrencyTest(IsolatedStorageTestCase):
         self.assertEqual(self._document("慢.pdf")[0], "ready")
         self.assertEqual(self._job_status(job_id), INDEX_JOB_COMPLETED)
 
+    def _publish_old_version(self, filename):
+        split = Document(
+            page_content=f"{filename} 旧版本内容",
+            metadata={"source": filename, "page": 0, "parent_id": f"old-{filename}",
+                      "parent_content": f"{filename} 旧父段落"},
+        )
+        parent_store.replace_source(
+            self.kb_id, filename, parent_store.parent_chunk_rows([split])
+        )
+        self.index.publish_source(self.kb_id, filename, [split], [[0.1] * 8])
+
+    def _indexed_texts(self, filename):
+        return [
+            document.page_content
+            for document in self.index.neighbors(self.kb_id, filename, "fixed", 0, 100)
+        ]
+
+    def test_rebuild_keeps_the_old_version_searchable_until_the_new_one_is_published(self):
+        release = threading.Event()
+
+        def block_slow(path, filename):
+            if filename == "慢.pdf":
+                release.wait(WAIT)
+
+        self.on_load = block_slow
+        self._add_document("慢.pdf", status="ready")
+        self._publish_old_version("慢.pdf")
+        job_id = app_storage.index_jobs.prepare_rebuild(KB)
+
+        def target():
+            try:
+                knowledge_base.run_rebuild_job(job_id, KB, container=self._container())
+            except BaseException as exc:  # surfaced by _join
+                self.errors.append(exc)
+
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+        try:
+            deadline = time.monotonic() + WAIT
+            while self._job_status(job_id) != "running" and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual(self._document("慢.pdf")[0], "rebuilding")
+            self.assertEqual(app_storage.documents.ready_sources(KB), ["慢.pdf"])
+            self.assertEqual(self._indexed_texts("慢.pdf"), ["慢.pdf 旧版本内容"])
+        finally:
+            release.set()
+        self._join(thread)
+
+        self.assertEqual(self._document("慢.pdf")[0], "ready")
+        self.assertEqual(self._indexed_texts("慢.pdf"), ["慢.pdf 的审批规则内容"])
+        self.assertEqual(parent_store.load(self.kb_id, ["old-慢.pdf"]), {})
+
+    def test_rebuild_removes_the_old_version_of_a_document_that_fails(self):
+        def fail_for_bad(path, filename):
+            if filename == "坏.pdf":
+                raise DocumentLoadError("无法解析")
+
+        self.on_load = fail_for_bad
+        self._add_document("好.pdf", status="ready")
+        self._add_document("坏.pdf", status="ready")
+        self._publish_old_version("坏.pdf")
+        job_id = app_storage.index_jobs.prepare_rebuild(KB)
+
+        knowledge_base.run_rebuild_job(job_id, KB, container=self._container())
+
+        self.assertEqual(self._document("坏.pdf")[0], "error")
+        self.assertEqual(self._indexed_texts("坏.pdf"), [])
+        self.assertEqual(parent_store.load(self.kb_id, ["old-坏.pdf"]), {})
+        self.assertEqual(app_storage.documents.ready_sources(KB), ["好.pdf"])
+
     def test_rebuild_drops_vectors_of_documents_that_are_no_longer_ready(self):
         self._add_document("好.pdf", status="ready")
         job_id = app_storage.index_jobs.prepare_rebuild(KB)
 
-        with patch.object(
-            knowledge_base.chroma_index, "chroma_delete_stale_sources"
-        ) as delete_stale:
+        with patch.object(self.index, "delete_stale_sources") as delete_stale:
             knowledge_base.run_rebuild_job(job_id, KB, container=self._container())
 
-        delete_stale.assert_called_once_with(KB, {"好.pdf"})
+        delete_stale.assert_called_once_with(self.kb_id, {"好.pdf"})
 
     def test_startup_sweep_removes_only_job_workspaces(self):
         settings = get_settings()

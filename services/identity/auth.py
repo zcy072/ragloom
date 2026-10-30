@@ -15,9 +15,10 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from services.core import sqlite_connections as application_db
-from services.core.container import get_application_container
+from services.core.container import database_file
 from services.core.settings import get_settings
 from services.identity.contracts import AccessTokenPayload
+from services.identity.permissions import decode_permission_list
 
 _TOKEN_VERSION = 4
 _bearer = HTTPBearer(auto_error=False)
@@ -62,7 +63,7 @@ def _signing_key() -> bytes:
     configured = get_settings().auth_secret_key
     if configured:
         return configured.encode("utf-8")
-    db_file = str(get_application_container().database_path())
+    db_file = database_file()
     cached = _signing_key_cache.get(db_file)
     if cached is not None:
         return cached
@@ -74,12 +75,15 @@ def _signing_key() -> bytes:
             _signing_key_cache[db_file] = row[0].encode("utf-8")
             return _signing_key_cache[db_file]
         # 持久化随机密钥，避免普通服务重启导致所有用户令牌全部失效。
-        generated = secrets.token_urlsafe(48)
+        # 并发的首个请求可能同时走到这里：OR IGNORE 让后到者不报错，再读回胜出的那一个。
         conn.execute(
-            "INSERT INTO app_settings (key, value) VALUES ('auth_signing_key', ?)",
-            (generated,),
+            "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('auth_signing_key', ?)",
+            (secrets.token_urlsafe(48),),
         )
-    _signing_key_cache[db_file] = generated.encode("utf-8")
+        stored = conn.execute(
+            "SELECT value FROM app_settings WHERE key = 'auth_signing_key'"
+        ).fetchone()[0]
+    _signing_key_cache[db_file] = stored.encode("utf-8")
     return _signing_key_cache[db_file]
 
 
@@ -144,20 +148,11 @@ def _decode_access_token(token: str) -> AccessTokenPayload:
     return cast(AccessTokenPayload, payload)
 
 
-def _json_list(value: str | None) -> tuple[str, ...]:
-    """安全解析数据库保存的 JSON 字符串列表；格式异常时返回空元组。"""
-    try:
-        parsed = json.loads(value or "[]")
-    except json.JSONDecodeError:
-        return ()
-    return tuple(item for item in parsed if isinstance(item, str)) if isinstance(parsed, list) else ()
-
-
 def _load_principal(payload: AccessTokenPayload) -> Principal:
     """重新读取账号和角色状态，而不是直接信任令牌中携带的旧权限。"""
     username = payload["sub"]
     account_id = payload["aid"]
-    db_file = str(get_application_container().database_path())
+    db_file = database_file()
     with application_db.connect(db_file) as conn:
         row = conn.execute(
             """
@@ -178,8 +173,8 @@ def _load_principal(payload: AccessTokenPayload) -> Principal:
         role=str(row[3] or "未分配"),
         account_id=account_id,
         role_id=int(row[2]) if row[2] is not None else None,
-        menu_permissions=_json_list(row[4]),
-        knowledge_base_permissions=_json_list(row[5]),
+        menu_permissions=tuple(decode_permission_list(row[4])),
+        knowledge_base_permissions=tuple(decode_permission_list(row[5])),
     )
 
 
@@ -206,17 +201,17 @@ def require_menu_permission(permission: str):
     return dependency
 
 
+def _path_knowledge_base_name(request: Request) -> str:
+    """路由使用了不同的路径参数名；在这里统一解析，保证所有接口都做同一套后端鉴权。"""
+    params = request.path_params
+    return str(params.get("kb_name") or params.get("name") or params.get("old_name") or "")
+
+
 def require_knowledge_base_reader(
     request: Request, principal: Principal = Depends(current_principal)
 ) -> Principal:
     """校验当前主体是否有读取请求路径中知识库的权限。"""
-    # 路由使用了不同的路径参数名；在这里统一解析，保证所有读取接口都做同一套后端鉴权。
-    kb_name = str(
-        request.path_params.get("kb_name")
-        or request.path_params.get("name")
-        or request.path_params.get("old_name")
-        or ""
-    )
+    kb_name = _path_knowledge_base_name(request)
     if not kb_name or not principal.can_read_knowledge_base(kb_name):
         raise HTTPException(403, "无权访问该知识库")
     return principal
@@ -228,12 +223,7 @@ def require_knowledge_base_manager(
     """校验当前主体是否有管理权限，并可访问请求路径中的目标知识库。"""
     if not principal.can_manage_knowledge_bases():
         raise HTTPException(403, "无权管理知识库")
-    kb_name = str(
-        request.path_params.get("kb_name")
-        or request.path_params.get("name")
-        or request.path_params.get("old_name")
-        or ""
-    )
+    kb_name = _path_knowledge_base_name(request)
     if kb_name and not principal.can_read_knowledge_base(kb_name):
         raise HTTPException(403, "无权管理该知识库")
     return principal

@@ -1,4 +1,6 @@
+import os
 import sqlite3
+import time
 import unittest
 from unittest.mock import patch
 
@@ -21,7 +23,7 @@ class DashboardStatsTest(IsolatedStorageTestCase):
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             now = conn.execute("SELECT datetime('now')").fetchone()[0]
             conn.executemany(
-                "INSERT INTO knowledge_bases (name, created_at) VALUES (?, ?)",
+                "INSERT INTO knowledge_bases (name, kb_id, created_at) VALUES (?, lower(hex(randomblob(16))), ?)",
                 [("研发知识库", now), ("财务知识库", now), ("空知识库", now)],
             )
             conn.executemany(
@@ -58,7 +60,8 @@ class DashboardStatsTest(IsolatedStorageTestCase):
                     ("session-fin", "assistant", now),
                 ],
             )
-        self.today = now[:10][5:]
+            today = conn.execute("SELECT DATE('now', 'localtime')").fetchone()[0]
+        self.today = today[5:]
 
     def _stats(self, permissions: tuple[str, ...]) -> dict:
         result = knowledge_bases.dashboard_stats(
@@ -100,7 +103,7 @@ class DashboardStatsTest(IsolatedStorageTestCase):
         )
         self.assertEqual(
             result["line_data"],
-            [{"name": self.today, "会话数": 1, "回答数": 1}],
+            [{"name": self.today, "提问数": 1, "回答数": 1}],
         )
 
     def test_company_wide_dashboard_includes_all_knowledge_bases(self):
@@ -122,7 +125,7 @@ class DashboardStatsTest(IsolatedStorageTestCase):
         )
         self.assertEqual(
             result["line_data"],
-            [{"name": self.today, "会话数": 2, "回答数": 2}],
+            [{"name": self.today, "提问数": 2, "回答数": 2}],
         )
 
     def test_dashboard_with_no_knowledge_base_permissions_is_empty(self):
@@ -159,8 +162,41 @@ class DashboardStatsTest(IsolatedStorageTestCase):
         self.assertEqual(document.kb_name, "研发知识库")
         self.assertEqual(document.filename, "规范.pdf")
         self.assertEqual(trend.date[5:], self.today)
-        self.assertEqual((trend.session_count, trend.answer_count), (1, 1))
+        self.assertEqual((trend.question_count, trend.answer_count), (1, 1))
 
+
+    def test_trend_groups_by_local_date(self):
+        previous_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "Asia/Shanghai"
+        time.tzset()
+
+        def restore():
+            if previous_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous_tz
+            time.tzset()
+
+        self.addCleanup(restore)
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.execute("DELETE FROM chat_messages")
+            # 北京时间次日 04:00 的提问应计入次日。
+            utc_evening = conn.execute(
+                "SELECT strftime('%Y-%m-%dT20:00:00+00:00', 'now', '-1 day')"
+            ).fetchone()[0]
+            local_day = conn.execute(
+                "SELECT DATE(?, 'localtime')", (utc_evening,)
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO chat_messages (session_id, role, content, created_at) "
+                "VALUES ('session-rd', 'user', 'q', ?)",
+                (utc_evening,),
+            )
+
+        trend = app_storage.knowledge_bases.dashboard_trend(None, [], days=30)
+
+        self.assertNotEqual(utc_evening[:10], local_day)
+        self.assertEqual([(row.date, row.question_count) for row in trend], [(local_day, 1)])
 
 if __name__ == "__main__":
     unittest.main()

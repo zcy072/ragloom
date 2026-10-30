@@ -23,6 +23,6 @@
 <script setup>
 defineProps({ diagnostics: { type: Object, required: true } });
 const statusLabels = { success: "成功", degraded: "降级为候选顺序", not_run: "未执行" };
-const countLabels = { deduplicated_candidates: "去重后候选块", rerank_input: "送入重排候选块", rerank_returned: "重排返回候选块", variant_candidates: "来自补充查询的候选块", context_spans: "最终上下文段" };
+const countLabels = { deduplicated_candidates: "去重后候选块", rerank_input: "送入重排候选块", rerank_returned: "重排返回候选块", rerank_below_threshold: "低于相关度下限被丢弃", variant_candidates: "来自补充查询的候选块", context_spans: "最终上下文段" };
 const timeLabels = { query_variant: "补充查询生成耗时", retrieval: "检索耗时", rerank: "重排耗时", context: "上下文构建耗时" };
 </script>

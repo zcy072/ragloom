@@ -2,13 +2,14 @@ import { computed, onUnmounted, ref, watch } from 'vue';
 
 import { apiDelete, apiGet, apiPost, apiPut, apiRequest } from '../apiClient';
 import { toast } from '../toast';
+import { isFailedIndexJob, waitForIndexJob } from './watchIndexJob';
 // 与后端 services/documents/use_cases.py 的上传限制保持一致。
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const MAX_UPLOAD_FILENAME_BYTES = 200;
 const POLL_BASE_MS = 2000;
 const POLL_MAX_MS = 16000;
-/** 判断文档是否还在后端索引中。 */
-const isProcessing = document => document.status === 'processing';
+/** 判断文档是否还在后端索引中；重建中的文档旧版本仍可检索，但同样需要轮询。 */
+const isProcessing = document => document.status === 'processing' || document.status === 'rebuilding';
 /** 返回知识库默认的分块长度和重叠长度。 */
 const defaultChunkConfig = () => ({ chunk_size: 800, chunk_overlap: 150 });
 // 上传时优先选择 MinerU；能力探测失败时回退到本地文本解析。
@@ -374,16 +375,25 @@ export function useDocuments({ onKnowledgeBasesChanged, onDocumentDeleted } = {}
       savingParser.value = false;
     }
   };
+  /** 文档记录已删除后，索引清理在后台执行；失败时提醒用户，服务重启后会自动重试。 */
+  const reportIndexCleanupFailure = async (kbName, filename, jobId) => {
+    const job = await waitForIndexJob(kbName, jobId);
+    if (isFailedIndexJob(job)) {
+      toast.error(`文档「${filename}」已删除，但索引清理失败，重启服务后会自动重试`);
+    }
+  };
   /** 删除当前知识库中的文档，并同步刷新相关统计。 */
   const deleteDocument = async (filename) => {
     if (!manageKb.value || deletingDocumentId.value === filename) return false;
     deletingDocumentId.value = filename;
     try {
-      await apiDelete(`/api/documents/${encodeURIComponent(manageKb.value.name)}/${encodeURIComponent(filename)}`);
+      const kbName = manageKb.value.name;
+      const result = await apiDelete(`/api/documents/${encodeURIComponent(kbName)}/${encodeURIComponent(filename)}`);
       onDocumentDeleted?.(filename);
       await fetchDocuments();
       await onKnowledgeBasesChanged?.();
       toast.success('删除成功');
+      if (result?.job_id) reportIndexCleanupFailure(kbName, filename, result.job_id);
       return true;
     } catch (_) {
       toast.error('删除失败');

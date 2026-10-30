@@ -16,6 +16,8 @@ from pydantic import (
 
 from services.chat.sessions import SESSION_TITLE_RENAME_MAX_CHARS
 from services.core.config import (
+    DEFAULT_CHUNK_OVERLAP,
+    DEFAULT_CHUNK_SIZE,
     DOCUMENT_METADATA_MAX_TAG_LENGTH,
     DOCUMENT_METADATA_MAX_TAGS,
     validate_kb_name,
@@ -37,24 +39,28 @@ class SuccessResponse(ApiModel):
     status: Literal["success"] = "success"
 
 
+# 密码上限只挡住超大请求体；bcrypt 的 72 字节限制由 hash_password 给出明确报错。
+_PASSWORD_MAX_CHARS = 256
+
+
 class LoginRequest(ApiModel):
     """Credentials submitted by an account."""
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=_PASSWORD_MAX_CHARS)
 
 
 class RegistrationRequest(ApiModel):
     """New user registration awaiting administrator approval."""
-    username: str
-    name: str
-    phone: str
-    password: str
+    username: str = Field(min_length=1, max_length=80)
+    name: str = Field(min_length=1, max_length=80)
+    phone: str = Field(max_length=32)
+    password: str = Field(max_length=_PASSWORD_MAX_CHARS)
 
 
 class PasswordChangeRequest(ApiModel):
     """Password-change payload for the current account."""
-    old_password: str
-    new_password: str
+    old_password: str = Field(max_length=_PASSWORD_MAX_CHARS)
+    new_password: str = Field(max_length=_PASSWORD_MAX_CHARS)
 
 
 class JobResponse(SuccessResponse):
@@ -87,8 +93,8 @@ class KnowledgeBaseSummary(ApiModel):
 
 class ChunkConfigRequest(ApiModel):
     """Requested parent chunk size and overlap for future index builds."""
-    chunk_size: int = Field(default=800, ge=100, le=4000)
-    chunk_overlap: int = Field(default=150, ge=0)
+    chunk_size: int = Field(default=DEFAULT_CHUNK_SIZE, ge=100, le=4000)
+    chunk_overlap: int = Field(default=DEFAULT_CHUNK_OVERLAP, ge=0)
 
     @model_validator(mode="after")
     def validate_overlap(self):
@@ -160,7 +166,7 @@ class DashboardPiePoint(ApiModel):
 class DashboardLinePoint(ApiModel):
     """Dated session and answer counts consumed by trend charts."""
     name: str
-    session_count: int = Field(serialization_alias="会话数", validation_alias="会话数")
+    question_count: int = Field(serialization_alias="提问数", validation_alias="提问数")
     answer_count: int = Field(serialization_alias="回答数", validation_alias="回答数")
 
 
@@ -287,7 +293,7 @@ class ModelConfigResponse(ApiModel):
     configured: bool
     base_url: str | None
     default_model: str | None
-    is_active: Literal[0, 1]
+    is_active: bool
 
 
 class ModelCheckResponse(ApiModel):
@@ -369,6 +375,256 @@ class RolePageResponse(ApiModel):
     """One page of role administration results and its resolved page metadata."""
 
     items: list[RoleResponse]
+    total: int = Field(ge=0)
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1)
+    total_pages: int = Field(ge=1)
+
+
+class OpsLatency(ApiModel):
+    """Nearest-rank percentiles in milliseconds; null when there are no samples."""
+
+    p50: float | None
+    p95: float | None
+
+
+class OpsDailyPoint(ApiModel):
+    """Chat runs, failures, and total-latency P95 for one day."""
+
+    date: str
+    runs: int
+    errors: int
+    p95_total_ms: float | None
+
+
+class OpsDependencyResponse(ApiModel):
+    """Result of one dependency readiness check."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str
+    ok: bool
+    latency_ms: float
+    detail: str
+
+
+class OpsOverviewResponse(ApiModel):
+    """Chat run statistics for the monitoring overview."""
+
+    days: int
+    total: int
+    truncated: bool
+    status_counts: dict[str, int]
+    error_rate: float
+    latency: dict[str, OpsLatency]
+    daily: list[OpsDailyPoint]
+
+
+class ChatFeedbackRequest(ApiModel):
+    """Rating of one answer: 1 helpful, -1 not helpful, 0 cleared."""
+
+    feedback: Literal[-1, 0, 1]
+
+
+class OpsChatRunResponse(ApiModel):
+    """One recorded chat run; carries the first characters of the question."""
+
+    id: int
+    created_at: str
+    username: str
+    kb_name: str
+    session_id: str
+    question_preview: str
+    model_provider: str
+    status: str
+    rerank_status: str
+    rewritten: bool
+    retrieval_skipped: bool
+    context_spans: int
+    cited_sources: int
+    answer_chars: int
+    retrieval_ms: float | None
+    rerank_ms: float | None
+    context_ms: float | None
+    first_token_ms: float | None
+    generation_ms: float | None
+    total_ms: float
+    elapsed_extra: dict[str, float]
+    error_summary: str
+    trace_id: str
+    feedback: int
+
+
+class OpsChatRunPageResponse(ApiModel):
+    """One page of chat runs."""
+
+    items: list[OpsChatRunResponse]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class OpsIndexJobResponse(IndexJobResponse):
+    """Index job summary that names its knowledge base."""
+
+    kb_name: str
+
+
+class OpsLogResponse(ApiModel):
+    """Tail of the backend log file, oldest line first."""
+
+    available: bool
+    path: str
+    lines: list[str]
+    message: str = ""
+
+
+class AnalyticsDailyPoint(ApiModel):
+    """Questions, distinct askers, and distinct logged-in users on one local date."""
+
+    date: str
+    questions: int
+    active_users: int
+    login_users: int
+
+
+class AnalyticsKnowledgeBaseUsage(ApiModel):
+    """How many users asked how many questions in one knowledge base."""
+
+    kb_name: str
+    users: int
+    questions: int
+    downvotes: int
+
+
+class AnalyticsOverviewResponse(ApiModel):
+    """User activity summary for the selected window."""
+
+    days: int
+    total_users: int
+    pending_users: int
+    new_users: int
+    active_users: int
+    login_users: int
+    login_failures: int
+    questions: int
+    upvotes: int
+    downvotes: int
+    daily: list[AnalyticsDailyPoint]
+    hourly: list[int]
+    knowledge_bases: list[AnalyticsKnowledgeBaseUsage]
+
+
+class AnalyticsUserRow(ApiModel):
+    """One account with its usage statistics for the selected window."""
+
+    id: int
+    username: str
+    name: str
+    status: str
+    role: str
+    created_at: str
+    questions: int
+    sessions: int
+    errors: int
+    upvotes: int
+    downvotes: int
+    logins: int
+    login_failures: int
+    last_question_at: str
+    last_login_at: str
+
+
+class AnalyticsUserPageResponse(ApiModel):
+    """One page of accounts with usage statistics."""
+
+    items: list[AnalyticsUserRow]
+    total: int = Field(ge=0)
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1)
+    total_pages: int = Field(ge=1)
+
+
+class AnalyticsLoginEvent(ApiModel):
+    """One login attempt of an account."""
+
+    created_at: str
+    success: bool
+    reason: str
+    client: str
+
+
+class AnalyticsSession(ApiModel):
+    """One conversation of an account."""
+
+    id: str
+    title: str
+    kb_name: str
+    created_at: str
+    updated_at: str
+    questions: int
+
+
+class AnalyticsQuestion(ApiModel):
+    """One recorded question; carries only its first characters."""
+
+    created_at: str
+    kb_name: str
+    question_preview: str
+    status: str
+    total_ms: float
+    feedback: int
+
+
+class AnalyticsDailyQuestions(ApiModel):
+    date: str
+    questions: int
+
+
+class AnalyticsUserDetailResponse(ApiModel):
+    """Usage statistics, trend, recent logins, sessions, and questions of one account."""
+
+    days: int
+    user: AnalyticsUserRow
+    no_evidence: int
+    daily: list[AnalyticsDailyQuestions]
+    knowledge_bases: list[AnalyticsKnowledgeBaseUsage]
+    recent_logins: list[AnalyticsLoginEvent]
+    recent_sessions: list[AnalyticsSession]
+    recent_questions: list[AnalyticsQuestion]
+
+
+class AnalyticsConversationMessage(ApiModel):
+    role: str
+    content: str
+    created_at: str
+    source_names: list[str]
+    feedback: int
+
+
+class AnalyticsConversationResponse(ApiModel):
+    """Full conversation of one account; reading it writes an audit record."""
+
+    session_id: str
+    title: str
+    kb_name: str
+    username: str
+    messages: list[AnalyticsConversationMessage]
+
+
+class AnalyticsAuditRecord(ApiModel):
+    id: int
+    created_at: str
+    actor_username: str
+    action: str
+    target_username: str
+    detail: str
+
+
+class AnalyticsAuditPageResponse(ApiModel):
+    """One page of admin audit records, newest first."""
+
+    items: list[AnalyticsAuditRecord]
     total: int = Field(ge=0)
     page: int = Field(ge=1)
     page_size: int = Field(ge=1)

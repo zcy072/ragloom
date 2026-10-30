@@ -1,3 +1,4 @@
+import sqlite3
 import unittest
 
 import app_storage
@@ -79,7 +80,20 @@ class IdentityStoresTest(IsolatedStorageTestCase):
         )
         with self.assertRaisesRegex(ValueError, "仍有用户使用"):
             roles.delete_role(app_storage.DB_FILE, role["id"])
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.execute(
+                "INSERT INTO chat_runs (created_at, account_id, username, kb_name, session_id, status) "
+                "VALUES ('2026-01-01', ?, 'u', 'kb', 's', 'success')",
+                (user["id"],),
+            )
         accounts.delete_user(app_storage.DB_FILE, user["id"])
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM chat_runs WHERE account_id = ?", (user["id"],)
+                ).fetchone()[0],
+                0,
+            )
         roles.delete_role(app_storage.DB_FILE, role["id"])
         self.assertNotIn(
             "研发成员",

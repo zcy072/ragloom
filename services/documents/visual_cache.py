@@ -13,8 +13,8 @@ from services.documents.visual_candidates import VisualCandidate
 
 VISUAL_CACHE_FILENAME = "pymodel_visual_index.json"
 STANDALONE_IMAGE_CACHE_FILENAME = "pymodel_image_visual_index.json"
-VISUAL_PROMPT_VERSION = "mineru-visual-v2"
-STANDALONE_IMAGE_PROMPT_VERSION = "standalone-image-visual-v2"
+VISUAL_PROMPT_VERSION = "mineru-visual-v3"
+STANDALONE_IMAGE_PROMPT_VERSION = "standalone-image-visual-v3"
 
 
 def _cache_path(file_path: str) -> Path:

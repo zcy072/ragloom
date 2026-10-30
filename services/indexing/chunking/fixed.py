@@ -94,8 +94,8 @@ def split_documents(
 ):
     """构建所有知识库共用的固定父子切片路线。
 
-    小子切片用于精确召回，大父段落仅在 FTS5 保存一次并在命中后恢复；这样回答
-    上下文完整，又不必把完整父段落重复写入每个 Chroma 向量。
+    小子切片用于精确召回，大父段落仅在 SQLite parent_chunks 保存一次并在命中后恢复；这样回答
+    上下文完整，又不必把完整父段落重复写入每个 Milvus 向量。
     """
     normalized_documents: list[LCDocument] = []
     for document in docs:
@@ -107,7 +107,7 @@ def split_documents(
 
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-    separators = list(DEFAULT_CHUNK_SEPARATORS)
+    separators: list[str] = list(DEFAULT_CHUNK_SEPARATORS)
     child_chunk_size = max(100, int(chunk_size / 4))
     # 父子切分器共用边界并按比例重叠，保证子切片偏移相对未改动父段落仍然有效。
     parent_splitter = RecursiveCharacterTextSplitter(
@@ -162,7 +162,7 @@ def split_documents(
                 splits.append(child)
 
     splits = _deduplicate_adjacent_splits(splits)
-    # 仅一个临时子切片携带 parent_content 给 FTS 写入器；Chroma 元数据只保留 parent_id。
+    # 仅一个临时子切片携带 parent_content 给父块表写入；Milvus 记录只保留 parent_id。
     seen_parents: set[str] = set()
     for split in splits:
         parent_id = str(split.metadata["parent_id"])

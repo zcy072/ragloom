@@ -14,21 +14,17 @@ class AccessTokenPayload(TypedDict):
     cred: str
 
 
-AuthenticatedAccount = TypedDict(
-    "AuthenticatedAccount",
-    {
-        "id": int,
-        "name": str,
-        "phone": str,
-        "status": str,
-        "role_id": int | None,
-        "password": str,
-        "username": str,
-        "role": str,
-        "knowledge_base_permissions": list[str],
-        "menu_permissions": list[str],
-    },
-)
+class AuthenticatedAccount(TypedDict):
+    id: int
+    name: str
+    phone: str
+    status: str
+    role_id: int | None
+    password: str
+    username: str
+    role: str
+    knowledge_base_permissions: list[str]
+    menu_permissions: list[str]
 
 
 class UserSummary(TypedDict):

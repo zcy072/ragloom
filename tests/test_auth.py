@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import sqlite3
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -15,6 +16,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 import api
 import app_storage
 from routers import auth, schemas
+from routers import chat as chat_router
 from routers import roles as role_router
 from routers import users as user_router
 from services.core import config as application_config
@@ -26,6 +28,7 @@ from services.core.errors import (
 )
 from services.identity import auth as auth_service
 from services.identity import rate_limit
+from services.identity import use_cases as identity_use_cases
 from tests.support import IsolatedStorageTestCase
 
 
@@ -93,6 +96,36 @@ class AuthTest(IsolatedStorageTestCase):
             )
         self.assertEqual(error.exception.status_code, 401)
 
+    def test_concurrent_first_requests_agree_on_one_generated_signing_key(self):
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.execute("DELETE FROM app_settings WHERE key = 'auth_signing_key'")
+        auth_service._signing_key_cache.clear()
+        start = threading.Barrier(8)
+        keys: list[bytes] = []
+        errors: list[Exception] = []
+
+        def first_request():
+            try:
+                start.wait()
+                keys.append(auth_service._signing_key())
+            except Exception as exc:  # 竞争失败（IntegrityError 等）会落在这里
+                errors.append(exc)
+
+        with patch.dict("os.environ", {"AUTH_SECRET_KEY": ""}):
+            threads = [threading.Thread(target=first_request) for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(set(keys)), 1)
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            (stored,) = conn.execute(
+                "SELECT value FROM app_settings WHERE key = 'auth_signing_key'"
+            ).fetchone()
+        self.assertEqual(keys[0], stored.encode("utf-8"))
+
     def test_new_access_tokens_read_the_current_ttl_setting(self):
         with patch.object(
             auth_service,
@@ -134,7 +167,7 @@ class AuthTest(IsolatedStorageTestCase):
     def test_account_permissions_filter_knowledge_bases(self):
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             conn.executemany(
-                "INSERT INTO knowledge_bases (name, created_at) VALUES (?, ?)",
+                "INSERT INTO knowledge_bases (name, kb_id, created_at) VALUES (?, lower(hex(randomblob(16))), ?)",
                 [("研发知识库", application_config.db_now()), ("财务知识库", application_config.db_now())],
             )
             conn.execute(
@@ -211,6 +244,22 @@ class AuthTest(IsolatedStorageTestCase):
                 )
             )["status"],
             "success",
+        )
+
+    def test_registration_rejects_malformed_username_and_phone(self):
+        for username, phone in (("带 空格", ""), ("tab\tname", ""), ("good", "不是号码")):
+            with self.subTest(username=username, phone=phone):
+                with self.assertRaises(InvalidRequestError):
+                    auth.register_user(
+                        schemas.RegistrationRequest(
+                            username=username, name="姓名", phone=phone, password="password-1"
+                        )
+                    )
+        auth.register_user(
+            schemas.RegistrationRequest(
+                username="张三.li@dev-1", name="张三", phone="+86 138-0000-0000",
+                password="password-1",
+            )
         )
 
     def test_password_over_bcrypt_limit_is_a_client_error_not_a_server_crash(self):
@@ -341,6 +390,226 @@ class AuthTest(IsolatedStorageTestCase):
             )
         self.assertEqual(error.exception.code, "permission_delegation_denied")
 
+
+    def _limited_role_manager(self):
+        """建一个只有用户管理和角色管理菜单、没有知识库权限的账号，返回其主体。"""
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.execute(
+                "INSERT INTO roles (name, description, menu_permissions, knowledge_base_permissions, created_at) VALUES ('局部管理员', '', '[\"用户管理\", \"角色管理\"]', '[]', ?)",
+                (application_config.db_now(),),
+            )
+            role_id = conn.execute("SELECT id FROM roles WHERE name = '局部管理员'").fetchone()[0]
+            conn.execute(
+                "INSERT INTO accounts (username, name, password, status, role_id, created_at) VALUES ('manager', '局部管理员', ?, '正常', ?, ?)",
+                (application_config.hash_password("password"), role_id, application_config.db_now()),
+            )
+        return auth_service.current_principal(
+            HTTPAuthorizationCredentials(
+                scheme="Bearer",
+                credentials=auth.login(
+                    schemas.LoginRequest(username="manager", password="password")
+                )["access_token"],
+            )
+        )
+
+    def test_limited_manager_cannot_shrink_a_role_with_more_permissions(self):
+        manager = self._limited_role_manager()
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.execute(
+                "INSERT INTO roles (name, description, menu_permissions, knowledge_base_permissions, created_at) VALUES ('平级角色', '', '[\"用户管理\", \"模型配置\"]', '[]', ?)",
+                (application_config.db_now(),),
+            )
+            peer_role_id = conn.execute("SELECT id FROM roles WHERE name = '平级角色'").fetchone()[0]
+        with self.assertRaises(AccessDeniedError) as error:
+            role_router.update_role(
+                peer_role_id, schemas.RolePermissionsRequest(menu_permissions=[]), manager
+            )
+        self.assertEqual(error.exception.code, "target_permissions_exceed_actor")
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            menus = conn.execute(
+                "SELECT menu_permissions FROM roles WHERE id = ?", (peer_role_id,)
+            ).fetchone()[0]
+        self.assertIn("模型配置", menus)
+
+    def test_super_administrator_role_permissions_cannot_be_edited(self):
+        manager = self._limited_role_manager()
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            super_role_id = conn.execute(
+                "SELECT id FROM roles WHERE name = '超级管理员'"
+            ).fetchone()[0]
+        with self.assertRaises(AccessDeniedError) as error:
+            role_router.update_role(
+                super_role_id, schemas.RolePermissionsRequest(menu_permissions=[]), manager
+            )
+        self.assertEqual(error.exception.code, "protected_role")
+
+    def test_limited_manager_can_edit_a_role_within_its_scope(self):
+        manager = self._limited_role_manager()
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.execute(
+                "INSERT INTO roles (name, description, menu_permissions, knowledge_base_permissions, created_at) VALUES ('下级角色', '', '[\"用户管理\"]', '[]', ?)",
+                (application_config.db_now(),),
+            )
+            role_id = conn.execute("SELECT id FROM roles WHERE name = '下级角色'").fetchone()[0]
+        role_router.update_role(
+            role_id, schemas.RolePermissionsRequest(menu_permissions=["角色管理"]), manager
+        )
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            menus = conn.execute(
+                "SELECT menu_permissions FROM roles WHERE id = ?", (role_id,)
+            ).fetchone()[0]
+        self.assertEqual(menus, '["角色管理"]')
+
+    def test_unknown_username_still_runs_one_bcrypt_check(self):
+        with patch.object(
+            application_config.bcrypt, "checkpw", wraps=application_config.bcrypt.checkpw
+        ) as checkpw:
+            with self.assertRaises(AuthenticationError):
+                identity_use_cases.authenticate_account(
+                    db_file=app_storage.DB_FILE, username="nobody", password="password"
+                )
+        self.assertEqual(checkpw.call_count, 1)
+
+
+    def _limited_user_manager(self):
+        """建一个只有用户管理权限的账号，返回其主体。"""
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.execute(
+                "INSERT INTO roles (name, description, menu_permissions, knowledge_base_permissions, created_at) VALUES ('用户管理员', '', '[\"用户管理\"]', '[]', ?)",
+                (application_config.db_now(),),
+            )
+            role_id = conn.execute("SELECT id FROM roles WHERE name = '用户管理员'").fetchone()[0]
+            conn.execute(
+                "INSERT INTO accounts (username, name, password, status, role_id, created_at) VALUES ('usermgr', '用户管理员', ?, '正常', ?, ?)",
+                (application_config.hash_password("password"), role_id, application_config.db_now()),
+            )
+            conn.execute(
+                "INSERT INTO accounts (username, name, password, status, created_at) VALUES ('plain', '普通用户', ?, '正常', ?)",
+                (application_config.hash_password("password"), application_config.db_now()),
+            )
+            plain_id = conn.execute("SELECT id FROM accounts WHERE username = 'plain'").fetchone()[0]
+        manager = auth_service.current_principal(
+            HTTPAuthorizationCredentials(
+                scheme="Bearer",
+                credentials=auth.login(
+                    schemas.LoginRequest(username="usermgr", password="password")
+                )["access_token"],
+            )
+        )
+        return manager, plain_id
+
+    def test_limited_manager_cannot_manage_an_account_with_more_permissions(self):
+        manager, _plain_id = self._limited_user_manager()
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            admin_id, admin_role_id = conn.execute(
+                "SELECT id, role_id FROM accounts WHERE username = ?",
+                (application_config.INITIAL_ADMIN_USERNAME,),
+            ).fetchone()
+        for operation in (
+            lambda: user_router.delete_user(admin_id, manager),
+            lambda: user_router.update_user_status(
+                admin_id, schemas.UserStatusRequest(status="停用"), manager
+            ),
+            lambda: user_router.update_user_role(
+                admin_id, schemas.UserRoleRequest(role_id=admin_role_id), manager
+            ),
+        ):
+            with self.assertRaises(AccessDeniedError) as error:
+                operation()
+            self.assertEqual(error.exception.code, "target_permissions_exceed_actor")
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            self.assertEqual(
+                conn.execute("SELECT status FROM accounts WHERE id = ?", (admin_id,)).fetchone()[0],
+                "正常",
+            )
+
+    def test_limited_manager_can_still_manage_an_account_within_its_scope(self):
+        manager, plain_id = self._limited_user_manager()
+        user_router.update_user_status(plain_id, schemas.UserStatusRequest(status="停用"), manager)
+        user_router.delete_user(plain_id, manager)
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            self.assertIsNone(
+                conn.execute("SELECT 1 FROM accounts WHERE id = ?", (plain_id,)).fetchone()
+            )
+
+    def test_registration_username_race_reports_a_taken_name_not_a_server_error(self):
+        from services.core.errors import InvalidStateError
+        from services.identity import accounts, use_cases
+
+        with patch.object(
+            accounts, "register_user", side_effect=sqlite3.IntegrityError("UNIQUE constraint failed")
+        ), self.assertRaises(InvalidStateError) as error:
+            use_cases.register_account(
+                db_file=app_storage.DB_FILE,
+                now=application_config.db_now,
+                username="racer",
+                name="并发",
+                phone="",
+                password="racer-pass-1",
+            )
+        self.assertEqual(error.exception.code, "username_already_registered")
+
+    def test_unexpected_registration_error_does_not_leak_internal_details(self):
+        from services.core.errors import OperationFailedError
+        from services.identity import accounts, use_cases
+
+        with patch.object(
+            accounts, "register_user", side_effect=sqlite3.OperationalError("disk I/O error at /app/storage")
+        ), self.assertLogs("services.identity.use_cases", "ERROR"), self.assertRaises(
+            OperationFailedError
+        ) as error:
+            use_cases.register_account(
+                db_file=app_storage.DB_FILE,
+                now=application_config.db_now,
+                username="broken",
+                name="异常",
+                phone="",
+                password="broken-pass-1",
+            )
+        self.assertNotIn("/app/storage", error.exception.public_message)
+
+    def test_duplicate_role_name_reports_a_clean_conflict(self):
+        from services.core.errors import InvalidStateError
+        from services.identity import use_cases
+
+        with self.assertRaises(InvalidStateError) as error:
+            use_cases.create_role(
+                db_file=app_storage.DB_FILE,
+                now=application_config.db_now,
+                name="超级管理员",
+                description="",
+            )
+        self.assertEqual(error.exception.code, "role_already_exists")
+        self.assertNotIn("UNIQUE", error.exception.public_message)
+
+    def test_login_and_registration_reject_blank_or_oversized_fields(self):
+        from pydantic import ValidationError
+
+        for build in (
+            lambda: schemas.LoginRequest(username="  ", password="x"),
+            lambda: schemas.LoginRequest(username="a" * 81, password="x"),
+            lambda: schemas.RegistrationRequest(
+                username="", name="名字", phone="", password="password-1"
+            ),
+            lambda: schemas.RegistrationRequest(
+                username="u", name="名字", phone="1" * 33, password="password-1"
+            ),
+            lambda: schemas.RegistrationRequest(
+                username="u", name="名字", phone="", password="p" * 257
+            ),
+        ):
+            with self.assertRaises(ValidationError):
+                build()
+
+    def test_malformed_permission_columns_degrade_to_no_permissions(self):
+        from services.identity.permissions import decode_permission_list
+
+        with self.assertLogs("services.identity.permissions", "WARNING"):
+            self.assertEqual(decode_permission_list("not-json"), [])
+        with self.assertLogs("services.identity.permissions", "WARNING"):
+            self.assertEqual(decode_permission_list('{"a": 1}'), [])
+        self.assertEqual(decode_permission_list('["用户管理", 3]'), ["用户管理"])
+        self.assertEqual(decode_permission_list(None), [])
 
 class EventWindowTest(unittest.TestCase):
     def setUp(self):
@@ -599,3 +868,96 @@ class ClientAddressTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChatRequestLimiterTest(unittest.TestCase):
+    def setUp(self):
+        self.now = 1000.0
+        self.limiter = rate_limit.ChatRequestLimiter(
+            max_concurrent=2, per_minute=3, stale_seconds=900, clock=lambda: self.now
+        )
+
+    def test_concurrent_streams_are_capped_per_account_and_freed_on_release(self):
+        first = self.limiter.acquire(1)
+        self.limiter.acquire(1)
+        with self.assertRaises(RateLimitedError) as error:
+            self.limiter.acquire(1)
+        self.assertEqual(error.exception.code, "chat_concurrency_limited")
+        # 其他账号不受影响。
+        self.limiter.acquire(2)()
+        first()
+        first()  # 重复释放不会多还名额。
+        self.limiter.acquire(1)
+
+    def test_requests_per_minute_are_capped_until_the_window_passes(self):
+        for _ in range(3):
+            self.limiter.acquire(1)()
+        with self.assertRaises(RateLimitedError) as error:
+            self.limiter.acquire(1)
+        self.assertEqual(error.exception.code, "chat_rate_limited")
+        self.assertEqual(error.exception.retry_after_seconds, 60)
+        self.now += 60
+        self.limiter.acquire(1)
+
+    def test_rejected_requests_do_not_use_up_the_minute_quota(self):
+        self.limiter.acquire(1)
+        self.limiter.acquire(1)
+        for _ in range(5):
+            with self.assertRaises(RateLimitedError):
+                self.limiter.acquire(1)
+        self.now += 1000  # 两个未释放的名额已过期，每分钟计数也已清空。
+        self.limiter.acquire(1)
+
+    def test_zero_disables_both_limits(self):
+        limiter = rate_limit.ChatRequestLimiter(max_concurrent=0, per_minute=0)
+        for _ in range(20):
+            limiter.acquire(1)
+
+
+class ChatRateLimitHttpTest(IsolatedStorageTestCase):
+    def setUp(self):
+        super().setUp()
+        app_storage.initialize_database()
+        app_storage.bootstrap_defaults()
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.execute(
+                "INSERT INTO knowledge_bases (name, kb_id, created_at) VALUES ('技术部', lower(hex(randomblob(16))), ?)",
+                (application_config.db_now(),),
+            )
+
+    def _chat(self, count):
+        async def events():
+            yield "data: {}\n\n"
+
+        async def fake_chat(*_args, **_kwargs):
+            return SimpleNamespace(events=events(), refresh_summary=lambda: asyncio.sleep(0))
+
+        async def run():
+            transport = httpx.ASGITransport(app=api.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                login = await client.post(
+                    "/api/login",
+                    json={
+                        "username": application_config.INITIAL_ADMIN_USERNAME,
+                        "password": application_config.initial_admin_password(),
+                    },
+                )
+                headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+                return [
+                    await client.post(
+                        "/api/chat", json={"question": "问题", "kb_name": "技术部"}, headers=headers
+                    )
+                    for _ in range(count)
+                ]
+
+        with patch.dict("os.environ", {"CHAT_USER_MAX_CONCURRENT": "1", "CHAT_USER_PER_MINUTE": "2"}):
+            rate_limit.reset_auth_rate_limiter()
+            with patch.object(chat_router.chat_service, "chat", side_effect=fake_chat):
+                return asyncio.run(run())
+
+    def test_finished_streams_free_the_slot_and_the_minute_cap_returns_429(self):
+        responses = self._chat(3)
+        # 并发上限是 1：前两次能成功说明流结束后名额已释放。
+        self.assertEqual([response.status_code for response in responses], [200, 200, 429])
+        self.assertEqual(responses[2].json()["code"], "chat_rate_limited")
+        self.assertIn("Retry-After", responses[2].headers)

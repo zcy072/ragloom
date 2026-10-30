@@ -137,8 +137,29 @@ def list_users_page(
     }
 
 
+def find_account_permissions(
+    db_file: str, user_id: int
+) -> tuple[list[str], list[str]] | None:
+    """Return one account's current (menu, knowledge-base) permissions, or None if absent."""
+    with application_db.connect(db_file) as conn:
+        row = conn.execute(
+            """
+            SELECT r.menu_permissions, r.knowledge_base_permissions
+            FROM accounts a LEFT JOIN roles r ON a.role_id = r.id
+            WHERE a.id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return decode_permission_list(row[0]), decode_permission_list(row[1])
+
+
 def delete_user(db_file: str, user_id: int) -> None:
-    """Delete an account and all of its chat data."""
+    """Delete an account, its chat data, chat run records, and login events.
+
+    Admin audit rows stay: they record who viewed the account and keep the username.
+    """
     with application_db.connect(db_file) as conn:
         if not conn.execute("SELECT 1 FROM accounts WHERE id = ?", (user_id,)).fetchone():
             raise ValueError("用户不存在")
@@ -153,6 +174,9 @@ def delete_user(db_file: str, user_id: int) -> None:
             (user_id,),
         )
         conn.execute("DELETE FROM chat_sessions WHERE account_id = ?", (user_id,))
+        conn.execute("DELETE FROM chat_runs WHERE account_id = ?", (user_id,))
+        conn.execute("DELETE FROM chat_traces WHERE account_id = ?", (user_id,))
+        conn.execute("DELETE FROM login_events WHERE account_id = ?", (user_id,))
         conn.execute("DELETE FROM accounts WHERE id = ?", (user_id,))
 
 

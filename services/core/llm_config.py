@@ -163,6 +163,9 @@ def create_rewrite_llm(model_config: ModelConfig) -> "ChatOpenAI":
         model_config,
         temperature=0,
         max_completion_tokens=_REWRITE_LLM_MAX_TOKENS,
+        # 调用方用 wait_for 限时；SDK 不再自行重试，避免取消前在后台多次请求。
+        timeout=application_config.CHAT_QUERY_MODEL_TIMEOUT_SECONDS,
+        max_retries=0,
     )
 
 

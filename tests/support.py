@@ -7,7 +7,15 @@ import unittest
 import app_storage
 from services.core import container as application_container
 from services.identity import rate_limit
-from services.retrieval import chroma as chroma_index
+from services.retrieval import retriever
+from services.retrieval.chunk_index import set_chunk_index
+from tests.in_memory_index import InMemoryChunkIndex
+
+
+def _reset_retrieval_caches() -> None:
+    """检索器、路线和查询向量缓存都是进程级的，按知识库名为键，测试之间必须清空。"""
+    retriever.clear_retriever_cache()
+    retriever._query_vector_cache.clear()
 
 
 class _IsolatedStorageMixin:
@@ -18,9 +26,9 @@ class _IsolatedStorageMixin:
             "STORAGE_DIR",
             "DATA_DIR",
             "DB_FILE",
-            "VECTOR_STORE_DIR",
-            "CHROMA_PATH",
             "MINERU_RESULTS_DIR",
+            "INITIAL_ADMIN_PASSWORD",
+            "LOG_FILE_BACKUPS",
         )
         self._original_storage_environment = {
             key: os.environ.get(key) for key in self._storage_environment_keys
@@ -29,15 +37,13 @@ class _IsolatedStorageMixin:
             app_storage.STORAGE_DIR,
             app_storage.DATA_DIR,
             app_storage.DB_FILE,
-            chroma_index.CHROMA_PATH,
-            chroma_index._chroma_client,
         )
 
         app_storage.STORAGE_DIR = os.path.join(root, "storage")
         app_storage.DATA_DIR = os.path.join(app_storage.STORAGE_DIR, "data")
         app_storage.DB_FILE = os.path.join(app_storage.DATA_DIR, "app_data.sqlite3")
-        chroma_index.CHROMA_PATH = os.path.join(app_storage.STORAGE_DIR, "chroma")
-        chroma_index._chroma_client = None
+        set_chunk_index(InMemoryChunkIndex())
+        _reset_retrieval_caches()
         application_container._default_container = None
         rate_limit.reset_auth_rate_limiter()
         os.environ.update(
@@ -45,34 +51,25 @@ class _IsolatedStorageMixin:
                 "STORAGE_DIR": app_storage.STORAGE_DIR,
                 "DATA_DIR": app_storage.DATA_DIR,
                 "DB_FILE": app_storage.DB_FILE,
-                "VECTOR_STORE_DIR": os.path.join(
-                    app_storage.STORAGE_DIR, "vector_store"
-                ),
-                "CHROMA_PATH": chroma_index.CHROMA_PATH,
                 "MINERU_RESULTS_DIR": os.path.join(
                     app_storage.STORAGE_DIR, "mineru_results"
                 ),
+                "INITIAL_ADMIN_PASSWORD": "test-admin-password",
+                # 应用启动会配置日志；测试只输出到标准输出，不写文件日志。
+                "LOG_FILE_BACKUPS": "0",
             }
         )
         os.makedirs(app_storage.DATA_DIR, exist_ok=True)
         self.addCleanup(self._tear_down_isolated_storage)
 
     def _tear_down_isolated_storage(self) -> None:
-        current_client = chroma_index._chroma_client
-        original_client = self._original_storage_paths[-1]
-        if current_client is not None and current_client is not original_client:
-            try:
-                current_client.close()
-            except Exception:
-                pass
-
         (
             app_storage.STORAGE_DIR,
             app_storage.DATA_DIR,
             app_storage.DB_FILE,
-            chroma_index.CHROMA_PATH,
-            chroma_index._chroma_client,
         ) = self._original_storage_paths
+        set_chunk_index(None)
+        _reset_retrieval_caches()
         for key, value in self._original_storage_environment.items():
             if value is None:
                 os.environ.pop(key, None)

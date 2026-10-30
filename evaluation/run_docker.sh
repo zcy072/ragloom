@@ -15,10 +15,13 @@ if [ ! -d "$EVAL_DIR/set" ]; then
 fi
 
 cd "$(dirname "$0")/.."
+# 评测需要真实的 Milvus；单元测试才用 --no-deps。
+docker compose up -d --wait milvus
 exec docker compose run --rm --no-deps \
   -v "$PWD:/app" \
   -v "$EVAL_DIR:/eval" \
   -e SILICONFLOW_API_KEY \
+  -e MILVUS_COLLECTION_PREFIX="${MILVUS_COLLECTION_PREFIX:-ragloom_eval_}" \
   -e PYTHONPYCACHEPREFIX=/tmp/pymodel-pycache \
   backend python evaluation/run_eval.py \
   --data /eval/set --storage /eval/storage --output /eval/report.json "$@"

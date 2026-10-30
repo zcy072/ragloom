@@ -61,14 +61,14 @@ def normalize_pdf_parser_mode(value: str | None) -> str:
 
 
 def normalize_document_parser_mode(filename: str, value: str | None) -> str:
-    """按文件类型校验解析方式，并兼容旧图片记录的本地 OCR 默认值。"""
+    """按文件类型校验解析方式；图片收到通用默认值 native_text 时按本地 OCR 处理。"""
     if is_image_filename(filename):
         if value is None:
             return DEFAULT_IMAGE_PARSER_MODE
         if not isinstance(value, str):
             raise ValueError("文档解析方式必须是文本")
         mode = value.strip().lower()
-        # 历史版本把所有非 PDF/DOCX 都记录为 native_text；保留其本地处理边界。
+        # 通用默认值是 native_text（参数默认值、回退值都用它），对图片意味着本地处理。
         if not mode or mode == PDF_PARSER_NATIVE_TEXT:
             return PDF_PARSER_PADDLE_OCR
         if mode not in IMAGE_PARSER_LABELS:

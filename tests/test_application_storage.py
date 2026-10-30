@@ -43,6 +43,9 @@ class ApplicationStorageTest(unittest.TestCase):
                     application_config.validate_kb_name(value)
                 with self.assertRaises(ValueError):
                     application_config.validate_filename(value)
+            # “全公司”是角色权限里表示全部知识库的保留值，新建和改名都会经过这里。
+            with self.assertRaises(ValueError):
+                application_config.validate_kb_name(" 全公司 ")
 
             self.assertEqual(
                 app.documents.document_path("研发部", "方案.pdf"),
@@ -93,7 +96,7 @@ class ApplicationStorageTest(unittest.TestCase):
             app.initialize_database()
             with sqlite3.connect(app.DB_FILE) as conn:
                 conn.execute(
-                    "INSERT INTO knowledge_bases (name, created_at) VALUES (?, ?)",
+                    "INSERT INTO knowledge_bases (name, kb_id, created_at) VALUES (?, lower(hex(randomblob(16))), ?)",
                     ("自定义业务库", application_config.db_now()),
                 )
 
@@ -107,6 +110,37 @@ class ApplicationStorageTest(unittest.TestCase):
                     ).fetchall()
                 ]
             self.assertEqual(names, ["自定义业务库"])
+
+    def test_unset_initial_password_is_random_and_written_to_a_private_file(self):
+        from services.core import bootstrap
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            app = self.load_app_storage(data_dir)
+            app.initialize_database()
+            with patch.dict(os.environ, {"INITIAL_ADMIN_PASSWORD": ""}), self.assertLogs(
+                "services.core.bootstrap", "WARNING"
+            ) as logs:
+                app.bootstrap_defaults()
+
+            path = os.path.join(data_dir, bootstrap.INITIAL_ADMIN_PASSWORD_FILENAME)
+            with open(path, encoding="utf-8") as handle:
+                password = handle.read().strip()
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            self.assertGreaterEqual(len(password), 16)
+            self.assertNotIn(password, "\n".join(logs.output))
+            with sqlite3.connect(app.DB_FILE) as conn:
+                stored = conn.execute(
+                    "SELECT password FROM accounts WHERE username = ?",
+                    (application_config.INITIAL_ADMIN_USERNAME,),
+                ).fetchone()[0]
+            self.assertTrue(application_config.verify_password(password, stored))
+            self.assertFalse(application_config.verify_password("admin888", stored))
+
+            # 已有账号时不再生成或覆盖密码文件。
+            os.remove(path)
+            with patch.dict(os.environ, {"INITIAL_ADMIN_PASSWORD": ""}):
+                app.bootstrap_defaults()
+            self.assertFalse(os.path.exists(path))
 
     def test_fresh_database_uses_current_schema(self):
         with tempfile.TemporaryDirectory() as data_dir:
@@ -189,6 +223,27 @@ class ApplicationStorageTest(unittest.TestCase):
                     "SELECT status FROM documents WHERE filename = 'current.txt'"
                 ).fetchone()[0]
             self.assertEqual(status, "success")
+
+    def test_rename_rewrites_only_the_document_path_prefix(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            app = self.load_app_storage(data_dir)
+            app.initialize_database()
+            app.knowledge_bases.create("研发", 800, 150)
+            old_path = os.path.join(data_dir, "研发", "研发规范.pdf")
+            with sqlite3.connect(app.DB_FILE) as conn:
+                conn.execute(
+                    "INSERT INTO documents (kb_name, filename, path, size, uploaded_at, status) "
+                    "VALUES ('研发', '研发规范.pdf', ?, 0, '', 'ready')",
+                    (old_path,),
+                )
+
+            app.knowledge_bases.rename_relational_data(
+                "研发", "产品", os.path.join(data_dir, "研发"), os.path.join(data_dir, "产品")
+            )
+
+            with sqlite3.connect(app.DB_FILE) as conn:
+                path = conn.execute("SELECT path FROM documents").fetchone()[0]
+            self.assertEqual(path, os.path.join(data_dir, "产品", "研发规范.pdf"))
 
     def test_future_database_schema_version_is_rejected(self):
         with tempfile.TemporaryDirectory() as data_dir:

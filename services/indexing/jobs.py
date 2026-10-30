@@ -9,6 +9,7 @@ from typing import cast
 
 from services.core import sqlite_connections as application_db
 from services.indexing.contracts import (
+    CrossKnowledgeBaseJobSummary,
     IndexJob,
     IndexJobOperation,
     IndexJobStatus,
@@ -79,8 +80,8 @@ class IndexJobStore:
         *,
         vacuum_min_free_pages: int,
         vacuum_min_free_ratio: float,
-        history_retention_days: int,
-        history_max_per_kb: int,
+        history_retention_days: Callable[[], int],
+        history_max_per_kb: Callable[[], int],
         logger: logging.Logger,
     ) -> None:
         """保存数据库连接、校验函数和数据库压缩阈值等依赖。"""
@@ -202,7 +203,11 @@ class IndexJobStore:
         return cursor.rowcount == 1
 
     def prepare_rebuild(self, kb_name: str) -> str:
-        """登记新的全库重建任务，并使同知识库的旧重建任务失效。"""
+        """登记新的全库重建任务，并使同知识库的旧重建任务失效。
+
+        已就绪的文档标为 rebuilding：旧版本继续参与检索，直到新版本发布替换它；
+        其余文档标为 processing。
+        """
         kb_name = self._validate_kb_name(kb_name)
         job_id = uuid.uuid4().hex
         with application_db.connect(self._db_file()) as conn:
@@ -241,7 +246,8 @@ class IndexJobStore:
             conn.execute(
                 """
                 UPDATE documents
-                SET status = 'processing', error_message = '', index_job_id = ?
+                SET status = CASE WHEN status = 'ready' THEN 'rebuilding' ELSE 'processing' END,
+                    error_message = '', index_job_id = ?
                 WHERE kb_name = ?
                 """,
                 (job_id, kb_name),
@@ -259,7 +265,7 @@ class IndexJobStore:
     def complete_rebuild(
         self, kb_name: str, job_id: str, status: str, error_message: str = ""
     ) -> None:
-        """收尾重建：仍停在处理中的文档记为 status，并清除知识库上的活动任务标记。
+        """收尾重建：仍停在处理中或重建中的文档记为 status，并清除知识库上的活动任务标记。
 
         重建中已经完成的文档（就绪或出错）保持各自的状态，不会被覆盖。
         """
@@ -267,7 +273,7 @@ class IndexJobStore:
             conn.execute(
                 """
                 UPDATE documents SET status = ?, error_message = ?
-                WHERE kb_name = ? AND index_job_id = ? AND status = 'processing'
+                WHERE kb_name = ? AND index_job_id = ? AND status IN ('processing', 'rebuilding')
                 """,
                 (status, error_message[:500], kb_name, job_id),
             )
@@ -345,8 +351,8 @@ class IndexJobStore:
         max_per_kb: int | None = None,
     ) -> int:
         """清理不可访问或过量的终态任务，同时保留仍被引用的记录。"""
-        retention_days = max(1, retention_days or self._history_retention_days)
-        max_per_kb = max(1, max_per_kb or self._history_max_per_kb)
+        retention_days = max(1, retention_days or self._history_retention_days())
+        max_per_kb = max(1, max_per_kb or self._history_max_per_kb())
         cutoff = (
             datetime.datetime.fromisoformat(self._now())
             - datetime.timedelta(days=retention_days)
@@ -432,6 +438,25 @@ class IndexJobStore:
             ).fetchall()
         return [_job_summary_from_row(tuple(row)) for row in rows]
 
+    def list_recent_all(
+        self, status: str | None = None, limit: int = 50
+    ) -> list[CrossKnowledgeBaseJobSummary]:
+        """跨知识库按创建时间倒序返回最近的任务，可按状态过滤，供运行监控使用。"""
+        where, params = ("WHERE status = ?", [status]) if status else ("", [])
+        with application_db.connect(self._db_file()) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, filename, operation, status, error_message,
+                       created_at, started_at, finished_at, kb_name
+                FROM index_jobs {where} ORDER BY created_at DESC LIMIT ?
+                """,
+                (*params, max(1, min(limit, 100))),
+            ).fetchall()
+        return [
+            {**_job_summary_from_row(tuple(row)), "kb_name": str(row[8])}
+            for row in rows
+        ]
+
     def get(self, job_id: str) -> IndexJob | None:
         """查询单个任务的基础状态；任务不存在时返回 None。"""
         with application_db.connect(self._db_file()) as conn:
@@ -481,7 +506,8 @@ class IndexJobStore:
                 placeholders = ", ".join("?" for _ in job_ids)
                 conn.execute(
                     f"UPDATE documents SET status = 'error', error_message = ? "
-                    f"WHERE kb_name = ? AND status = 'processing' AND index_job_id IN ({placeholders})",
+                    f"WHERE kb_name = ? AND status IN ('processing', 'rebuilding') "
+                    f"AND index_job_id IN ({placeholders})",
                     (reason[:500], kb_name, *job_ids),
                 )
 
@@ -515,7 +541,7 @@ class IndexJobStore:
                 )
                 conn.execute(
                     f"UPDATE documents SET status = 'error', error_message = ? "
-                    f"WHERE status = 'processing' AND index_job_id IN ({placeholders})",
+                    f"WHERE status IN ('processing', 'rebuilding') AND index_job_id IN ({placeholders})",
                     (message, *job_ids),
                 )
             conn.execute(

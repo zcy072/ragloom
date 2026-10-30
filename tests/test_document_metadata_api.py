@@ -20,6 +20,7 @@ try:
     from services.documents import use_cases as document_use_cases
     from services.indexing import worker as index_worker
     from services.indexing.jobs import INDEX_JOB_FAILED
+    from services.retrieval.chunk_index import get_chunk_index
 except ModuleNotFoundError:
     UploadFile = None
     app_storage = None
@@ -34,8 +35,8 @@ class DocumentMetadataApiTest(IsolatedStorageTestCase):
         app_storage.initialize_database()
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             conn.execute(
-                "INSERT INTO knowledge_bases (name, created_at) VALUES (?, ?)",
-                ("研发部", application_config.db_now()),
+                "INSERT INTO knowledge_bases (name, kb_id, created_at) VALUES (?, ?, ?)",
+                ("研发部", "kb-rd", application_config.db_now()),
             )
             document_path = app_storage.documents.document_path("研发部", "制度.txt")
             os.makedirs(os.path.dirname(document_path), exist_ok=True)
@@ -212,7 +213,7 @@ class DocumentMetadataApiTest(IsolatedStorageTestCase):
             result = document_use_cases.upload_document(
                 "研发部",
                 "制度.txt",
-                BytesIO("新版制度".encode("utf-8")),
+                BytesIO("新版制度".encode()),
                 metadata=None,
                 parser_mode=None,
             )
@@ -374,14 +375,11 @@ class DocumentMetadataApiTest(IsolatedStorageTestCase):
         self.assertEqual(config["chunk_size"], 600)
         self.assertEqual(config["chunk_overlap"], 0)
 
-    def test_chunk_config_marks_noncurrent_index_for_rebuild(self):
-        with patch.object(
-            knowledge_bases.fts_index, "fts5_index_is_current", return_value=False
-        ):
+    def test_chunk_config_marks_missing_index_for_rebuild(self):
+        index = get_chunk_index()
+        with patch.object(index, "available_routes", return_value=set()):
             legacy_config = knowledge_bases.get_kb_chunk_config("研发部")
-        with patch.object(
-            knowledge_bases.fts_index, "fts5_index_is_current", return_value=True
-        ):
+        with patch.object(index, "available_routes", return_value={"fixed"}):
             current_config = knowledge_bases.get_kb_chunk_config("研发部")
 
         self.assertTrue(legacy_config["index_needs_rebuild"])

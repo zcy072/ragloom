@@ -1,4 +1,4 @@
-"""登录与注册的失败次数限制：进程内滑动窗口，重启后计数清零。
+"""登录、注册和问答的次数限制：进程内滑动窗口，重启后计数清零。
 
 只适合当前的单进程部署；多进程或多实例部署需要把计数放到共享存储。
 """
@@ -125,7 +125,7 @@ class AuthRateLimiter:
         self._registrations = EventWindow(register_attempts, register_window_seconds, clock=clock)
 
     @classmethod
-    def from_settings(cls) -> "AuthRateLimiter":
+    def from_settings(cls) -> AuthRateLimiter:
         settings = get_settings()
         return cls(
             login_failures=settings.auth_login_max_failures,
@@ -171,7 +171,77 @@ class AuthRateLimiter:
         self._registrations.record(client)
 
 
+class ChatRequestLimiter:
+    """按账号限制同时进行的流式问答数和每分钟提问次数。
+
+    每次提问都会调用 LLM、向量化和重排，单个账号刷请求就能产生不少费用。并发名额在流结束时
+    释放；万一某条异常路径漏了释放，名额超过 ``stale_seconds`` 也会自动作废，账号不会被永久卡住。
+    """
+
+    def __init__(
+        self,
+        *,
+        max_concurrent: int,
+        per_minute: int,
+        stale_seconds: int = 900,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._max_concurrent = max_concurrent
+        self._stale_seconds = stale_seconds
+        self._clock = clock
+        self._per_minute = EventWindow(per_minute, 60, clock=clock)
+        self._active: dict[int, dict[object, float]] = {}
+        self._lock = threading.Lock()
+
+    @classmethod
+    def from_settings(cls) -> ChatRequestLimiter:
+        settings = get_settings()
+        return cls(
+            max_concurrent=settings.chat_user_max_concurrent,
+            per_minute=settings.chat_user_per_minute,
+        )
+
+    def acquire(self, account_id: int) -> Callable[[], None]:
+        """占用一个问答名额并返回释放函数（可重复调用）；超限时抛出 RateLimitedError，不占用。"""
+        key = str(account_id)
+        with self._lock:
+            now = self._clock()
+            active = self._active.get(account_id, {})
+            for token, started in list(active.items()):
+                if started + self._stale_seconds <= now:
+                    del active[token]
+            if self._max_concurrent > 0 and len(active) >= self._max_concurrent:
+                raise RateLimitedError(
+                    "已有问答正在进行，请等待当前回答完成后再提问",
+                    retry_after_seconds=5,
+                    code="chat_concurrency_limited",
+                )
+            wait = self._per_minute.retry_after(key)
+            if wait:
+                raise RateLimitedError(
+                    f"提问过于频繁，请 {_wait_text(wait)}后再试",
+                    retry_after_seconds=wait,
+                    code="chat_rate_limited",
+                )
+            self._per_minute.record(key)
+            token = object()
+            if self._max_concurrent > 0:
+                active[token] = now
+                self._active[account_id] = active
+
+        def release() -> None:
+            with self._lock:
+                slots = self._active.get(account_id)
+                if slots is not None:
+                    slots.pop(token, None)
+                    if not slots:
+                        del self._active[account_id]
+
+        return release
+
+
 _limiter: AuthRateLimiter | None = None
+_chat_limiter: ChatRequestLimiter | None = None
 _limiter_lock = threading.Lock()
 
 
@@ -184,8 +254,18 @@ def get_auth_rate_limiter() -> AuthRateLimiter:
         return _limiter
 
 
+def get_chat_request_limiter() -> ChatRequestLimiter:
+    """返回进程级问答限流器；首次使用时按当前环境变量创建。"""
+    global _chat_limiter
+    with _limiter_lock:
+        if _chat_limiter is None:
+            _chat_limiter = ChatRequestLimiter.from_settings()
+        return _chat_limiter
+
+
 def reset_auth_rate_limiter() -> None:
-    """丢弃全部计数，下次使用时按当前环境变量重建。供测试使用。"""
-    global _limiter
+    """丢弃登录、注册和问答的全部计数，下次使用时按当前环境变量重建。供测试使用。"""
+    global _limiter, _chat_limiter
     with _limiter_lock:
         _limiter = None
+        _chat_limiter = None

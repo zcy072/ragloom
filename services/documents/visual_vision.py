@@ -156,7 +156,7 @@ def _vision_prompt(candidate: VisualCandidate) -> str:
         "读数不确定时写“约”，不要给出图上看不出的精确值。\n"
         "   - 示意图/架构图：写清各组成部分的名称、相互关系和数据或流程走向。\n"
         "2. 保留所有名称、编号、数字、单位、阈值、条件和结论，原样抄录，不要改写、换算或归纳掉。"
-        "看不清的字写“（无法辨认）”，不要猜。\n"
+        "图上是英文或其他语言的文字照原文写，不要翻译；看不清的字写“（无法辨认）”，不要猜。\n"
         "3. 只写图片明确表达的内容，不要用常识补充，也不要引入上下文里没有出现、图上也看不到的信息。"
         "图注和上下文只用来帮助理解，不要把它们当成图片内容重复抄写。\n"
         "4. content 必须脱离图片和上下文也能读懂：对象用全称，不写“如图所示”“上图”“下表”；"
@@ -167,7 +167,7 @@ def _vision_prompt(candidate: VisualCandidate) -> str:
         "有图注、表头、文字或数据的图片，即使看起来不重要也应设置 indexable=true。\n\n"
         "输出：只输出一个 JSON 对象，不要代码块或其他文字：\n"
         '{"indexable": true, "kind": "table|flowchart|chart|diagram|illustration|image", '
-        '"title": "概括图片主题的短语，20 字以内", "content": "转写后的完整中文内容"}\n\n'
+        '"title": "概括图片主题的短语，20 字以内", "content": "转写后的完整内容"}\n\n'
         "kind 取值：table 表格；flowchart 流程图；chart 统计图/图表；"
         "diagram 示意图/架构图；illustration 插图；image 其他图片。"
     )

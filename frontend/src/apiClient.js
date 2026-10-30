@@ -22,10 +22,47 @@ export const authorizedFetch = async (url, options = {}) => {
   }
   return response;
 };
+/** 常见请求字段的中文名；未列出的字段只显示错误本身。 */
+const FIELD_LABELS = {
+  username: '账号名称',
+  name: '名称',
+  phone: '手机号码',
+  password: '密码',
+  old_password: '原密码',
+  new_password: '新密码',
+  description: '描述',
+  question: '问题',
+  title: '标题',
+  tags: '标签'
+};
+/** 把一条 pydantic 校验错误转成中文；不认识的类型保留原文。 */
+const validationItemText = (item) => {
+  const field = Array.isArray(item?.loc) ? item.loc[item.loc.length - 1] : '';
+  const label = FIELD_LABELS[field] || '';
+  const ctx = item?.ctx || {};
+  let reason;
+  switch (item?.type) {
+    case 'missing':
+      reason = '不能为空';
+      break;
+    case 'string_too_short':
+      reason = ctx.min_length === 1 ? '不能为空' : `至少需要 ${ctx.min_length} 个字符`;
+      break;
+    case 'string_too_long':
+      reason = `不能超过 ${ctx.max_length} 个字符`;
+      break;
+    case 'too_long':
+      reason = `不能超过 ${ctx.max_length} 项`;
+      break;
+    default:
+      return item?.msg || '';
+  }
+  return label ? `${label}${reason}` : `输入${reason}`;
+};
 /** FastAPI 校验失败时 detail 是 {msg} 数组；转成可直接展示的文本。 */
 const errorDetailText = (detail) => {
   if (Array.isArray(detail)) {
-    return detail.map(item => item?.msg).filter(Boolean).join('；');
+    return detail.map(validationItemText).filter(Boolean).join('；');
   }
   return typeof detail === 'string' ? detail : '';
 };

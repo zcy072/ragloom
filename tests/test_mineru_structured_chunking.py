@@ -1,20 +1,17 @@
-import os
-import sqlite3
-import tempfile
 import unittest
 
 try:
     from langchain_core.documents import Document
 
     from services.indexing import chunking
-    from services.retrieval import fts as fts_index
+    from tests.in_memory_index import InMemoryChunkIndex
 except ModuleNotFoundError:
     Document = None
     chunking = None
-    fts_index = None
+    InMemoryChunkIndex = None
 
 
-@unittest.skipUnless(Document and chunking and fts_index, "requires backend dependencies")
+@unittest.skipUnless(Document and chunking and InMemoryChunkIndex, "requires backend dependencies")
 class MinerUStructuredChunkingTest(unittest.TestCase):
     def split_mineru(self, document, *, chunk_size=800):
         """通过生产入口执行 MinerU 结构化切分。"""
@@ -250,33 +247,33 @@ English cover metadata.
         self.assertTrue(all("中国传统锻炼功法" not in split.page_content for split in table_splits))
         self.assertTrue(all("续附录2" not in split.page_content for split in splits))
 
-    def test_fts_route_filter_keeps_fixed_and_structured_results_separate(self):
-        with tempfile.TemporaryDirectory() as directory:
-            db_path = os.path.join(directory, "fts5.db")
-            fixed = Document(
-                page_content="固定路线中的高血压管理规则",
-                metadata={"source": "指南.pdf", "chunk_route": chunking.CHUNK_ROUTE_FIXED},
-            )
-            structured = Document(
-                page_content="结构路线中的随访管理规则",
-                metadata={"source": "指南.pdf", "chunk_route": chunking.CHUNK_ROUTE_STRUCTURED},
-            )
-            fts_index.build_fts5_index([fixed, structured], db_path)
+    def test_route_filter_keeps_fixed_and_structured_results_separate(self):
+        kb_id = "kb-route-filter"
+        index = InMemoryChunkIndex()
+        fixed = Document(
+            page_content="固定路线中的高血压管理规则",
+            metadata={"source": "指南.pdf", "chunk_route": chunking.CHUNK_ROUTE_FIXED},
+        )
+        structured = Document(
+            page_content="结构路线中的随访管理规则",
+            metadata={"source": "指南.pdf", "chunk_route": chunking.CHUNK_ROUTE_STRUCTURED},
+        )
+        index.publish_source(kb_id, "指南.pdf", [fixed, structured], [[1.0, 0.0], [0.0, 1.0]])
 
-            fixed_hits = fts_index.FTS5Retriever(
-                db_path=db_path, chunk_route=chunking.CHUNK_ROUTE_FIXED
-            ).invoke("高血压管理")
-            structured_hits = fts_index.FTS5Retriever(
-                db_path=db_path, chunk_route=chunking.CHUNK_ROUTE_STRUCTURED
-            ).invoke("随访管理")
-            with sqlite3.connect(db_path) as conn:
-                columns = {row[1] for row in conn.execute("PRAGMA table_info(docs)")}
+        fixed_hits = index.search_lexical(
+            kb_id, "高血压管理", chunking.CHUNK_ROUTE_FIXED, None, 5
+        )
+        structured_hits = index.search_lexical(
+            kb_id, "随访管理", chunking.CHUNK_ROUTE_STRUCTURED, None, 5
+        )
 
-        self.assertIn("chunk_route", columns)
         self.assertEqual(fixed_hits[0].metadata["chunk_route"], chunking.CHUNK_ROUTE_FIXED)
         self.assertEqual(
             structured_hits[0].metadata["chunk_route"], chunking.CHUNK_ROUTE_STRUCTURED
         )
+        # 内存实现按单字切词，固定路线可能因“管理”命中；只断言结构化块不会泄漏进来。
+        for hit in index.search_lexical(kb_id, "随访管理", chunking.CHUNK_ROUTE_FIXED, None, 5):
+            self.assertEqual(hit.metadata["chunk_route"], chunking.CHUNK_ROUTE_FIXED)
 
 
 if __name__ == "__main__":

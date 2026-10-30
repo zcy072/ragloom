@@ -1,6 +1,8 @@
 """Typed records returned by chat session persistence."""
 
-from typing_extensions import NotRequired, TypedDict
+from typing import NotRequired
+
+from typing_extensions import TypedDict
 
 
 class CitationEvidence(TypedDict):
@@ -13,6 +15,7 @@ class CitationEvidence(TypedDict):
     page_numbers: list[int]
     context_title: str
     content: str
+    url: NotRequired[str]
 
 
 class ChatSource(TypedDict):
@@ -26,6 +29,8 @@ class ChatSource(TypedDict):
     content: str
     kb_name: NotRequired[str]
     evidence: NotRequired[list[CitationEvidence]]
+    # 网页来源的地址；知识库来源没有该字段。
+    url: NotRequired[str]
 
 
 class ChatSessionSummary(TypedDict):
@@ -44,3 +49,5 @@ class ChatHistoryMessage(TypedDict):
     role: str
     content: str
     sources: list[ChatSource]
+    trace_id: NotRequired[str]
+    feedback: NotRequired[int]

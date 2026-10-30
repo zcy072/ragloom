@@ -58,12 +58,40 @@ def _source_preview(content: str, question: str, limit: int = SOURCE_PREVIEW_MAX
     return prefix + normalized[start:end].strip() + suffix
 
 
+def _web_source(index: int, span: context_builder.ContextSpan, question: str) -> ChatSource:
+    """网页来源：标题作来源名，站点和日期作位置，带原始地址供前端打开。"""
+    label = " · ".join(span.contextual_titles)
+    content = _source_preview(span.content, question)
+    return {
+        "id": index,
+        "citation_ids": [index],
+        "source": span.source,
+        "page": label,
+        "context_title": "",
+        "content": content,
+        "url": span.url,
+        "evidence": [{
+            "id": index,
+            "source": span.source,
+            "kb_name": "",
+            "page": label,
+            "page_numbers": [],
+            "context_title": "",
+            "content": content,
+            "url": span.url,
+        }],
+    }
+
+
 def build_source_catalog(
     spans: list[context_builder.ContextSpan], question: str = ""
 ) -> list[ChatSource]:
     """将上下文片段编号并序列化为 Prompt 和前端共用的来源目录。"""
     sources: list[ChatSource] = []
     for index, span in enumerate(spans, start=1):
+        if span.url:
+            sources.append(_web_source(index, span, question))
+            continue
         source = span.source.replace("\\", "/").split("/")[-1] or "未知文档"
         item: ChatSource = {
             "id": index,
@@ -112,14 +140,17 @@ def select_cited_sources(
     selected = [source_by_id[source_id] for source_id in _cited_source_ids(answer, source_catalog)]
     # Group display cards by both knowledge base and filename; common and selected knowledge
     # bases may legally contain files with the same name.
-    grouped: dict[tuple[str, str], list[ChatSource]] = {}
+    grouped: dict[tuple[str, str, str], list[ChatSource]] = {}
     for source in selected:
         source_name = str(source.get("source", "未知文档"))
         source_kb_name = str(source.get("kb_name", ""))
-        grouped.setdefault((source_kb_name, source_name), []).append(source)
+        # 不同网页可能同名，网页来源按地址分组。
+        grouped.setdefault(
+            (source_kb_name, source_name, source.get("url", "")), []
+        ).append(source)
 
     display_sources: list[ChatSource] = []
-    for (source_kb_name, source_name), entries in grouped.items():
+    for (source_kb_name, source_name, url), entries in grouped.items():
         pages = list(dict.fromkeys(entry.get("page", "") for entry in entries if entry.get("page")))
         titles = list(
             dict.fromkeys(entry.get("context_title", "") for entry in entries if entry.get("context_title"))
@@ -135,6 +166,8 @@ def select_cited_sources(
         }
         if source_kb_name:
             item["kb_name"] = source_kb_name
+        if url:
+            item["url"] = url
         evidence = [entry for source in entries for entry in source.get("evidence", [])]
         if evidence:
             item["evidence"] = evidence

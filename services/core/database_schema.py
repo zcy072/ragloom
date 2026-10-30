@@ -8,7 +8,7 @@ from services.core import sqlite_connections as application_db
 
 logger = logging.getLogger(__name__)
 
-CURRENT_DATABASE_SCHEMA_VERSION = 7
+CURRENT_DATABASE_SCHEMA_VERSION = 9
 
 
 def _create_chat_memory_table(conn: sqlite3.Connection) -> None:
@@ -67,6 +67,7 @@ def _create_current_tables(
         f"""
         CREATE TABLE IF NOT EXISTS knowledge_bases (
             name TEXT PRIMARY KEY,
+            kb_id TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL,
             chunk_size INTEGER DEFAULT {default_chunk_size},
             chunk_overlap INTEGER DEFAULT {default_chunk_overlap},
@@ -145,12 +146,14 @@ def _create_current_tables(
     )
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS chroma_disabled_sources (
-            kb_name TEXT NOT NULL,
+        CREATE TABLE IF NOT EXISTS parent_chunks (
+            kb_id TEXT NOT NULL,
+            parent_id TEXT NOT NULL,
             source TEXT NOT NULL,
-            error_message TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY (kb_name, source)
+            page TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL,
+            contextual_title TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (kb_id, parent_id)
         )
         """
     )
@@ -167,6 +170,98 @@ def _create_current_tables(
         """
     )
     _create_shared_tables(conn)
+    _create_chat_runs_table(conn)
+    _create_chat_traces_table(conn)
+    _create_login_events_table(conn)
+    _create_admin_audit_table(conn)
+
+
+def _create_chat_runs_table(conn: sqlite3.Connection) -> None:
+    """创建问答运行记录表：每次提问一行，只存耗时、状态和问题预览，不存回答正文。"""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            account_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            kb_name TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            user_message_id INTEGER,
+            question_preview TEXT NOT NULL DEFAULT '',
+            model_provider TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            rerank_status TEXT NOT NULL DEFAULT '',
+            rewritten INTEGER NOT NULL DEFAULT 0,
+            retrieval_skipped INTEGER NOT NULL DEFAULT 0,
+            context_spans INTEGER NOT NULL DEFAULT 0,
+            cited_sources INTEGER NOT NULL DEFAULT 0,
+            answer_chars INTEGER NOT NULL DEFAULT 0,
+            retrieval_ms REAL,
+            rerank_ms REAL,
+            context_ms REAL,
+            first_token_ms REAL,
+            generation_ms REAL,
+            total_ms REAL NOT NULL DEFAULT 0,
+            elapsed_extra TEXT NOT NULL DEFAULT '{}',
+            error_summary TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+
+
+def _create_chat_traces_table(conn: sqlite3.Connection) -> None:
+    """创建问答追踪表：每次提问一行，payload 保存各阶段结果、候选片段开头和上下文来源。"""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_traces (
+            id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            account_id INTEGER NOT NULL,
+            kb_name TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            run_id INTEGER,
+            assistant_message_id INTEGER,
+            feedback INTEGER NOT NULL DEFAULT 0,
+            payload TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _create_login_events_table(conn: sqlite3.Connection) -> None:
+    """创建登录记录表：每次登录尝试一行；未知用户名的尝试 account_id 为空。"""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS login_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            account_id INTEGER,
+            username TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            client TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+
+
+def _create_admin_audit_table(conn: sqlite3.Connection) -> None:
+    """创建管理审计表：记录谁在什么时候查看了哪个用户的哪个会话。"""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            actor_account_id INTEGER NOT NULL,
+            actor_username TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target_account_id INTEGER,
+            target_username TEXT NOT NULL DEFAULT '',
+            detail TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
 
 
 def _create_current_indexes(conn: sqlite3.Connection) -> None:
@@ -181,6 +276,10 @@ def _create_current_indexes(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_documents_kb_type_date "
         "ON documents(kb_name, document_type, effective_date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_parent_chunks_source "
+        "ON parent_chunks(kb_id, source)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_index_jobs_kb_created "
@@ -199,6 +298,43 @@ def _create_current_indexes(conn: sqlite3.Connection) -> None:
         "ON chat_messages(session_id, id)"
     )
     conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_runs_created ON chat_runs(created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_runs_kb_created "
+        "ON chat_runs(kb_name, created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_runs_account_created "
+        "ON chat_runs(account_id, created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_traces_created ON chat_traces(created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_traces_run ON chat_traces(run_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_traces_message "
+        "ON chat_traces(assistant_message_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_traces_session ON chat_traces(session_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_traces_account ON chat_traces(account_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_login_events_created ON login_events(created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_login_events_account_created "
+        "ON login_events(account_id, created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_log(created_at)"
+    )
+    conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_models_one_active "
         "ON models_config(is_active) WHERE is_active = 1"
     )
@@ -210,6 +346,10 @@ def _validate_current_schema(conn: sqlite3.Connection) -> None:
         "accounts": {
             "id", "username", "name", "phone", "password", "status", "role_id", "created_at",
         },
+        "knowledge_bases": {"name", "kb_id", "created_at"},
+        "parent_chunks": {
+            "kb_id", "parent_id", "source", "page", "content", "contextual_title",
+        },
         "chat_sessions": {
             "id", "account_id", "username", "kb_name", "title",
             "created_at", "updated_at",
@@ -219,6 +359,25 @@ def _validate_current_schema(conn: sqlite3.Connection) -> None:
         },
         "models_config": {
             "provider_name", "api_key", "base_url", "default_model", "is_active",
+        },
+        "chat_runs": {
+            "id", "created_at", "account_id", "username", "kb_name", "session_id",
+            "user_message_id", "question_preview", "model_provider", "status",
+            "rerank_status", "rewritten", "retrieval_skipped", "context_spans",
+            "cited_sources", "answer_chars", "retrieval_ms", "rerank_ms",
+            "context_ms", "first_token_ms", "generation_ms", "total_ms",
+            "elapsed_extra", "error_summary",
+        },
+        "chat_traces": {
+            "id", "created_at", "account_id", "kb_name", "session_id", "run_id",
+            "assistant_message_id", "feedback", "payload",
+        },
+        "login_events": {
+            "id", "created_at", "account_id", "username", "success", "reason", "client",
+        },
+        "admin_audit_log": {
+            "id", "created_at", "actor_account_id", "actor_username", "action",
+            "target_account_id", "target_username", "detail",
         },
         "documents": {
             "id", "kb_name", "filename", "path", "size", "uploaded_at",

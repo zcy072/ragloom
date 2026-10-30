@@ -35,3 +35,9 @@ class IndexJobSummary(TypedDict):
     created_at: str
     started_at: str | None
     finished_at: str | None
+
+
+class CrossKnowledgeBaseJobSummary(IndexJobSummary):
+    """Task summary that also names its knowledge base, for the ops view."""
+
+    kb_name: str

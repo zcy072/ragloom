@@ -1,5 +1,52 @@
+[project]
+name = "ragloom"
+version = "0.1.0"
+requires-python = ">=3.12"
+# 运行镜像的直接依赖，完整闭包锁定在 requirements.lock。
+# 修改后按 docs/development/开发与交付.md 的“依赖锁定”重新生成锁文件。
+dependencies = [
+    # Web API
+    "bcrypt==5.0.0",
+    "cryptography==49.0.0",
+    "fastapi==0.162.0",
+    "httpx==0.28.1",
+    "pydantic==2.13.4",
+    "python-multipart==0.0.32",
+    "requests==2.34.2",
+    "starlette==1.10.0",
+    "typing-extensions==4.16.0",
+    "uvicorn==0.54.0",
+
+    # RAG and retrieval
+    "jieba==0.42.1",
+    "langchain-community==0.4.2",
+    "langchain-core==1.4.9",
+    "langchain-openai==1.3.5",
+    "langchain-text-splitters==1.1.2",
+    "pymilvus==2.6.17",
+
+    # Document parsing and OCR
+    "lxml==6.1.1",
+    "numpy==2.2.6",
+    "paddleocr==3.7.0",
+    "paddlepaddle==3.3.1",
+    "paddlex==3.7.2",
+    "pdf2image==1.17.0",
+    "pillow==12.3.0",
+    "pypdf==6.14.2",
+    "python-docx==1.2.0",
+]
+
+[dependency-groups]
+# 仅用于 check 镜像的静态检查与锁文件工具，不进入运行镜像。
+check = [
+    "ruff==0.16.0",
+    "pyright[nodejs]==1.1.408",
+    "uv==0.11.18",
+]
+
 [tool.ruff]
-target-version = "py310"
+target-version = "py312"
 line-length = 100
 extend-exclude = [
     "frontend",
@@ -7,9 +54,12 @@ extend-exclude = [
 ]
 
 [tool.ruff.lint]
-# Start with correctness and import hygiene. Broader rules can be enabled as
-# existing modules are brought under the formatter incrementally.
-select = ["E4", "E7", "E9", "F", "I"]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP", "SIM", "ASYNC"]
+ignore = [
+    "B008",  # FastAPI 的 Depends()/Query() 就是写在默认参数里的
+    "B905",  # zip(strict=) 会改变长度不一致时的行为，逐处评估前不统一加
+    "SIM105", "SIM108", "SIM115", "SIM117",  # 纯风格改写
+]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -17,57 +67,11 @@ indent-style = "space"
 line-ending = "auto"
 
 [tool.pyright]
-pythonVersion = "3.10"
+pythonVersion = "3.12"
 typeCheckingMode = "standard"
 include = [
+    "api.py",
     "app_storage.py",
-    "services/chat/contracts.py",
-    "services/chat/persistence_contracts.py",
-    "services/chat/prompts.py",
-    "services/chat/rewrite.py",
-    "services/chat/sessions.py",
-    "services/chat/sources.py",
-    "services/core/contracts.py",
-    "services/core/config.py",
-    "services/core/container.py",
-    "services/core/errors.py",
-    "services/core/knowledge_bases.py",
-    "services/core/knowledge_base_settings.py",
-    "services/core/llm_config.py",
-    "services/core/model_providers.py",
-    "services/core/model_api_keys.py",
-    "services/core/model_use_cases.py",
-    "services/core/bootstrap.py",
-    "services/core/database_schema.py",
-    "services/core/sqlite_connections.py",
-    "services/core/settings.py",
-    "services/documents/contracts.py",
-    "services/documents/heading_patterns.py",
-    "services/documents/parser_modes.py",
-    "services/documents/store.py",
-    "services/documents/types.py",
-    "services/documents/use_cases.py",
-    "services/documents/visual_cache.py",
-    "services/documents/visual_candidates.py",
-    "services/documents/visual.py",
-    "services/documents/mineru/artifacts.py",
-    "services/documents/mineru/content.py",
-    "services/documents/mineru/errors.py",
-    "services/indexing/contracts.py",
-    "services/indexing/jobs.py",
-    "services/indexing/locks.py",
-    "services/indexing/schema.py",
-    "services/indexing/worker.py",
-    "services/knowledge_bases/use_cases.py",
-    "services/retrieval/source_state.py",
-    "services/retrieval/cache.py",
-    "services/retrieval/index_coordination.py",
-    "services/identity/accounts.py",
-    "services/identity/auth.py",
-    "services/identity/contracts.py",
-    "services/identity/pagination.py",
-    "services/identity/permissions.py",
-    "services/identity/rate_limit.py",
-    "services/identity/roles.py",
-    "services/identity/use_cases.py",
+    "routers",
+    "services",
 ]

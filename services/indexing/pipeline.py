@@ -1,15 +1,17 @@
-"""知识库入库编排：解析文件、切分内容并同步 FTS5 与 Chroma 索引。"""
+"""知识库入库编排：解析文件、切分内容并写入父段落表与 Milvus 子块索引。"""
 
 import logging
 import os
 import shutil
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from services.core import config as application_config
 from services.core.container import ApplicationContainer, get_application_container
+from services.core.request_context import carry_request_id
 from services.core.settings import get_settings
 from services.documents import loaders as document_loader
 from services.documents import mineru as mineru_client
@@ -21,11 +23,10 @@ from services.indexing.jobs import (
     INDEX_JOB_FAILED,
     INDEX_JOB_SUPERSEDED,
 )
-from services.indexing.locks import knowledge_base_lock
+from services.indexing.locks import document_lock, knowledge_base_lock
 from services.indexing.workspace import JobWorkspace, create_workspace
-from services.retrieval import chroma as chroma_index
-from services.retrieval import fts as fts_index
-from services.retrieval import retriever
+from services.retrieval import parent_store, retriever
+from services.retrieval.chunk_index import embed_splits, get_chunk_index
 
 logger = logging.getLogger(__name__)
 
@@ -78,38 +79,8 @@ def _split_for_index(
     return splits
 
 
-def _sync_chroma_source(
-    source_splits,
-    kb_name: str,
-    source: str,
-    embeddings,
-    container: ApplicationContainer | None = None,
-    vectors: list | None = None,
-) -> bool:
-    """提交一个源文件的 Chroma 版本；失败时记录为仅使用 FTS 的降级状态。
-
-    传入 ``vectors`` 表示向量已在解析阶段算好，这里只做本地写入。
-    """
-    dependencies = container or get_application_container()
-    try:
-        if vectors is None:
-            chroma_index.chroma_upsert_splits(source_splits, kb_name, source, embeddings)
-        else:
-            chroma_index.chroma_upsert_splits(
-                source_splits, kb_name, source, embeddings, vectors=vectors
-            )
-    except Exception as exc:
-        # 分阶段写入失败时会保留旧向量版本；禁用该源可避免旧向量与新 FTS 内容混用。
-        dependencies.documents.disable_chroma_source(kb_name, source, str(exc))
-        logger.warning(
-            "Chroma upsert failed for %s/%s; using FTS5 fallback: %s",
-            kb_name,
-            source,
-            exc,
-        )
-        return False
-    dependencies.documents.enable_chroma_source(kb_name, source)
-    return True
+class _SupersededError(Exception):
+    """解析期间任务已被同名上传、删除或新的重建替代，后续步骤不必再做。"""
 
 
 @dataclass(frozen=True)
@@ -126,11 +97,10 @@ class _PreparedJob:
 
 @dataclass(frozen=True)
 class _ParsedDocument:
-    """无锁解析阶段的产物：切片，以及已算好的向量或嵌入失败原因。"""
+    """无锁解析阶段的产物：切片及其向量。"""
 
     splits: list
-    vectors: list | None
-    embed_error: str
+    vectors: list
     seconds: dict[str, float]
 
 
@@ -166,14 +136,13 @@ def _parse_and_embed_document(
     filename: str,
     prepared: _PreparedJob,
     container: ApplicationContainer,
+    is_current: Callable[[], bool],
 ) -> _ParsedDocument:
-    """解析、切分并计算向量；全程不持有知识库锁，只读写任务私有的工作区。"""
-    # 索引版本过旧时在解析前就失败，省下解析与嵌入的全部耗时；
-    # 真正写入前 _publish_document 会在锁内再校验一次。
-    fts_path = fts_index.fts_db_path(kb_name)
-    if os.path.exists(fts_path) and not fts_index.fts5_index_is_current(fts_path):
-        raise ValueError("知识库索引版本过旧，请在知识库管理中执行完整重建")
+    """解析、切分并计算向量；全程不持有知识库锁，只读写任务私有的工作区。
 
+    嵌入前先确认任务仍拥有该文件，已被替代就不再调用嵌入服务。这里不持锁，
+    只是提前放弃；最终归属仍由发布阶段持锁的校验决定。
+    """
     seconds: dict[str, float] = {}
     started = time.monotonic()
     source_path = prepared.workspace.source_path
@@ -212,20 +181,14 @@ def _parse_and_embed_document(
     if not splits:
         raise ValueError("文档未提取到可索引文本，请检查文件格式或 OCR 依赖")
     seconds["split"] = time.monotonic() - started
+    if not is_current():
+        raise _SupersededError
 
     started = time.monotonic()
-    vectors: list | None = None
-    embed_error = ""
-    try:
-        vectors = chroma_index.embed_splits(splits, embeddings)
-    except Exception as exc:
-        # 与此前一致：嵌入失败只让该文档退化为仅 FTS，不让整个任务失败。
-        embed_error = str(exc)
-        logger.warning(
-            "Embedding failed for %s/%s; using FTS5 fallback: %s", kb_name, filename, exc
-        )
+    # 嵌入失败直接抛出，文档进入 error；没有向量的子块不会进入索引。
+    vectors = embed_splits(splits, embeddings)
     seconds["embed"] = time.monotonic() - started
-    return _ParsedDocument(splits, vectors, embed_error, seconds)
+    return _ParsedDocument(splits, vectors, seconds)
 
 
 def _publish_document(
@@ -235,32 +198,17 @@ def _publish_document(
     parsed: _ParsedDocument,
     container: ApplicationContainer,
 ) -> None:
-    """把解析结果写入正式索引；调用方须持有知识库锁并已确认任务仍是最新版本。"""
-    fts_path = fts_index.fts_db_path(kb_name)
-    if os.path.exists(fts_path):
-        if not fts_index.fts5_index_is_current(fts_path):
-            raise ValueError("知识库索引版本过旧，请在知识库管理中执行完整重建")
-    elif any(
-        source != filename for source in container.documents.ready_sources(kb_name)
-    ):
-        # 其他文档已就绪却没有 FTS 文件，说明索引已损坏；只给本文档建库会让它们检索不到。
-        raise ValueError("知识库关键词索引缺失，请在知识库管理中执行完整重建")
+    """把解析结果写入正式索引；调用方须持有知识库锁并已确认任务仍是最新版本。
 
+    顺序固定为先父段落表、后 Milvus：Milvus 写入失败时文档进入 error，
+    残留的父段落没有对应子块，不会被检索到，重建时会被覆盖。
+    """
+    kb_id = container.knowledge_bases.kb_id_for(kb_name)
+    if not kb_id:
+        raise ValueError("知识库不存在")
     prepared.workspace.publish_result_dir()
-    fts_index.update_fts5_index(kb_name, filename, parsed.splits)
-
-    # 先提交 FTS5。Chroma 失败可降级为仅 FTS，允许列表会阻止旧向量结果混入。
-    if parsed.vectors is None:
-        container.documents.disable_chroma_source(kb_name, filename, parsed.embed_error)
-    else:
-        _sync_chroma_source(
-            parsed.splits,
-            kb_name,
-            filename,
-            None,
-            container,
-            vectors=parsed.vectors,
-        )
+    parent_store.replace_source(kb_id, filename, parent_store.parent_chunk_rows(parsed.splits))
+    get_chunk_index().publish_source(kb_id, filename, parsed.splits, parsed.vectors)
     retriever.drop_cached_retriever(kb_name)
 
 
@@ -299,7 +247,7 @@ def _index_document(
     workspace: JobWorkspace | None = None
     try:
         # 准备：持锁固定输入。同名文件的新上传会替代旧任务，即使旧任务此前已排队。
-        with knowledge_base_lock(kb_name):
+        with document_lock(kb_name, filename):
             if not rebuild and not index_jobs.start(job_id):
                 return "skipped", ""
             if not index_jobs.is_current_document_job(kb_name, filename, job_id):
@@ -330,7 +278,16 @@ def _index_document(
         error_message = ""
         started = time.monotonic()
         try:
-            parsed = _parse_and_embed_document(kb_name, filename, prepared, container)
+            parsed = _parse_and_embed_document(
+                kb_name,
+                filename,
+                prepared,
+                container,
+                lambda: index_jobs.is_current_document_job(kb_name, filename, job_id),
+            )
+        except _SupersededError:
+            logger.info("Index job %s [%s/%s] superseded before embedding", job_id, kb_name, filename)
+            return "superseded", ""
         except Exception as exc:
             logger.exception("Document processing failed for %s", filename)
             error_message = str(exc)[:500]
@@ -338,7 +295,7 @@ def _index_document(
 
         # 阶段 B：持锁发布。先确认任务仍拥有该文件的最新版本，保证后上传的版本最终生效。
         waited = time.monotonic()
-        with knowledge_base_lock(kb_name):
+        with document_lock(kb_name, filename):
             lock_wait_seconds = time.monotonic() - waited
             if not index_jobs.is_current_document_job(kb_name, filename, job_id):
                 return "superseded", ""
@@ -408,8 +365,12 @@ def _remove_leftovers_of_deleted_knowledge_base(
 
     删除操作不会等待解析，解析阶段又可能在删除之后才写出 MinerU 结果目录；
     残留的 ``mineru_results/<知识库>`` 会让之后的同名创建或改名误判目标已存在。
+    每个任务结束都会调用这里，绝大多数时候知识库仍在，先不持锁判断，
+    避免为一次确认去排整库独占锁；判断为已删除后再持锁复核。
     """
     try:
+        if container.knowledge_bases.exists(kb_name):
+            return
         with knowledge_base_lock(kb_name):
             if container.knowledge_bases.exists(kb_name):
                 return
@@ -449,27 +410,21 @@ def _rebuild_one_document(
         return outcome, message
 
 
-def _discard_keyword_index(kb_name: str) -> None:
-    """重建开始时作废旧的关键词索引，之后每个文档重新增量写入。
-
-    重建期间所有文档都已被标为处理中，旧索引本来就不会被检索使用；
-    先删除还能避免旧版本索引架构挡住新文档的写入。
-    """
-    try:
-        os.remove(fts_index.fts_db_path(kb_name))
-    except FileNotFoundError:
-        pass
-
-
 def _drop_stale_vectors(kb_name: str, container: ApplicationContainer) -> None:
-    """重建结束后，删除不再属于任何就绪文档的旧向量。"""
+    """重建结束后，删除不再属于任何就绪文档的旧子块和父段落。
+
+    重建不预先清空索引，失败文档的旧版本留到这里才删除。
+    """
+    kb_id = container.knowledge_bases.kb_id_for(kb_name)
+    if not kb_id:
+        return
     try:
-        chroma_index.chroma_delete_stale_sources(
-            kb_name, set(container.documents.ready_sources(kb_name))
-        )
+        active_sources = set(container.documents.ready_sources(kb_name))
+        get_chunk_index().delete_stale_sources(kb_id, active_sources)
+        parent_store.delete_stale_sources(kb_id, active_sources)
     except Exception as exc:
         # 已删除或不可用的旧版本仍会被 SQLite 允许列表排除，不会参与检索。
-        logger.warning("Chroma stale-source cleanup failed for %s: %s", kb_name, exc)
+        logger.warning("Stale-source cleanup failed for %s: %s", kb_name, exc)
 
 
 def run_rebuild_job(
@@ -481,7 +436,8 @@ def run_rebuild_job(
     """只执行知识库最新发起的重建请求。
 
     各文档与上传一样并行处理，处理完立即写回自己的状态；
-    解析失败只让该文档出错，其余文档照常重建。
+    解析失败只让该文档出错，其余文档照常重建。不预先清空索引：已就绪文档的旧版本
+    在新版本发布前继续参与检索，发布时由 publish_source 先写新版本再删旧版本。
     """
     dependencies = container or get_application_container()
     index_jobs = dependencies.index_jobs()
@@ -498,7 +454,6 @@ def run_rebuild_job(
             for record in dependencies.documents.list_documents(kb_name)
             if record["index_job_id"] == job_id
         ]
-        _discard_keyword_index(kb_name)
         retriever.drop_cached_retriever(kb_name)
 
     outcomes: list[tuple[str, str]] = []
@@ -509,8 +464,10 @@ def run_rebuild_job(
         ) as executor:
             outcomes = list(
                 executor.map(
-                    lambda name: _rebuild_one_document(
-                        job_id, kb_name, name, dependencies
+                    carry_request_id(
+                        lambda name: _rebuild_one_document(
+                            job_id, kb_name, name, dependencies
+                        )
                     ),
                     filenames,
                 )
@@ -550,13 +507,14 @@ def delete_document_indexes(
     """文件删除后，从所有检索索引中移除其对应数据。"""
     dependencies = container or get_application_container()
     # 这里只在源文件已删除后调用；调用方会识别重新上传，防止误删新版本的索引。
-    chroma_index.chroma_delete_by_source(kb_name, filename)
-    fts_index.delete_from_fts5(kb_name, filename)
-    fts_index.remove_empty_fts_index(kb_name, dependencies.documents.has_documents)
-    dependencies.documents.enable_chroma_source(kb_name, filename)
-    chroma_index.reset_empty_chroma_storage(
-        dependencies.documents.has_documents, retriever.clear_retriever_cache
-    )
+    # 知识库已被删除时 kb_id 不存在，子块和父段落已随知识库一并清理。
+    kb_id = dependencies.knowledge_bases.kb_id_for(kb_name)
+    index = get_chunk_index()
+    if kb_id:
+        index.delete_source(kb_id, filename)
+        parent_store.delete_source(kb_id, filename)
+    if index.reset_if_empty(dependencies.documents.has_documents):
+        retriever.clear_retriever_cache()
     retriever.drop_cached_retriever(kb_name)
 
 
@@ -570,7 +528,7 @@ def run_delete_job(
     """删除失效索引；若同名文件已重新上传，则放弃本次删除任务。"""
     dependencies = container or get_application_container()
     index_jobs = dependencies.index_jobs()
-    with knowledge_base_lock(kb_name):
+    with document_lock(kb_name, filename):
         if not index_jobs.start(job_id):
             return
         if dependencies.documents.document_exists(kb_name, filename):

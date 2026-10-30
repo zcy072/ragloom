@@ -14,7 +14,7 @@ test('dashboard renders summary data and an interactive trend chart', async ({ p
   const dayTarget = page.locator('button[aria-label*="07-22"]').first();
   await dayTarget.focus();
   await expect(page.getByText('07-22').last()).toBeVisible();
-  await expect(page.getByText('会话数').last()).toBeVisible();
+  await expect(page.getByText('提问数').last()).toBeVisible();
   await expect(page.getByText('回答数').last()).toBeVisible();
 
   const resources = await page.evaluate(() => performance.getEntriesByType('resource').map(item => item.name));

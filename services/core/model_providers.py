@@ -41,6 +41,10 @@ def _stored_config_from_row(row: tuple[object, ...]) -> StoredModelConfig:
     )
 
 
+class ApiKeyRequiredError(ValueError):
+    """保存模型配置时缺少必须重新填写的 API Key。"""
+
+
 class ModelProviderStore:
     """Persist provider settings while enforcing one active provider."""
 
@@ -141,9 +145,19 @@ class ModelProviderStore:
         """创建或更新服务商，并在密钥变化后修正激活状态。"""
         with application_db.connect(self._db_file()) as conn:
             existing = conn.execute(
-                "SELECT 1 FROM models_config WHERE provider_name = ?", (provider,)
+                "SELECT api_key, base_url FROM models_config WHERE provider_name = ?",
+                (provider,),
             ).fetchone()
             if existing:
+                stored_key, stored_base_url = existing
+                # 已保存的 key 只能发往保存它时的地址，换地址必须重新填写，避免 key 被转发到别处。
+                if (
+                    stored_key
+                    and encrypted_api_key is None
+                    and not clear_api_key
+                    and base_url != stored_base_url
+                ):
+                    raise ApiKeyRequiredError("修改 Base URL 时需要重新填写 API Key")
                 key_value = "" if clear_api_key else encrypted_api_key
                 conn.execute(
                     "UPDATE models_config SET api_key = COALESCE(?, api_key), "

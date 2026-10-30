@@ -20,33 +20,18 @@ try:
         should_compact_database,
     )
     from services.knowledge_bases import use_cases as knowledge_base_use_cases
-    from services.retrieval import chroma as chroma_index
-    from services.retrieval import fts as fts_index
-    from services.retrieval import index_coordination as retrieval
-    from services.retrieval import retriever
+    from services.retrieval import parent_store
+    from services.retrieval.chunk_index import get_chunk_index
 except ModuleNotFoundError:
     Document = None
     app_storage = None
     knowledge_base = None
-    retrieval = None
 
 from tests.support import IsolatedStorageTestCase
 
 
-class FakeChromaClient:
-    def __init__(self):
-        self.closed = False
-        self.cache_cleared = False
-
-    def close(self):
-        self.closed = True
-
-    def clear_system_cache(self):
-        self.cache_cleared = True
-
-
 @unittest.skipUnless(
-    Document and app_storage and knowledge_base and retrieval,
+    Document and app_storage and knowledge_base,
     "requires the backend Python dependencies",
 )
 class StorageCleanupTest(IsolatedStorageTestCase):
@@ -55,7 +40,7 @@ class StorageCleanupTest(IsolatedStorageTestCase):
         app_storage.initialize_database()
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             conn.execute(
-                "INSERT INTO knowledge_bases (name, created_at) VALUES (?, ?)",
+                "INSERT INTO knowledge_bases (name, kb_id, created_at) VALUES (?, lower(hex(randomblob(16))), ?)",
                 ("研发部", application_config.db_now()),
             )
 
@@ -84,7 +69,7 @@ class StorageCleanupTest(IsolatedStorageTestCase):
         job_id = app_storage.index_jobs.create("研发部", "delete", "制度.pdf")
 
         with patch.object(
-            knowledge_base, "delete_document_indexes", side_effect=RuntimeError("chroma unavailable")
+            knowledge_base, "delete_document_indexes", side_effect=RuntimeError("index unavailable")
         ), patch.object(app_storage.index_jobs, "compact_database", return_value=False):
             knowledge_base.run_delete_job(job_id, "研发部", "制度.pdf")
 
@@ -107,11 +92,11 @@ class StorageCleanupTest(IsolatedStorageTestCase):
         )
         self.assertIn(job_id, app_storage.index_jobs.queued_ids())
 
-    def test_knowledge_base_delete_aborts_before_sqlite_when_chroma_fails(self):
+    def test_knowledge_base_delete_aborts_before_sqlite_when_index_delete_fails(self):
         with patch.object(
-            chroma_index,
-            "chroma_delete_by_knowledge_base",
-            side_effect=RuntimeError("chroma unavailable"),
+            get_chunk_index(),
+            "delete_kb",
+            side_effect=RuntimeError("index unavailable"),
         ):
             with self.assertRaises(ServiceUnavailableError) as raised:
                 knowledge_base_use_cases.delete_knowledge_base("研发部")
@@ -120,6 +105,35 @@ class StorageCleanupTest(IsolatedStorageTestCase):
             raised.exception.code, "knowledge_base_index_cleanup_failed"
         )
         self.assertTrue(app_storage.documents.knowledge_base_exists("研发部"))
+
+    def test_knowledge_base_delete_removes_index_and_parent_rows(self):
+        kb_id = app_storage.knowledge_bases.kb_id_for("研发部")
+        other_id = "other-kb"
+        index = get_chunk_index()
+        child = Document(
+            page_content="子块", metadata={"source": "制度.pdf", "parent_id": "p1"}
+        )
+        index.publish_source(kb_id, "制度.pdf", [child], [[1.0, 0.0]])
+        index.publish_source(other_id, "制度.pdf", [child], [[1.0, 0.0]])
+        for owner in (kb_id, other_id):
+            with sqlite3.connect(app_storage.DB_FILE) as conn:
+                conn.execute(
+                    "INSERT INTO parent_chunks (kb_id, parent_id, source, page, content, "
+                    "contextual_title) VALUES (?, 'p1', '制度.pdf', '1', '父块', '')",
+                    (owner,),
+                )
+
+        with patch.object(
+            mineru_client, "remove_saved_results_for_knowledge_base"
+        ), patch.object(
+            app_storage.index_jobs, "compact_database", return_value=False
+        ), patch.object(app_storage.documents, "has_documents", return_value=True):
+            knowledge_base_use_cases.delete_knowledge_base("研发部")
+
+        self.assertEqual(index.available_routes(kb_id, None), set())
+        self.assertTrue(index.available_routes(other_id, None))
+        self.assertEqual(parent_store.load(kb_id, ["p1"]), {})
+        self.assertIn("p1", parent_store.load(other_id, ["p1"]))
 
     def test_knowledge_base_delete_removes_sessions_and_dangling_citations(self):
         with sqlite3.connect(app_storage.DB_FILE) as conn:
@@ -150,19 +164,15 @@ class StorageCleanupTest(IsolatedStorageTestCase):
                     ),
                 ],
             )
-            conn.execute(
-                "INSERT INTO chroma_disabled_sources VALUES (?, ?, ?, ?)",
-                ("研发部", "制度.pdf", "failed", application_config.db_now()),
-            )
 
-        with patch.object(chroma_index, "chroma_delete_by_knowledge_base"), patch.object(
-            fts_index, "remove_fts_index"
-        ), patch.object(chroma_index, "reset_empty_chroma_storage"), patch.object(
+        with patch.object(
             mineru_client, "remove_saved_results_for_knowledge_base"
-        ), patch.object(app_storage.index_jobs, "compact_database", return_value=False):
+        ), patch.object(app_storage.index_jobs, "compact_database", return_value=False) as compact:
             result = knowledge_bases.delete_knowledge_base("研发部")
 
         self.assertEqual(result, {"status": "success"})
+        # VACUUM 会锁住整个数据库的写入，不在删除请求里执行。
+        compact.assert_not_called()
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             self.assertIsNone(
                 conn.execute("SELECT 1 FROM chat_sessions WHERE id = 'deleted-session'").fetchone()
@@ -171,12 +181,6 @@ class StorageCleanupTest(IsolatedStorageTestCase):
                 "SELECT sources FROM chat_messages WHERE session_id = 'kept-session'"
             ).fetchone()[0]
             self.assertEqual(json.loads(sources), [{"source": "通用.pdf", "kb_name": "通用知识库"}])
-            self.assertEqual(
-                conn.execute(
-                    "SELECT COUNT(*) FROM chroma_disabled_sources WHERE kb_name = '研发部'"
-                ).fetchone()[0],
-                0,
-            )
 
     def test_knowledge_base_rename_updates_sessions_jobs_and_saved_citations(self):
         with sqlite3.connect(app_storage.DB_FILE) as conn:
@@ -198,13 +202,15 @@ class StorageCleanupTest(IsolatedStorageTestCase):
                     "2026-01-01",
                 ),
             )
-            conn.execute(
-                "INSERT INTO chroma_disabled_sources VALUES (?, ?, ?, ?)",
-                ("研发部", "制度.pdf", "failed", application_config.db_now()),
-            )
         job_id = app_storage.index_jobs.create("研发部", "rebuild")
 
-        with patch.object(retrieval, "rename_knowledge_base_indexes"), patch.object(
+        kb_id = app_storage.knowledge_bases.kb_id_for("研发部")
+        index = get_chunk_index()
+        index.publish_source(
+            kb_id, "制度.pdf", [Document(page_content="子块", metadata={})], [[1.0, 0.0]]
+        )
+
+        with patch.object(
             mineru_client, "rename_saved_results_for_knowledge_base"
         ):
             result = knowledge_bases.rename_knowledge_base(
@@ -223,22 +229,15 @@ class StorageCleanupTest(IsolatedStorageTestCase):
         self.assertEqual(session, ("产品研发部", "产品研发部 会话"))
         self.assertEqual(json.loads(sources)[0]["kb_name"], "产品研发部")
         self.assertEqual(job_dept, "产品研发部")
-        self.assertEqual(
-            app_storage.documents.chroma_disabled_sources("产品研发部"), ["制度.pdf"]
-        )
+        self.assertEqual(app_storage.knowledge_bases.kb_id_for("产品研发部"), kb_id)
+        self.assertTrue(index.available_routes(kb_id, None))
 
     def test_knowledge_base_rename_rolls_back_moved_files_when_database_update_fails(self):
         old_data_dir = app_storage.documents.ensure_knowledge_base_dir("研发部")
-        old_index_dir = fts_index.vector_store_dir("研发部")
-        os.makedirs(old_index_dir, exist_ok=True)
         with open(os.path.join(old_data_dir, "制度.txt"), "w", encoding="utf-8") as output:
             output.write("原始文档")
-        with open(os.path.join(old_index_dir, "marker"), "w", encoding="utf-8") as output:
-            output.write("原始索引")
 
         with patch.object(
-            chroma_index, "rename_chroma_knowledge_base"
-        ), patch.object(
             mineru_client, "rename_saved_results_for_knowledge_base"
         ), patch.object(
             app_storage.knowledge_bases,
@@ -256,76 +255,17 @@ class StorageCleanupTest(IsolatedStorageTestCase):
         self.assertFalse(
             os.path.exists(app_storage.documents.knowledge_base_path("产品研发部"))
         )
-        self.assertTrue(os.path.isdir(old_index_dir))
-        self.assertFalse(os.path.exists(fts_index.vector_store_dir("产品研发部")))
         self.assertTrue(app_storage.documents.knowledge_base_exists("研发部"))
         self.assertFalse(app_storage.documents.knowledge_base_exists("产品研发部"))
 
-    def test_index_rename_restores_fts_when_chroma_rename_fails(self):
-        old_index_dir = fts_index.vector_store_dir("研发部")
-        new_index_dir = fts_index.vector_store_dir("产品研发部")
-        os.makedirs(old_index_dir, exist_ok=True)
-        with open(os.path.join(old_index_dir, "marker"), "w", encoding="utf-8") as output:
-            output.write("原始索引")
-
-        with patch.object(
-            chroma_index,
-            "rename_chroma_knowledge_base",
-            side_effect=RuntimeError("chroma unavailable"),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "chroma unavailable"):
-                retrieval.rename_knowledge_base_indexes("研发部", "产品研发部")
-
-        self.assertTrue(os.path.isdir(old_index_dir))
-        self.assertFalse(os.path.exists(new_index_dir))
-
-    def test_empty_fts_directory_is_removed_after_document_delete(self):
-        fts_path = os.path.join(fts_index.vector_store_dir("研发部"), "fts5.db")
-        fts_index.build_fts5_index(
-            [Document(page_content="仅用于删除测试", metadata={"source": "制度.pdf"})],
-            fts_path,
+    def test_empty_index_is_reset_when_no_documents_remain(self):
+        index = get_chunk_index()
+        index.publish_source(
+            "kb-1", "制度.pdf", [Document(page_content="子块", metadata={})], [[1.0, 0.0]]
         )
 
-        fts_index.delete_from_fts5("研发部", "制度.pdf")
-        self.assertTrue(
-            fts_index.remove_empty_fts_index(
-                "研发部", app_storage.documents.has_documents
-            )
-        )
-        self.assertFalse(os.path.exists(fts_index.vector_store_dir("研发部")))
-
-    def test_fts_delete_failure_is_propagated_to_the_cleanup_job(self):
-        fts_path = os.path.join(fts_index.vector_store_dir("研发部"), "fts5.db")
-        fts_index.build_fts5_index(
-            [Document(page_content="仅用于删除测试", metadata={"source": "制度.pdf"})],
-            fts_path,
-        )
-
-        with patch.object(
-            fts_index.sqlite3,
-            "connect",
-            side_effect=sqlite3.OperationalError("database is locked"),
-        ):
-            with self.assertRaisesRegex(sqlite3.OperationalError, "database is locked"):
-                fts_index.delete_from_fts5("研发部", "制度.pdf")
-
-    def test_empty_chroma_storage_is_physically_removed(self):
-        os.makedirs(chroma_index.CHROMA_PATH, exist_ok=True)
-        stale_file = os.path.join(chroma_index.CHROMA_PATH, "stale.bin")
-        with open(stale_file, "wb") as output:
-            output.write(b"stale index")
-        client = FakeChromaClient()
-        chroma_index._chroma_client = client
-
-        self.assertTrue(
-            chroma_index.reset_empty_chroma_storage(
-                lambda: False, retriever.clear_retriever_cache
-            )
-        )
-        self.assertTrue(client.closed)
-        self.assertTrue(client.cache_cleared)
-        self.assertIsNone(chroma_index._chroma_client)
-        self.assertFalse(os.path.exists(chroma_index.CHROMA_PATH))
+        self.assertTrue(index.reset_if_empty(lambda: False))
+        self.assertEqual(index.available_routes("kb-1", None), set())
 
     def test_chat_delete_removes_rows_without_immediate_compaction(self):
         with sqlite3.connect(app_storage.DB_FILE) as conn:

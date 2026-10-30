@@ -1,29 +1,28 @@
 import asyncio
-import os
-import sqlite3
+import dataclasses
 import unittest
-import warnings
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 try:
-    import chromadb
     from langchain_core.documents import Document
 
     import app_storage
+    from services.core.container import get_application_container
     from services.indexing import chunking
-    from services.indexing import schema as index_schema
-    from services.retrieval import chroma as chroma_index
-    from services.retrieval import chroma as retrieval
     from services.retrieval import context as context_builder
-    from services.retrieval import fts as fts_index
-    from services.retrieval import retriever as retriever
-    from services.retrieval import source_state
+    from services.retrieval import parent_store, retriever, source_state
+    from services.retrieval.cache import RetrieverCache
+    from services.retrieval.chunk_index import (
+        build_filter,
+        embed_splits,
+        escape_filter_value,
+        get_chunk_index,
+    )
 except ModuleNotFoundError:
-    chromadb = None
     Document = None
-    retrieval = None
     source_state = None
 
+from tests.retrieval_fixtures import create_knowledge_base, mark_ready, publish
 from tests.support import IsolatedStorageTestCase
 
 
@@ -35,11 +34,6 @@ class FakeEmbeddings:
         return [1.0, 0.0]
 
 
-class FailingEmbeddings:
-    def embed_documents(self, texts):
-        raise RuntimeError("embedding unavailable")
-
-
 class CountingEmbeddings(FakeEmbeddings):
     def __init__(self):
         self.query_calls = 0
@@ -49,14 +43,11 @@ class CountingEmbeddings(FakeEmbeddings):
         return super().embed_query(query)
 
 
-@unittest.skipUnless(
-    Document and retrieval and chromadb and source_state,
-    "requires the backend Python dependencies",
-)
+@unittest.skipUnless(Document and source_state, "requires the backend Python dependencies")
 class ParentChildRetrievalTest(IsolatedStorageTestCase):
     def setUp(self):
         super().setUp()
-        self.embeddings = FakeEmbeddings()
+        self.kb_name = "人力资源部"
         self.child = Document(
             page_content="子块中的审批规则",
             metadata={
@@ -67,359 +58,381 @@ class ParentChildRetrievalTest(IsolatedStorageTestCase):
             },
         )
 
-    def test_fts_query_drops_single_character_stopwords_but_keeps_model_codes(self):
-        queries = fts_index._fts_match_queries("报销的流程是什么 A 型号", 10)
-        text = " ".join(query for query, _ in queries)
-        self.assertNotIn('"的"', text)
-        self.assertNotIn('"是"', text)
-        self.assertIn('"报销"', text)
-        self.assertIn('"流程"', text)
-        self.assertIn('"A"', text)
+    def index(self):
+        return get_chunk_index()
 
-    def test_chroma_metadata_keeps_parent_identifier_without_parent_text(self):
-        metadata = chroma_index.chroma_metadata_for_split(
-            self.child, "人力资源部", "制度.pdf"
+    def search(self, kb_id, query, sources=None, route=None, k=5):
+        return self.index().search_hybrid(kb_id, query, [1.0, 0.0], route, sources, k)
+
+    def test_filter_escapes_backslashes_and_quotes(self):
+        self.assertEqual(escape_filter_value('a"b\\c'), 'a\\"b\\\\c')
+        expression = build_filter(
+            "kb-1",
+            source='报告"终版"\\草稿.pdf',
+            sources=['x" or kb_id != "', "正常.pdf"],
+            route="fixed",
         )
-        self.assertEqual(metadata["parent_id"], "parent-1")
         self.assertEqual(
-            metadata[index_schema.CHROMA_SCHEMA_VERSION_FIELD],
-            index_schema.CURRENT_INDEX_SCHEMA_VERSION,
-        )
-        self.assertNotIn("parent_content", metadata)
-
-    def test_chroma_metadata_omits_sqlite_document_filters(self):
-        split = Document(
-            page_content="制度正文",
-            metadata={
-                "source": "制度.pdf",
-                "document_type": "制度",
-                "document_tags": "研发、现行",
-                "effective_date": "2026-01-01",
-            },
+            expression,
+            'kb_id == "kb-1" and source == "报告\\"终版\\"\\\\草稿.pdf" '
+            'and source in ["x\\" or kb_id != \\"", "正常.pdf"] '
+            'and chunk_route == "fixed"',
         )
 
-        metadata = chroma_index.chroma_metadata_for_split(
-            split, "人力资源部", "制度.pdf"
+    def test_filter_with_hostile_filename_matches_only_that_source(self):
+        hostile = '合同"终版"\\草稿.pdf'
+        kb_id = publish(
+            self.kb_name, hostile, [Document(page_content="审批条款", metadata={"source": hostile})]
+        )
+        publish(
+            self.kb_name, "正常.pdf", [Document(page_content="审批条款", metadata={"source": "正常.pdf"})]
         )
 
-        self.assertNotIn("document_type", metadata)
-        self.assertNotIn("document_tags", metadata)
-        self.assertNotIn("effective_date", metadata)
+        found = self.search(kb_id, "审批条款", sources=[hostile])
 
-    def test_request_source_snapshot_is_shared_by_retrievers_and_worker_threads(self):
-        states = [
-            (["现行制度.pdf", "降级方案.pdf"], ["降级方案.pdf"]),
-            (["新版制度.pdf"], []),
-        ]
-        with patch.object(
-            app_storage.documents, "knowledge_base_exists", return_value=False
-        ), patch.object(
-            app_storage.documents, "retrieval_source_state", side_effect=states
-        ) as source_state_read:
-            with source_state.request_source_snapshot("人力资源部"):
-                self.assertEqual(
-                    source_state.current_source_allowlist("人力资源部", None),
-                    ("现行制度.pdf", "降级方案.pdf"),
-                )
-                self.assertEqual(
-                    chroma_index.current_chroma_source_allowlist("人力资源部", None),
-                    ("现行制度.pdf",),
-                )
-                threaded_sources = asyncio.run(
-                    asyncio.to_thread(source_state.ready_sources, "人力资源部")
-                )
-                self.assertEqual(
-                    threaded_sources, ("现行制度.pdf", "降级方案.pdf")
-                )
+        self.assertEqual([document.metadata["source"] for document in found], [hostile])
 
-            with source_state.request_source_snapshot("人力资源部"):
-                self.assertEqual(
-                    source_state.ready_sources("人力资源部"), ("新版制度.pdf",)
-                )
-
-        self.assertEqual(source_state_read.call_count, 2)
-
-    def test_query_embedding_is_shared_across_route_retrievers(self):
-        base_embeddings = CountingEmbeddings()
-        embeddings = retriever.CachedQueryEmbeddings(base_embeddings)
-        collection = Mock()
-        collection.query.return_value = {"documents": [[]], "metadatas": [[]]}
-
-        with patch.object(
-            chroma_index, "get_chroma_collection", return_value=collection
-        ):
-            for route in (
-                chunking.CHUNK_ROUTE_FIXED,
-                chunking.CHUNK_ROUTE_STRUCTURED,
-                chunking.CHUNK_ROUTE_VISUAL,
-            ):
-                chroma_index.ChromaRetriever(
-                    kb_name="人力资源部",
-                    embeddings=embeddings,
-                    chunk_route=route,
-                ).invoke("审批规则")
-
-        self.assertEqual(collection.query.call_count, 3)
-        self.assertEqual(base_embeddings.query_calls, 1)
-
-    def test_chroma_retrieval_excludes_unversioned_records(self):
-        collection = chroma_index.get_chroma_collection()
-        collection.upsert(
-            ids=["legacy-record"],
-            embeddings=[[1.0, 0.0]],
-            documents=["旧版本向量不应参与检索"],
-            metadatas=[{"kb_name": "人力资源部", "source": "旧制度.pdf"}],
-        )
-
-        documents = chroma_index.ChromaRetriever(
-            kb_name="人力资源部",
-            embeddings=self.embeddings,
-            k=5,
-            allowed_sources=("旧制度.pdf",),
-        ).invoke("旧版本")
-
-        self.assertEqual(documents, [])
-
-    def test_chroma_upsert_query_rename_and_delete(self):
-        retrieval.chroma_upsert_splits([self.child], "人力资源部", "制度.pdf", self.embeddings)
-        other_child = Document(
-            page_content="另一份文档中的审批规则",
-            metadata={"source": "其他制度.pdf", "page": 0},
-        )
-        retrieval.chroma_upsert_splits([other_child], "人力资源部", "其他制度.pdf", self.embeddings)
-        collection = chroma_index.get_chroma_collection(create=False)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            self.assertEqual(collection.configuration["hnsw"]["space"], "cosine")
-        records = collection.get(where={"kb_name": "人力资源部"}, include=["documents", "metadatas"])
-        self.assertIn(self.child.page_content, records["documents"])
-        parent_metadata = next(
-            metadata for metadata in records["metadatas"] if metadata["source"] == "制度.pdf"
-        )
-        self.assertEqual(parent_metadata["parent_id"], "parent-1")
-        self.assertEqual(
-            parent_metadata[index_schema.CHROMA_SCHEMA_VERSION_FIELD],
-            index_schema.CURRENT_INDEX_SCHEMA_VERSION,
-        )
-        self.assertNotIn("parent_content", parent_metadata)
-
-        docs = chroma_index.ChromaRetriever(
-            kb_name="人力资源部", embeddings=self.embeddings, k=5, allowed_sources=("制度.pdf",)
-        ).invoke("审批规则")
-        self.assertEqual(docs[0].metadata["source"], "制度.pdf")
-
-        chroma_index.rename_chroma_knowledge_base("人力资源部", "研发部")
-        self.assertEqual(collection.get(where={"kb_name": "人力资源部"})["ids"], [])
-        self.assertEqual(len(collection.get(where={"kb_name": "研发部"})["ids"]), 2)
-
-        filtered_docs = chroma_index.ChromaRetriever(
-            kb_name="研发部", embeddings=self.embeddings, k=5, allowed_sources=("制度.pdf",)
-        ).invoke("审批规则")
-        self.assertEqual([document.metadata["source"] for document in filtered_docs], ["制度.pdf"])
-
-        retrieval.chroma_delete_by_source("研发部", "制度.pdf")
-        self.assertEqual(collection.count(), 1)
-
-    def test_chroma_upsert_uses_prefetched_vectors_without_embedding(self):
-        kb_name = "人力资源部"
-        vectors = retrieval.embed_splits([self.child], self.embeddings)
-
-        # 向量已在无锁阶段算好，写入时即使嵌入服务不可用也必须成功。
-        retrieval.chroma_upsert_splits(
-            [self.child], kb_name, "制度.pdf", FailingEmbeddings(), vectors=vectors
-        )
-
-        collection = chroma_index.get_chroma_collection(create=False)
-        self.assertEqual(
-            collection.get(where={"source": "制度.pdf"}, include=["documents"])["documents"],
-            [self.child.page_content],
-        )
-
-    def test_chroma_upsert_rejects_mismatched_vector_count(self):
-        with self.assertRaisesRegex(ValueError, "向量数量"):
-            retrieval.chroma_upsert_splits(
-                [self.child], "人力资源部", "制度.pdf", self.embeddings, vectors=[]
-            )
-        # 校验发生在触碰 Chroma 之前，集合不应被创建。
-        self.assertIsNone(chroma_index.get_chroma_collection(create=False))
-
-    def test_chroma_staged_upsert_keeps_previous_generation_on_failure(self):
-        kb_name = "人力资源部"
-        source = "制度.pdf"
-        retrieval.chroma_upsert_splits([self.child], kb_name, source, self.embeddings)
-        collection = chroma_index.get_chroma_collection(create=False)
-        replacement = Document(
-            page_content="更新后的审批规则",
-            metadata={"source": source, "page": 2},
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "embedding unavailable"):
-            retrieval.chroma_upsert_splits([replacement], kb_name, source, FailingEmbeddings())
-        self.assertEqual(
-            collection.get(where={"source": source}, include=["documents"])["documents"],
-            [self.child.page_content],
-        )
-
-        second_replacement = Document(
-            page_content="更新后的适用范围",
-            metadata={"source": source, "page": 2},
-        )
-        original_upsert = collection.upsert
-        calls = 0
-
-        def fail_second_batch(**kwargs):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                return original_upsert(**kwargs)
-            raise RuntimeError("batch write failed")
-
-        with patch.object(
-            chroma_index, "get_chroma_collection", return_value=collection
-        ), patch.object(
-            chroma_index, "_chroma_batch_size", return_value=1
-        ), patch.object(collection, "upsert", side_effect=fail_second_batch):
-            with self.assertRaisesRegex(RuntimeError, "batch write failed"):
-                retrieval.chroma_upsert_splits(
-                    [replacement, second_replacement], kb_name, source, self.embeddings
-                )
-        self.assertEqual(
-            collection.get(where={"source": source}, include=["documents"])["documents"],
-            [self.child.page_content],
-        )
-
-        retrieval.chroma_upsert_splits([replacement], kb_name, source, self.embeddings)
-        self.assertEqual(
-            collection.get(where={"source": source}, include=["documents"])["documents"],
-            [replacement.page_content],
-        )
-
-    def test_chroma_delete_failure_is_propagated(self):
-        retrieval.chroma_upsert_splits(
-            [self.child], "人力资源部", "制度.pdf", self.embeddings
-        )
-        collection = chroma_index.get_chroma_collection(create=False)
-
-        with patch.object(
-            chroma_index, "get_chroma_collection", return_value=collection
-        ), patch.object(collection, "delete", side_effect=RuntimeError("delete failed")):
-            with self.assertRaisesRegex(RuntimeError, "delete failed"):
-                retrieval.chroma_delete_by_source("人力资源部", "制度.pdf")
-
-    def test_cached_chroma_retriever_excludes_sources_removed_from_sqlite(self):
-        kb_name = "人力资源部"
-        retrieval.chroma_upsert_splits([self.child], kb_name, "制度.pdf", self.embeddings)
-        active = Document(
-            page_content="仍然有效的审批规则",
-            metadata={"source": "现行制度.pdf", "page": 0},
-        )
-        retrieval.chroma_upsert_splits([active], kb_name, "现行制度.pdf", self.embeddings)
-        chroma_retriever = chroma_index.ChromaRetriever(
-            kb_name=kb_name,
-            embeddings=self.embeddings,
-            k=5,
-            allowed_sources=("制度.pdf", "现行制度.pdf"),
-            enforce_current_sources=True,
-        )
-
-        with patch.object(
-            app_storage.documents, "ready_sources", return_value=["现行制度.pdf"]
-        ), patch.object(
-            app_storage.documents, "chroma_disabled_sources", return_value=[]
-        ):
-            documents = chroma_retriever.invoke("审批规则")
-
-        self.assertEqual(
-            [document.metadata["source"] for document in documents], ["现行制度.pdf"]
-        )
-
-    def test_cached_chroma_retriever_excludes_fts_only_sources(self):
-        kb_name = "人力资源部"
-        retrieval.chroma_upsert_splits([self.child], kb_name, "制度.pdf", self.embeddings)
-        active = Document(
-            page_content="仍然有效的审批规则",
-            metadata={"source": "现行制度.pdf", "page": 0},
-        )
-        retrieval.chroma_upsert_splits([active], kb_name, "现行制度.pdf", self.embeddings)
-        chroma_retriever = chroma_index.ChromaRetriever(
-            kb_name=kb_name,
-            embeddings=self.embeddings,
-            k=5,
-            allowed_sources=("制度.pdf", "现行制度.pdf"),
-            enforce_current_sources=True,
-        )
-
-        with patch.object(
-            app_storage.documents,
-            "ready_sources",
-            return_value=["制度.pdf", "现行制度.pdf"],
-        ), patch.object(
-            app_storage.documents,
-            "chroma_disabled_sources",
-            return_value=["制度.pdf"],
-        ):
-            documents = chroma_retriever.invoke("审批规则")
-
-        self.assertEqual(
-            [document.metadata["source"] for document in documents], ["现行制度.pdf"]
-        )
-
-    def test_chroma_stale_source_cleanup_keeps_active_sources(self):
-        kb_name = "人力资源部"
-        retrieval.chroma_upsert_splits([self.child], kb_name, "制度.pdf", self.embeddings)
-        retrieval.chroma_upsert_splits(
-            [Document(page_content="旧制度内容", metadata={"source": "旧制度.pdf", "page": 0})],
-            kb_name,
-            "旧制度.pdf",
-            self.embeddings,
-        )
-
-        removed = retrieval.chroma_delete_stale_sources(kb_name, {"制度.pdf"})
-        collection = chroma_index.get_chroma_collection(create=False)
-
-        self.assertEqual(removed, 1)
-        self.assertEqual(collection.get(where={"source": "旧制度.pdf"})["ids"], [])
-        self.assertEqual(len(collection.get(where={"source": "制度.pdf"})["ids"]), 1)
-
-    def test_fts5_stores_parent_once_and_restores_it_after_retrieval(self):
-        kb_name = "人力资源部"
+    def test_parent_rows_keep_each_parent_once_and_scope_by_kb(self):
         second_child = Document(
             page_content="子块中的适用范围",
             metadata={"source": "制度.pdf", "page": 2, "parent_id": "parent-1"},
         )
-        fts_path = os.path.join(fts_index.vector_store_dir(kb_name), "fts5.db")
-        fts_index.build_fts5_index([self.child, second_child], fts_path)
+        kb_id = create_knowledge_base(self.kb_name)
+        other_kb_id = create_knowledge_base("研发部")
 
-        with sqlite3.connect(fts_path) as conn:
-            child_rows = conn.execute("SELECT original_text FROM docs ORDER BY rowid").fetchall()
-            parent_rows = conn.execute(
-                "SELECT parent_id, content FROM parent_chunks"
-            ).fetchall()
+        rows = parent_store.parent_chunk_rows([self.child, second_child])
+        parent_store.replace_source(kb_id, "制度.pdf", rows)
 
-        self.assertTrue(fts_index.fts5_index_is_current(fts_path))
-        self.assertEqual([row[0] for row in child_rows], [self.child.page_content, second_child.page_content])
-        self.assertEqual(parent_rows, [("parent-1", self.child.metadata["parent_content"])])
+        self.assertEqual(
+            rows,
+            [("parent-1", "制度.pdf", "2", self.child.metadata["parent_content"], "")],
+        )
+        self.assertEqual(set(parent_store.load(kb_id, ["parent-1"])), {"parent-1"})
+        self.assertEqual(parent_store.load(other_kb_id, ["parent-1"]), {})
 
-        found = fts_index.FTS5Retriever(
-            db_path=fts_path, kb_name=kb_name
-        ).invoke("审批规则")
+    def test_parent_replace_and_delete(self):
+        kb_id = create_knowledge_base(self.kb_name)
+        parent_store.replace_source(kb_id, "制度.pdf", [("p1", "制度.pdf", "1", "旧内容", "")])
+        parent_store.replace_source(kb_id, "制度.pdf", [("p2", "制度.pdf", "1", "新内容", "")])
+        parent_store.replace_source(kb_id, "其他.pdf", [("p3", "其他.pdf", "1", "其他", "")])
+
+        self.assertEqual(set(parent_store.load(kb_id, ["p1", "p2", "p3"])), {"p2", "p3"})
+        parent_store.delete_source(kb_id, "制度.pdf")
+        parent_store.delete_source(kb_id, "制度.pdf")
+        self.assertEqual(set(parent_store.load(kb_id, ["p2", "p3"])), {"p3"})
+        parent_store.delete_kb(kb_id)
+        self.assertEqual(parent_store.load(kb_id, ["p3"]), {})
+
+    def test_parent_text_is_stored_once_and_restored_after_retrieval(self):
+        second_child = Document(
+            page_content="子块中的适用范围",
+            metadata={"source": "制度.pdf", "page": 2, "parent_id": "parent-1"},
+        )
+        kb_id = publish(self.kb_name, "制度.pdf", [self.child, second_child])
+        parent_store.replace_source(
+            kb_id, "制度.pdf", parent_store.parent_chunk_rows([self.child, second_child])
+        )
+
+        found = self.search(kb_id, "审批规则")
         self.assertEqual(found[0].page_content, self.child.page_content)
         self.assertNotIn("parent_content", found[0].metadata)
 
-        spans = context_builder.build_context_spans(
-            kb_name,
-            found,
-            neighbor_chunks=0,
-        )
+        spans = context_builder.build_context_spans(self.kb_name, found, neighbor_chunks=0)
         self.assertEqual(len(spans), 1)
         self.assertEqual(spans[0].content, self.child.metadata["parent_content"])
 
-        found = fts_index.FTS5Retriever(
-            db_path=fts_path, kb_name=kb_name
-        ).invoke("审批规则")
-        restored = context_builder.restore_parent_documents(kb_name, found)
-        self.assertEqual(restored[0].page_content, self.child.metadata["parent_content"])
+        restored = context_builder.restore_parent_documents(
+            self.kb_name, self.search(kb_id, "审批规则")
+        )
         self.assertEqual(len(restored), 1)
+        self.assertEqual(restored[0].page_content, self.child.metadata["parent_content"])
+
+    def test_request_source_snapshot_is_shared_by_retrievers_and_worker_threads(self):
+        states = [["现行制度.pdf", "降级方案.pdf"], ["新版制度.pdf"]]
+        with patch.object(
+            app_storage.documents, "knowledge_base_exists", return_value=False
+        ), patch.object(
+            app_storage.documents, "ready_sources", side_effect=states
+        ) as ready_read:
+            with source_state.request_source_snapshot(self.kb_name):
+                self.assertEqual(
+                    source_state.current_source_allowlist(self.kb_name, None),
+                    ("现行制度.pdf", "降级方案.pdf"),
+                )
+                threaded_sources = asyncio.run(
+                    asyncio.to_thread(source_state.ready_sources, self.kb_name)
+                )
+                self.assertEqual(threaded_sources, ("现行制度.pdf", "降级方案.pdf"))
+
+            with source_state.request_source_snapshot(self.kb_name):
+                self.assertEqual(
+                    source_state.ready_sources(self.kb_name), ("新版制度.pdf",)
+                )
+
+        self.assertEqual(ready_read.call_count, 2)
+
+    def _publish_department_and_common(self):
+        for kb_name, source in ((self.kb_name, "部门制度.pdf"), (source_state.COMMON_KNOWLEDGE_BASE, "通用制度.pdf")):
+            publish(kb_name, source, [Document(page_content="审批规则", metadata={"source": source})])
+            mark_ready(kb_name, source)
+
+    def test_common_knowledge_base_is_supplemented_only_when_requested(self):
+        self._publish_department_and_common()
+
+        container = dataclasses.replace(
+            get_application_container(), create_query_embeddings=FakeEmbeddings
+        )
+
+        def retrieved_sources(include_common):
+            with source_state.request_source_snapshot(
+                self.kb_name, container, include_common=include_common
+            ):
+                dense = retriever.build_retriever(
+                    self.kb_name, include_common=include_common, container=container
+                ).invoke("审批规则")
+                lexical = retriever.retrieve_lexical_candidates(
+                    self.kb_name, "审批规则", include_common=include_common, container=container
+                )
+            return {document.metadata["source"] for document in dense + lexical}
+
+        self.assertEqual(retrieved_sources(False), {"部门制度.pdf"})
+        self.assertEqual(retrieved_sources(True), {"部门制度.pdf", "通用制度.pdf"})
+
+    def test_retriever_cache_keeps_supplemented_and_plain_graphs_apart(self):
+        with patch.object(retriever, "_retriever_cache", RetrieverCache(8)):
+            retriever.cache_retriever(self.kb_name, "with-common", include_common=True)
+            self.assertIsNone(retriever.get_cached_retriever(self.kb_name))
+            retriever.cache_retriever(self.kb_name, "plain")
+            self.assertEqual(
+                retriever.get_cached_retriever(self.kb_name, include_common=True), "with-common"
+            )
+            retriever.drop_cached_retriever(self.kb_name)
+            self.assertIsNone(retriever.get_cached_retriever(self.kb_name))
+            self.assertIsNone(retriever.get_cached_retriever(self.kb_name, include_common=True))
+
+    def test_query_embedding_is_shared_across_route_searches(self):
+        base_embeddings = CountingEmbeddings()
+        embeddings = retriever.CachedQueryEmbeddings(base_embeddings)
+        kb_id = create_knowledge_base(self.kb_name)
+        mark_ready(self.kb_name, "制度.pdf")
+        plans = [
+            retriever._RoutePlan(self.kb_name, kb_id, route, 1 / 3, None)
+            for route in (
+                chunking.CHUNK_ROUTE_FIXED,
+                chunking.CHUNK_ROUTE_STRUCTURED,
+                chunking.CHUNK_ROUTE_VISUAL,
+            )
+        ]
+        with patch.object(self.index(), "search_hybrid", return_value=[]) as search:
+            retriever.WeightedRouteRetriever(self.index(), embeddings, plans).invoke("审批规则")
+
+        self.assertEqual(search.call_count, 3)
+        self.assertEqual(base_embeddings.query_calls, 1)
+
+    def test_query_vectors_are_shared_across_retriever_instances(self):
+        base_embeddings = CountingEmbeddings()
+
+        retriever.CachedQueryEmbeddings(base_embeddings).embed_query("审批规则")
+        retriever.CachedQueryEmbeddings(base_embeddings).embed_query("审批规则")
+
+        self.assertEqual(base_embeddings.query_calls, 1)
+
+    def test_route_probe_is_cached_until_the_knowledge_base_changes(self):
+        publish(
+            self.kb_name,
+            "制度.pdf",
+            [Document(page_content="固定块", metadata={"source": "制度.pdf"})],
+        )
+        mark_ready(self.kb_name, "制度.pdf")
+        index = self.index()
+
+        with patch.object(index, "available_routes", wraps=index.available_routes) as probe:
+            for _ in range(2):
+                retriever._route_plans(app_storage_container(), index, self.kb_name, None, 0.7)
+            self.assertEqual(probe.call_count, 1)
+
+            retriever.drop_cached_retriever(self.kb_name)
+            retriever._route_plans(app_storage_container(), index, self.kb_name, None, 0.7)
+            self.assertEqual(probe.call_count, 2)
+
+    def test_route_probe_result_is_not_cached_when_invalidated_meanwhile(self):
+        cache = retriever._RouteCache()
+
+        def probe():
+            cache.drop("研发部")
+            return {"fixed"}
+
+        self.assertEqual(cache.routes("研发部", ("a.pdf",), probe), {"fixed"})
+        self.assertEqual(cache.routes("研发部", ("a.pdf",), lambda: {"visual"}), {"visual"})
+
+    def test_route_weights_renormalize_over_existing_routes(self):
+        kb_id = publish(
+            self.kb_name,
+            "制度.pdf",
+            [Document(page_content="固定块", metadata={"source": "制度.pdf"})],
+        )
+        mark_ready(self.kb_name, "制度.pdf")
+
+        plans = retriever._route_plans(
+            app_storage_container(), self.index(), self.kb_name, None, 0.70
+        )
+
+        self.assertEqual([plan.route for plan in plans], [chunking.CHUNK_ROUTE_FIXED])
+        self.assertAlmostEqual(plans[0].weight, 0.70)
+        self.assertEqual(plans[0].kb_id, kb_id)
+
+    def test_fusion_ranks_higher_weighted_route_first(self):
+        source = "制度.pdf"
+        fixed = Document(
+            page_content="审批规则固定块",
+            metadata={"source": source, "chunk_route": chunking.CHUNK_ROUTE_FIXED},
+        )
+        visual = Document(
+            page_content="审批规则视觉块",
+            metadata={"source": source, "chunk_route": chunking.CHUNK_ROUTE_VISUAL},
+        )
+        kb_id = publish(self.kb_name, source, [fixed, visual])
+        mark_ready(self.kb_name, source)
+        plans = [
+            retriever._RoutePlan(self.kb_name, kb_id, chunking.CHUNK_ROUTE_VISUAL, 0.15, None),
+            retriever._RoutePlan(self.kb_name, kb_id, chunking.CHUNK_ROUTE_FIXED, 0.60, None),
+        ]
+
+        found = retriever.WeightedRouteRetriever(
+            self.index(), FakeEmbeddings(), plans
+        ).invoke("审批规则")
+
+        self.assertEqual(
+            [document.metadata["chunk_route"] for document in found],
+            [chunking.CHUNK_ROUTE_FIXED, chunking.CHUNK_ROUTE_VISUAL],
+        )
+        self.assertTrue(all(document.metadata["kb_name"] == self.kb_name for document in found))
+
+    def test_retrieval_excludes_sources_not_ready_in_sqlite(self):
+        kb_id = publish(
+            self.kb_name, "旧制度.pdf", [Document(page_content="审批规则", metadata={"source": "旧制度.pdf"})]
+        )
+        publish(
+            self.kb_name, "现行制度.pdf", [Document(page_content="审批规则", metadata={"source": "现行制度.pdf"})]
+        )
+        mark_ready(self.kb_name, "现行制度.pdf")
+        plan = retriever._RoutePlan(
+            self.kb_name, kb_id, chunking.CHUNK_ROUTE_FIXED, 1.0, ("旧制度.pdf", "现行制度.pdf")
+        )
+
+        found = retriever.WeightedRouteRetriever(
+            self.index(), FakeEmbeddings(), [plan]
+        ).invoke("审批规则")
+
+        self.assertEqual([document.metadata["source"] for document in found], ["现行制度.pdf"])
+
+    def test_search_failure_propagates_instead_of_returning_empty(self):
+        kb_id = create_knowledge_base(self.kb_name)
+        mark_ready(self.kb_name, "制度.pdf")
+        plan = retriever._RoutePlan(self.kb_name, kb_id, chunking.CHUNK_ROUTE_FIXED, 1.0, None)
+
+        with patch.object(self.index(), "search_hybrid", side_effect=RuntimeError("milvus down")):
+            with self.assertRaisesRegex(RuntimeError, "milvus down"):
+                retriever.WeightedRouteRetriever(
+                    self.index(), FakeEmbeddings(), [plan]
+                ).invoke("审批规则")
+
+    def test_publish_replaces_previous_generation(self):
+        source = "制度.pdf"
+        kb_id = publish(self.kb_name, source, [self.child])
+        publish(self.kb_name, source, [Document(page_content="更新后的审批规则", metadata={"source": source})])
+
+        found = self.search(kb_id, "审批规则", sources=[source])
+
+        self.assertEqual([document.page_content for document in found], ["更新后的审批规则"])
+
+    def test_failed_publish_keeps_previous_generation(self):
+        source = "制度.pdf"
+        kb_id = publish(self.kb_name, source, [self.child])
+        self.index().fail_next_publish = RuntimeError("batch write failed")
+
+        with self.assertRaisesRegex(RuntimeError, "batch write failed"):
+            publish(self.kb_name, source, [Document(page_content="新版内容", metadata={"source": source})])
+
+        found = self.search(kb_id, "审批规则", sources=[source])
+        self.assertEqual([document.page_content for document in found], [self.child.page_content])
+
+    def test_publish_rejects_mismatched_vector_count(self):
+        kb_id = create_knowledge_base(self.kb_name)
+        with self.assertRaisesRegex(ValueError, "向量数量"):
+            self.index().publish_source(kb_id, "制度.pdf", [self.child], [])
+        self.assertEqual(self.index().available_routes(kb_id, None), set())
+
+    def test_publish_uses_prefetched_vectors_without_embedding(self):
+        vectors = embed_splits([self.child], FakeEmbeddings())
+        kb_id = create_knowledge_base(self.kb_name)
+
+        self.index().publish_source(kb_id, "制度.pdf", [self.child], vectors)
+
+        self.assertEqual(self.index().available_routes(kb_id, ["制度.pdf"]), {chunking.CHUNK_ROUTE_FIXED})
+
+    def test_rename_keeps_vectors_reachable_through_stable_kb_id(self):
+        kb_id = publish(self.kb_name, "制度.pdf", [self.child])
+        before = self.index().available_routes(kb_id, None)
+
+        app_storage.knowledge_bases.rename_relational_data(
+            self.kb_name, "研发部", "/tmp/old", "/tmp/new"
+        )
+
+        self.assertEqual(app_storage.knowledge_bases.kb_id_for("研发部"), kb_id)
+        self.assertIsNone(app_storage.knowledge_bases.kb_id_for(self.kb_name))
+        self.assertEqual(self.index().available_routes(kb_id, None), before)
+        self.assertEqual(
+            [document.metadata["source"] for document in self.search(kb_id, "审批规则")],
+            ["制度.pdf"],
+        )
+
+    def test_delete_source_kb_and_stale_cleanup(self):
+        kb_id = publish(self.kb_name, "制度.pdf", [self.child])
+        publish(self.kb_name, "旧制度.pdf", [Document(page_content="旧制度内容", metadata={"source": "旧制度.pdf"})])
+        other_kb_id = publish("研发部", "制度.pdf", [self.child])
+
+        removed = self.index().delete_stale_sources(kb_id, {"制度.pdf"})
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(self.search(kb_id, "旧制度内容", sources=["旧制度.pdf"]), [])
+        self.assertEqual(len(self.search(kb_id, "审批规则", sources=["制度.pdf"])), 1)
+
+        self.index().delete_source(kb_id, "制度.pdf")
+        self.index().delete_source(kb_id, "制度.pdf")
+        self.assertEqual(self.index().available_routes(kb_id, None), set())
+        self.assertEqual(len(self.search(other_kb_id, "审批规则")), 1)
+
+        self.index().delete_kb(other_kb_id)
+        self.index().delete_kb(other_kb_id)
+        self.assertEqual(self.index().available_routes(other_kb_id, None), set())
+
+    def test_reset_if_empty_only_clears_when_no_documents_remain(self):
+        kb_id = publish(self.kb_name, "制度.pdf", [self.child])
+
+        self.assertFalse(self.index().reset_if_empty(lambda: True))
+        self.assertEqual(len(self.search(kb_id, "审批规则")), 1)
+        self.assertTrue(self.index().reset_if_empty(lambda: False))
+        self.assertEqual(self.search(kb_id, "审批规则"), [])
+
+    def test_reset_if_empty_rechecks_before_dropping(self):
+        kb_id = publish(self.kb_name, "制度.pdf", [self.child])
+        answers = iter([False, True])  # 第一次判断为空，拿到锁后已有新文档登记
+
+        self.assertFalse(self.index().reset_if_empty(lambda: next(answers)))
+        self.assertEqual(len(self.search(kb_id, "审批规则")), 1)
+
+    def test_neighbors_return_ordered_chunks_within_one_route(self):
+        source = "手册.pdf"
+        splits = [
+            Document(page_content=f"片段 {index}", metadata={"source": source})
+            for index in range(5)
+        ]
+        kb_id = publish(self.kb_name, source, splits)
+
+        found = self.index().neighbors(kb_id, source, chunking.CHUNK_ROUTE_FIXED, 1, 3)
+
+        self.assertEqual([document.page_content for document in found], ["片段 1", "片段 2", "片段 3"])
 
     def test_parent_child_split_keeps_parent_text_on_one_transient_child_only(self):
         source = Document(
@@ -435,6 +448,12 @@ class ParentChildRetrievalTest(IsolatedStorageTestCase):
             )
         self.assertTrue(parent_counts)
         self.assertTrue(all(count == 1 for count in parent_counts.values()))
+
+
+def app_storage_container():
+    from services.core.container import get_application_container
+
+    return get_application_container()
 
 
 if __name__ == "__main__":

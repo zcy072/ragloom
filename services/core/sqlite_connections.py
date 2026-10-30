@@ -1,13 +1,10 @@
-"""应用数据库与 FTS5 索引的连接工厂。
+"""应用数据库的连接工厂。
 
 `sqlite3.connect` 作为上下文管理器只提交或回滚事务，并不关闭连接——连接要等到
 引用计数归零才释放。本模块的连接工厂保持原有提交/回滚语义，同时确保连接关闭。
 
 关闭时机在 WAL 模式下有实际影响：SQLite 只在最后一个连接关闭时自动执行检查点，
 残留的未关闭连接会让 `-wal` 一直留着旧页面内容。
-
-`connect()` 用于主业务数据库。`connect_fts5()` 用于 FTS5 索引文件，不会启用 WAL：
-完整重建通过 `os.replace` 原子替换单个文件，WAL 中已提交的数据不会随主文件移动。
 """
 
 import sqlite3
@@ -17,7 +14,6 @@ from contextlib import AbstractContextManager, contextmanager
 # 请求线程与索引 worker 并发写同一个文件，VACUUM 还会短暂加排他锁。sqlite3 默认等锁
 # 5 秒，这里放宽到 15 秒，让压缩期间的写入等待而不是直接失败。
 LOCK_TIMEOUT_SECONDS = 15.0
-FTS5_LOCK_TIMEOUT_SECONDS = 5.0
 
 
 @contextmanager
@@ -37,13 +33,6 @@ def connect(
     db_file: str, *, timeout: float = LOCK_TIMEOUT_SECONDS
 ) -> AbstractContextManager[sqlite3.Connection]:
     """连接主数据库；WAL 仍由 schema 初始化阶段单独启用。"""
-    return _managed_connection(db_file, timeout)
-
-
-def connect_fts5(
-    db_file: str, *, timeout: float = FTS5_LOCK_TIMEOUT_SECONDS
-) -> AbstractContextManager[sqlite3.Connection]:
-    """连接 FTS5 索引并确保关闭，不改变其日志模式。"""
     return _managed_connection(db_file, timeout)
 
 

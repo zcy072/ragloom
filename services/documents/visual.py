@@ -14,6 +14,7 @@ from langchain_core.documents import Document
 from services.core import llm_config as model_config
 from services.core.concurrency import resource_slot
 from services.core.container import get_application_container
+from services.core.request_context import carry_request_id
 from services.core.settings import get_settings
 from services.documents import visual_ocr, visual_vision
 from services.documents.parser_modes import (
@@ -326,7 +327,7 @@ def load_mineru_visual_documents(
         ) as executor:
             futures: dict[Future, int] = {
                 executor.submit(
-                    _analyze_with_model_retry,
+                    carry_request_id(_analyze_with_model_retry),
                     prepared[index][0],
                     prepared[index][1],
                     config,

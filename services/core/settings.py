@@ -31,11 +31,18 @@ class ApplicationSettings:
     """Validated runtime configuration loaded from the process environment."""
 
     log_level: str
+    log_dir: str
+    log_file_max_bytes: int
+    log_file_backups: int
+    chat_run_retention_days: int
+    login_event_retention_days: int
     storage_dir: str
     data_dir: str
     db_file: str
-    vector_store_dir: str
-    chroma_path: str
+    milvus_uri: str
+    milvus_token: str
+    milvus_collection_prefix: str
+    embedding_dimension: int
     initial_admin_password: str
     auth_secret_key: str
     auth_token_ttl_seconds: int
@@ -55,6 +62,11 @@ class ApplicationSettings:
     query_embedding_cache_size: int
     chat_retrieval_planning: bool
     chat_query_variant: bool
+    chat_agentic_retrieval: bool
+    web_search_daily_limit: int
+    web_search_user_per_minute: int
+    chat_user_max_concurrent: int
+    chat_user_per_minute: int
     mineru_api_token: str
     mineru_api_base_url: str
     mineru_model_version: str
@@ -71,6 +83,10 @@ class ApplicationSettings:
     vision_base_url: str
     vision_model: str
     vision_timeout_seconds: int
+    rerank_base_url: str
+    rerank_model: str
+    rerank_api_key: str
+    rerank_timeout_seconds: int
     index_worker_threads: int
     ocr_max_concurrency: int
     mineru_max_concurrency: int
@@ -102,12 +118,20 @@ class ApplicationSettings:
 
         return cls(
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
-            storage_dir=storage_dir, data_dir=data_dir, db_file=db_file,
-            vector_store_dir=os.getenv(
-                "VECTOR_STORE_DIR", os.path.join(storage_dir, "vector_store")
+            log_dir=os.getenv("LOG_DIR", os.path.join(storage_dir, "logs")).strip(),
+            log_file_max_bytes=_integer(
+                "LOG_FILE_MAX_BYTES", 10 * 1024 * 1024, 64 * 1024, 1024 * 1024 * 1024
             ),
-            chroma_path=os.getenv("CHROMA_PATH", os.path.join(storage_dir, "chroma")),
-            initial_admin_password=os.getenv("INITIAL_ADMIN_PASSWORD", "admin888"),
+            # 备份数设为 0 即关闭文件日志，只保留标准输出。
+            log_file_backups=_integer("LOG_FILE_BACKUPS", 5, 0, 50),
+            chat_run_retention_days=_integer("CHAT_RUN_RETENTION_DAYS", 90, 1),
+            login_event_retention_days=_integer("LOGIN_EVENT_RETENTION_DAYS", 180, 1),
+            storage_dir=storage_dir, data_dir=data_dir, db_file=db_file,
+            milvus_uri=os.getenv("MILVUS_URI", "http://127.0.0.1:19530").strip(),
+            milvus_token=os.getenv("MILVUS_TOKEN", "").strip(),
+            milvus_collection_prefix=os.getenv("MILVUS_COLLECTION_PREFIX", "ragloom_").strip(),
+            embedding_dimension=_integer("EMBEDDING_DIMENSION", 1024, 1),
+            initial_admin_password=os.getenv("INITIAL_ADMIN_PASSWORD", ""),
             auth_secret_key=os.getenv("AUTH_SECRET_KEY", "").strip(),
             auth_token_ttl_seconds=_integer("AUTH_TOKEN_TTL_SECONDS", 28800, 1),
             # 次数或窗口设为 0 即关闭对应限制。
@@ -129,6 +153,13 @@ class ApplicationSettings:
             query_embedding_cache_size=_integer("QUERY_EMBEDDING_CACHE_SIZE", 64, 1),
             chat_retrieval_planning=_flag("CHAT_RETRIEVAL_PLANNING", False),
             chat_query_variant=_flag("CHAT_QUERY_VARIANT", False),
+            chat_agentic_retrieval=_flag("CHAT_AGENTIC_RETRIEVAL", False),
+            # 联网搜索按次计费；设为 0 即不限。
+            web_search_daily_limit=_integer("WEB_SEARCH_DAILY_LIMIT", 500, 0),
+            web_search_user_per_minute=_integer("WEB_SEARCH_USER_PER_MINUTE", 5, 0),
+            # 单个账号同时进行的流式问答数和每分钟提问次数；设为 0 即不限。
+            chat_user_max_concurrent=_integer("CHAT_USER_MAX_CONCURRENT", 2, 0),
+            chat_user_per_minute=_integer("CHAT_USER_PER_MINUTE", 10, 0),
             mineru_api_token=os.getenv("MINERU_API_TOKEN", "").strip(),
             mineru_api_base_url=os.getenv(
                 "MINERU_API_BASE_URL", "https://mineru.net/api/v4"
@@ -149,6 +180,10 @@ class ApplicationSettings:
             vision_base_url=os.getenv("RAG_VISION_BASE_URL", "").strip(),
             vision_model=os.getenv("RAG_VISION_MODEL", "").strip(),
             vision_timeout_seconds=_integer("RAG_VISION_TIMEOUT_SECONDS", 60, 10, 180),
+            rerank_base_url=os.getenv("RERANK_BASE_URL", "").strip().rstrip("/"),
+            rerank_model=os.getenv("RERANK_MODEL", "").strip(),
+            rerank_api_key=os.getenv("RERANK_API_KEY", "").strip(),
+            rerank_timeout_seconds=_integer("RERANK_TIMEOUT_SECONDS", 15, 1, 120),
             index_worker_threads=_integer("INDEX_WORKER_THREADS", 3, 1, 8),
             ocr_max_concurrency=_integer("OCR_MAX_CONCURRENCY", 1, 1, 4),
             mineru_max_concurrency=_integer("MINERU_MAX_CONCURRENCY", 3, 1, 8),

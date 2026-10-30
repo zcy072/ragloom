@@ -1,10 +1,630 @@
 {
   "components": {
     "schemas": {
+      "AnalyticsAuditPageResponse": {
+        "additionalProperties": false,
+        "description": "One page of admin audit records, newest first.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsAuditRecord"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "page": {
+            "minimum": 1.0,
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_size": {
+            "minimum": 1.0,
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "total_pages": {
+            "minimum": 1.0,
+            "title": "Total Pages",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "page",
+          "page_size",
+          "total_pages"
+        ],
+        "title": "AnalyticsAuditPageResponse",
+        "type": "object"
+      },
+      "AnalyticsAuditRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "actor_username": {
+            "title": "Actor Username",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "target_username": {
+            "title": "Target Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "actor_username",
+          "action",
+          "target_username",
+          "detail"
+        ],
+        "title": "AnalyticsAuditRecord",
+        "type": "object"
+      },
+      "AnalyticsConversationMessage": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "feedback": {
+            "title": "Feedback",
+            "type": "integer"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "source_names": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Names",
+            "type": "array"
+          }
+        },
+        "required": [
+          "role",
+          "content",
+          "created_at",
+          "source_names",
+          "feedback"
+        ],
+        "title": "AnalyticsConversationMessage",
+        "type": "object"
+      },
+      "AnalyticsConversationResponse": {
+        "additionalProperties": false,
+        "description": "Full conversation of one account; reading it writes an audit record.",
+        "properties": {
+          "kb_name": {
+            "title": "Kb Name",
+            "type": "string"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsConversationMessage"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "title",
+          "kb_name",
+          "username",
+          "messages"
+        ],
+        "title": "AnalyticsConversationResponse",
+        "type": "object"
+      },
+      "AnalyticsDailyPoint": {
+        "additionalProperties": false,
+        "description": "Questions, distinct askers, and distinct logged-in users on one local date.",
+        "properties": {
+          "active_users": {
+            "title": "Active Users",
+            "type": "integer"
+          },
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "login_users": {
+            "title": "Login Users",
+            "type": "integer"
+          },
+          "questions": {
+            "title": "Questions",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "date",
+          "questions",
+          "active_users",
+          "login_users"
+        ],
+        "title": "AnalyticsDailyPoint",
+        "type": "object"
+      },
+      "AnalyticsDailyQuestions": {
+        "additionalProperties": false,
+        "properties": {
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "questions": {
+            "title": "Questions",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "date",
+          "questions"
+        ],
+        "title": "AnalyticsDailyQuestions",
+        "type": "object"
+      },
+      "AnalyticsKnowledgeBaseUsage": {
+        "additionalProperties": false,
+        "description": "How many users asked how many questions in one knowledge base.",
+        "properties": {
+          "downvotes": {
+            "title": "Downvotes",
+            "type": "integer"
+          },
+          "kb_name": {
+            "title": "Kb Name",
+            "type": "string"
+          },
+          "questions": {
+            "title": "Questions",
+            "type": "integer"
+          },
+          "users": {
+            "title": "Users",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kb_name",
+          "users",
+          "questions",
+          "downvotes"
+        ],
+        "title": "AnalyticsKnowledgeBaseUsage",
+        "type": "object"
+      },
+      "AnalyticsLoginEvent": {
+        "additionalProperties": false,
+        "description": "One login attempt of an account.",
+        "properties": {
+          "client": {
+            "title": "Client",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "created_at",
+          "success",
+          "reason",
+          "client"
+        ],
+        "title": "AnalyticsLoginEvent",
+        "type": "object"
+      },
+      "AnalyticsOverviewResponse": {
+        "additionalProperties": false,
+        "description": "User activity summary for the selected window.",
+        "properties": {
+          "active_users": {
+            "title": "Active Users",
+            "type": "integer"
+          },
+          "daily": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsDailyPoint"
+            },
+            "title": "Daily",
+            "type": "array"
+          },
+          "days": {
+            "title": "Days",
+            "type": "integer"
+          },
+          "downvotes": {
+            "title": "Downvotes",
+            "type": "integer"
+          },
+          "hourly": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Hourly",
+            "type": "array"
+          },
+          "knowledge_bases": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsKnowledgeBaseUsage"
+            },
+            "title": "Knowledge Bases",
+            "type": "array"
+          },
+          "login_failures": {
+            "title": "Login Failures",
+            "type": "integer"
+          },
+          "login_users": {
+            "title": "Login Users",
+            "type": "integer"
+          },
+          "new_users": {
+            "title": "New Users",
+            "type": "integer"
+          },
+          "pending_users": {
+            "title": "Pending Users",
+            "type": "integer"
+          },
+          "questions": {
+            "title": "Questions",
+            "type": "integer"
+          },
+          "total_users": {
+            "title": "Total Users",
+            "type": "integer"
+          },
+          "upvotes": {
+            "title": "Upvotes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "days",
+          "total_users",
+          "pending_users",
+          "new_users",
+          "active_users",
+          "login_users",
+          "login_failures",
+          "questions",
+          "upvotes",
+          "downvotes",
+          "daily",
+          "hourly",
+          "knowledge_bases"
+        ],
+        "title": "AnalyticsOverviewResponse",
+        "type": "object"
+      },
+      "AnalyticsQuestion": {
+        "additionalProperties": false,
+        "description": "One recorded question; carries only its first characters.",
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "feedback": {
+            "title": "Feedback",
+            "type": "integer"
+          },
+          "kb_name": {
+            "title": "Kb Name",
+            "type": "string"
+          },
+          "question_preview": {
+            "title": "Question Preview",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "total_ms": {
+            "title": "Total Ms",
+            "type": "number"
+          }
+        },
+        "required": [
+          "created_at",
+          "kb_name",
+          "question_preview",
+          "status",
+          "total_ms",
+          "feedback"
+        ],
+        "title": "AnalyticsQuestion",
+        "type": "object"
+      },
+      "AnalyticsSession": {
+        "additionalProperties": false,
+        "description": "One conversation of an account.",
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kb_name": {
+            "title": "Kb Name",
+            "type": "string"
+          },
+          "questions": {
+            "title": "Questions",
+            "type": "integer"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "kb_name",
+          "created_at",
+          "updated_at",
+          "questions"
+        ],
+        "title": "AnalyticsSession",
+        "type": "object"
+      },
+      "AnalyticsUserDetailResponse": {
+        "additionalProperties": false,
+        "description": "Usage statistics, trend, recent logins, sessions, and questions of one account.",
+        "properties": {
+          "daily": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsDailyQuestions"
+            },
+            "title": "Daily",
+            "type": "array"
+          },
+          "days": {
+            "title": "Days",
+            "type": "integer"
+          },
+          "knowledge_bases": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsKnowledgeBaseUsage"
+            },
+            "title": "Knowledge Bases",
+            "type": "array"
+          },
+          "no_evidence": {
+            "title": "No Evidence",
+            "type": "integer"
+          },
+          "recent_logins": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsLoginEvent"
+            },
+            "title": "Recent Logins",
+            "type": "array"
+          },
+          "recent_questions": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsQuestion"
+            },
+            "title": "Recent Questions",
+            "type": "array"
+          },
+          "recent_sessions": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsSession"
+            },
+            "title": "Recent Sessions",
+            "type": "array"
+          },
+          "user": {
+            "$ref": "#/components/schemas/AnalyticsUserRow"
+          }
+        },
+        "required": [
+          "days",
+          "user",
+          "no_evidence",
+          "daily",
+          "knowledge_bases",
+          "recent_logins",
+          "recent_sessions",
+          "recent_questions"
+        ],
+        "title": "AnalyticsUserDetailResponse",
+        "type": "object"
+      },
+      "AnalyticsUserPageResponse": {
+        "additionalProperties": false,
+        "description": "One page of accounts with usage statistics.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsUserRow"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "page": {
+            "minimum": 1.0,
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_size": {
+            "minimum": 1.0,
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "total_pages": {
+            "minimum": 1.0,
+            "title": "Total Pages",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "page",
+          "page_size",
+          "total_pages"
+        ],
+        "title": "AnalyticsUserPageResponse",
+        "type": "object"
+      },
+      "AnalyticsUserRow": {
+        "additionalProperties": false,
+        "description": "One account with its usage statistics for the selected window.",
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "downvotes": {
+            "title": "Downvotes",
+            "type": "integer"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "last_login_at": {
+            "title": "Last Login At",
+            "type": "string"
+          },
+          "last_question_at": {
+            "title": "Last Question At",
+            "type": "string"
+          },
+          "login_failures": {
+            "title": "Login Failures",
+            "type": "integer"
+          },
+          "logins": {
+            "title": "Logins",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "questions": {
+            "title": "Questions",
+            "type": "integer"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "sessions": {
+            "title": "Sessions",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "upvotes": {
+            "title": "Upvotes",
+            "type": "integer"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "name",
+          "status",
+          "role",
+          "created_at",
+          "questions",
+          "sessions",
+          "errors",
+          "upvotes",
+          "downvotes",
+          "logins",
+          "login_failures",
+          "last_question_at",
+          "last_login_at"
+        ],
+        "title": "AnalyticsUserRow",
+        "type": "object"
+      },
       "Body_upload_document_api_documents__kb_name__post": {
         "properties": {
           "file": {
-            "format": "binary",
+            "contentMediaType": "application/octet-stream",
             "title": "File",
             "type": "string"
           },
@@ -37,12 +657,36 @@
         "title": "Body_upload_document_api_documents__kb_name__post",
         "type": "object"
       },
+      "ChatFeedbackRequest": {
+        "additionalProperties": false,
+        "description": "Rating of one answer: 1 helpful, -1 not helpful, 0 cleared.",
+        "properties": {
+          "feedback": {
+            "enum": [
+              -1,
+              0,
+              1
+            ],
+            "title": "Feedback",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "feedback"
+        ],
+        "title": "ChatFeedbackRequest",
+        "type": "object"
+      },
       "ChatHistoryMessage": {
         "description": "One persisted message returned by the history endpoint.",
         "properties": {
           "content": {
             "title": "Content",
             "type": "string"
+          },
+          "feedback": {
+            "title": "Feedback",
+            "type": "integer"
           },
           "role": {
             "title": "Role",
@@ -54,6 +698,10 @@
             },
             "title": "Sources",
             "type": "array"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
           }
         },
         "required": [
@@ -137,6 +785,11 @@
               }
             ],
             "title": "Session Id"
+          },
+          "web_search": {
+            "default": false,
+            "title": "Web Search",
+            "type": "boolean"
           }
         },
         "required": [
@@ -237,6 +890,10 @@
           "source": {
             "title": "Source",
             "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
           }
         },
         "required": [
@@ -248,6 +905,139 @@
           "content"
         ],
         "title": "ChatSource",
+        "type": "object"
+      },
+      "ChatTracePayload": {
+        "description": "一次问答的完整追踪记录。",
+        "properties": {
+          "actual_query": {
+            "title": "Actual Query",
+            "type": "string"
+          },
+          "agentic_queries": {
+            "items": {
+              "$ref": "#/components/schemas/TraceQuery"
+            },
+            "title": "Agentic Queries",
+            "type": "array"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/TraceDocument"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "cited_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Cited Ids",
+            "type": "array"
+          },
+          "context": {
+            "items": {
+              "$ref": "#/components/schemas/TraceContextSpan"
+            },
+            "title": "Context",
+            "type": "array"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "fallback_attempted": {
+            "title": "Fallback Attempted",
+            "type": "boolean"
+          },
+          "hints": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Hints",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kb_name": {
+            "title": "Kb Name",
+            "type": "string"
+          },
+          "prompt_chars": {
+            "title": "Prompt Chars",
+            "type": "integer"
+          },
+          "question": {
+            "title": "Question",
+            "type": "string"
+          },
+          "rerank_status": {
+            "title": "Rerank Status",
+            "type": "string"
+          },
+          "reranked": {
+            "items": {
+              "$ref": "#/components/schemas/TraceDocument"
+            },
+            "title": "Reranked",
+            "type": "array"
+          },
+          "rewritten": {
+            "title": "Rewritten",
+            "type": "boolean"
+          },
+          "skipped": {
+            "title": "Skipped",
+            "type": "boolean"
+          },
+          "stages": {
+            "items": {
+              "$ref": "#/components/schemas/TraceStage"
+            },
+            "title": "Stages",
+            "type": "array"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "variant_query": {
+            "title": "Variant Query",
+            "type": "string"
+          },
+          "web_results": {
+            "items": {
+              "$ref": "#/components/schemas/TraceDocument"
+            },
+            "title": "Web Results",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "kb_name",
+          "status",
+          "question",
+          "actual_query",
+          "variant_query",
+          "rewritten",
+          "skipped",
+          "fallback_attempted",
+          "rerank_status",
+          "stages",
+          "candidates",
+          "reranked",
+          "web_results",
+          "agentic_queries",
+          "context",
+          "prompt_chars",
+          "cited_ids",
+          "hints"
+        ],
+        "title": "ChatTracePayload",
         "type": "object"
       },
       "ChunkConfigRequest": {
@@ -328,6 +1118,10 @@
           },
           "source": {
             "title": "Source",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
             "type": "string"
           }
         },
@@ -419,18 +1213,18 @@
             "title": "Name",
             "type": "string"
           },
-          "会话数": {
-            "title": "会话数",
-            "type": "integer"
-          },
           "回答数": {
             "title": "回答数",
+            "type": "integer"
+          },
+          "提问数": {
+            "title": "提问数",
             "type": "integer"
           }
         },
         "required": [
           "name",
-          "会话数",
+          "提问数",
           "回答数"
         ],
         "title": "DashboardLinePoint",
@@ -1023,10 +1817,14 @@
         "description": "Credentials submitted by an account.",
         "properties": {
           "password": {
+            "maxLength": 256,
+            "minLength": 1,
             "title": "Password",
             "type": "string"
           },
           "username": {
+            "maxLength": 80,
+            "minLength": 1,
             "title": "Username",
             "type": "string"
           }
@@ -1175,12 +1973,8 @@
             "title": "Default Model"
           },
           "is_active": {
-            "enum": [
-              0,
-              1
-            ],
             "title": "Is Active",
-            "type": "integer"
+            "type": "boolean"
           },
           "provider": {
             "title": "Provider",
@@ -1218,15 +2012,495 @@
         "title": "ModelSaveResponse",
         "type": "object"
       },
+      "OpsChatRunPageResponse": {
+        "additionalProperties": false,
+        "description": "One page of chat runs.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/OpsChatRunResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "minimum": 0.0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "OpsChatRunPageResponse",
+        "type": "object"
+      },
+      "OpsChatRunResponse": {
+        "additionalProperties": false,
+        "description": "One recorded chat run; carries the first characters of the question.",
+        "properties": {
+          "answer_chars": {
+            "title": "Answer Chars",
+            "type": "integer"
+          },
+          "cited_sources": {
+            "title": "Cited Sources",
+            "type": "integer"
+          },
+          "context_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Ms"
+          },
+          "context_spans": {
+            "title": "Context Spans",
+            "type": "integer"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "elapsed_extra": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Elapsed Extra",
+            "type": "object"
+          },
+          "error_summary": {
+            "title": "Error Summary",
+            "type": "string"
+          },
+          "feedback": {
+            "title": "Feedback",
+            "type": "integer"
+          },
+          "first_token_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Token Ms"
+          },
+          "generation_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Generation Ms"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "kb_name": {
+            "title": "Kb Name",
+            "type": "string"
+          },
+          "model_provider": {
+            "title": "Model Provider",
+            "type": "string"
+          },
+          "question_preview": {
+            "title": "Question Preview",
+            "type": "string"
+          },
+          "rerank_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rerank Ms"
+          },
+          "rerank_status": {
+            "title": "Rerank Status",
+            "type": "string"
+          },
+          "retrieval_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrieval Ms"
+          },
+          "retrieval_skipped": {
+            "title": "Retrieval Skipped",
+            "type": "boolean"
+          },
+          "rewritten": {
+            "title": "Rewritten",
+            "type": "boolean"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "total_ms": {
+            "title": "Total Ms",
+            "type": "number"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "username",
+          "kb_name",
+          "session_id",
+          "question_preview",
+          "model_provider",
+          "status",
+          "rerank_status",
+          "rewritten",
+          "retrieval_skipped",
+          "context_spans",
+          "cited_sources",
+          "answer_chars",
+          "retrieval_ms",
+          "rerank_ms",
+          "context_ms",
+          "first_token_ms",
+          "generation_ms",
+          "total_ms",
+          "elapsed_extra",
+          "error_summary",
+          "trace_id",
+          "feedback"
+        ],
+        "title": "OpsChatRunResponse",
+        "type": "object"
+      },
+      "OpsDailyPoint": {
+        "additionalProperties": false,
+        "description": "Chat runs, failures, and total-latency P95 for one day.",
+        "properties": {
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "integer"
+          },
+          "p95_total_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Total Ms"
+          },
+          "runs": {
+            "title": "Runs",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "date",
+          "runs",
+          "errors",
+          "p95_total_ms"
+        ],
+        "title": "OpsDailyPoint",
+        "type": "object"
+      },
+      "OpsDependencyResponse": {
+        "additionalProperties": false,
+        "description": "Result of one dependency readiness check.",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "latency_ms": {
+            "title": "Latency Ms",
+            "type": "number"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "ok",
+          "latency_ms",
+          "detail"
+        ],
+        "title": "OpsDependencyResponse",
+        "type": "object"
+      },
+      "OpsIndexJobResponse": {
+        "additionalProperties": false,
+        "description": "Index job summary that names its knowledge base.",
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "error_message": {
+            "default": "",
+            "title": "Error Message",
+            "type": "string"
+          },
+          "filename": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filename"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kb_name": {
+            "title": "Kb Name",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "process",
+              "rebuild",
+              "delete"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "completed",
+              "failed",
+              "superseded",
+              "interrupted"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "operation",
+          "status",
+          "created_at",
+          "kb_name"
+        ],
+        "title": "OpsIndexJobResponse",
+        "type": "object"
+      },
+      "OpsLatency": {
+        "additionalProperties": false,
+        "description": "Nearest-rank percentiles in milliseconds; null when there are no samples.",
+        "properties": {
+          "p50": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50"
+          },
+          "p95": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95"
+          }
+        },
+        "required": [
+          "p50",
+          "p95"
+        ],
+        "title": "OpsLatency",
+        "type": "object"
+      },
+      "OpsLogResponse": {
+        "additionalProperties": false,
+        "description": "Tail of the backend log file, oldest line first.",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "lines": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Lines",
+            "type": "array"
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "available",
+          "path",
+          "lines"
+        ],
+        "title": "OpsLogResponse",
+        "type": "object"
+      },
+      "OpsOverviewResponse": {
+        "additionalProperties": false,
+        "description": "Chat run statistics for the monitoring overview.",
+        "properties": {
+          "daily": {
+            "items": {
+              "$ref": "#/components/schemas/OpsDailyPoint"
+            },
+            "title": "Daily",
+            "type": "array"
+          },
+          "days": {
+            "title": "Days",
+            "type": "integer"
+          },
+          "error_rate": {
+            "title": "Error Rate",
+            "type": "number"
+          },
+          "latency": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/OpsLatency"
+            },
+            "title": "Latency",
+            "type": "object"
+          },
+          "status_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Status Counts",
+            "type": "object"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "days",
+          "total",
+          "truncated",
+          "status_counts",
+          "error_rate",
+          "latency",
+          "daily"
+        ],
+        "title": "OpsOverviewResponse",
+        "type": "object"
+      },
       "PasswordChangeRequest": {
         "additionalProperties": false,
         "description": "Password-change payload for the current account.",
         "properties": {
           "new_password": {
+            "maxLength": 256,
             "title": "New Password",
             "type": "string"
           },
           "old_password": {
+            "maxLength": 256,
             "title": "Old Password",
             "type": "string"
           }
@@ -1269,18 +2543,24 @@
         "description": "New user registration awaiting administrator approval.",
         "properties": {
           "name": {
+            "maxLength": 80,
+            "minLength": 1,
             "title": "Name",
             "type": "string"
           },
           "password": {
+            "maxLength": 256,
             "title": "Password",
             "type": "string"
           },
           "phone": {
+            "maxLength": 32,
             "title": "Phone",
             "type": "string"
           },
           "username": {
+            "maxLength": 80,
+            "minLength": 1,
             "title": "Username",
             "type": "string"
           }
@@ -1466,6 +2746,164 @@
         "title": "SuccessResponse",
         "type": "object"
       },
+      "TraceContextSpan": {
+        "description": "送给模型的一段上下文。",
+        "properties": {
+          "chars": {
+            "title": "Chars",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "kb_name": {
+            "title": "Kb Name",
+            "type": "string"
+          },
+          "page": {
+            "title": "Page",
+            "type": "string"
+          },
+          "routes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Routes",
+            "type": "array"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kb_name",
+          "source",
+          "page",
+          "routes",
+          "chars",
+          "truncated"
+        ],
+        "title": "TraceContextSpan",
+        "type": "object"
+      },
+      "TraceDocument": {
+        "description": "一个检索候选：位置、来源和原文前若干字；重排后带分数和是否进入后续环节。",
+        "properties": {
+          "kb_name": {
+            "title": "Kb Name",
+            "type": "string"
+          },
+          "kept": {
+            "title": "Kept",
+            "type": "boolean"
+          },
+          "page": {
+            "title": "Page",
+            "type": "string"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "snippet": {
+            "title": "Snippet",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "position",
+          "kb_name",
+          "source",
+          "page",
+          "route",
+          "snippet"
+        ],
+        "title": "TraceDocument",
+        "type": "object"
+      },
+      "TraceQuery": {
+        "description": "补充检索的一轮查询及其新增结果数。",
+        "properties": {
+          "query": {
+            "title": "Query",
+            "type": "string"
+          },
+          "results": {
+            "title": "Results",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query",
+          "results"
+        ],
+        "title": "TraceQuery",
+        "type": "object"
+      },
+      "TraceStage": {
+        "description": "一个处理阶段的结果。",
+        "properties": {
+          "detail": {
+            "additionalProperties": true,
+            "title": "Detail",
+            "type": "object"
+          },
+          "elapsed_ms": {
+            "title": "Elapsed Ms",
+            "type": "number"
+          },
+          "stage": {
+            "title": "Stage",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "skipped",
+              "degraded",
+              "error",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stage",
+          "status",
+          "elapsed_ms",
+          "detail"
+        ],
+        "title": "TraceStage",
+        "type": "object"
+      },
       "UserPageResponse": {
         "additionalProperties": false,
         "description": "One page of user administration results and its resolved page metadata.",
@@ -1598,6 +3036,13 @@
       },
       "ValidationError": {
         "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
           "loc": {
             "items": {
               "anyOf": [
@@ -1925,6 +3370,112 @@
           }
         ],
         "summary": "Rename Chat Session",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/chat/traces/{trace_id}": {
+      "get": {
+        "description": "返回一次问答的追踪记录：提问者本人或有运行监控权限的用户可看，且须能读该知识库。",
+        "operationId": "get_chat_trace_api_chat_traces__trace_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "trace_id",
+            "required": true,
+            "schema": {
+              "title": "Trace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatTracePayload"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Chat Trace",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/chat/traces/{trace_id}/feedback": {
+      "put": {
+        "description": "记录提问者对回答的评价：1 有用，-1 没用，0 取消评价。",
+        "operationId": "set_chat_trace_feedback_api_chat_traces__trace_id__feedback_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "trace_id",
+            "required": true,
+            "schema": {
+              "title": "Trace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatFeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Set Chat Trace Feedback",
         "tags": [
           "chat"
         ]
@@ -2707,7 +4258,7 @@
     },
     "/api/kbs/{name}/rebuild": {
       "post": {
-        "description": "显式安排 FTS5 和 Chroma 两类检索索引的完整重建。",
+        "description": "显式安排 Milvus 检索索引的完整重建。",
         "operationId": "rebuild_knowledge_base_api_kbs__name__rebuild_post",
         "parameters": [
           {
@@ -3167,6 +4718,445 @@
         ]
       }
     },
+    "/api/ops/chat-runs": {
+      "get": {
+        "description": "按时间倒序分页返回问答记录，可按状态、知识库、最小总耗时和用户评价过滤。",
+        "operationId": "ops_chat_runs_api_ops_chat_runs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "answered",
+                    "no_evidence",
+                    "direct",
+                    "interrupted",
+                    "cancelled",
+                    "error"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kb",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 80,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kb"
+            }
+          },
+          {
+            "in": "query",
+            "name": "slow_ms",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Slow Ms"
+            }
+          },
+          {
+            "in": "query",
+            "name": "feedback",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 1,
+                  "minimum": -1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Feedback"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpsChatRunPageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Ops Chat Runs",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
+    "/api/ops/chat-traces/export": {
+      "get": {
+        "description": "把带评价的问答导出为评测题目（JSON Lines），只包含调用者能读的知识库。",
+        "operationId": "ops_export_chat_traces_api_ops_chat_traces_export_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "rating",
+            "required": false,
+            "schema": {
+              "default": "down",
+              "enum": [
+                "down",
+                "up"
+              ],
+              "title": "Rating",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Ops Export Chat Traces",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
+    "/api/ops/dependencies": {
+      "get": {
+        "description": "检查 SQLite 和 Milvus 是否可查询，返回耗时和错误详情。",
+        "operationId": "ops_dependencies_api_ops_dependencies_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/OpsDependencyResponse"
+                  },
+                  "title": "Response Ops Dependencies Api Ops Dependencies Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Ops Dependencies",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
+    "/api/ops/index-jobs": {
+      "get": {
+        "description": "跨知识库返回最近的索引任务，默认只看失败任务。",
+        "operationId": "ops_index_jobs_api_ops_index_jobs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "queued",
+                    "running",
+                    "completed",
+                    "failed",
+                    "superseded",
+                    "interrupted"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": "failed",
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/OpsIndexJobResponse"
+                  },
+                  "title": "Response Ops Index Jobs Api Ops Index Jobs Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Ops Index Jobs",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
+    "/api/ops/logs": {
+      "get": {
+        "description": "返回 backend.log 末尾若干行；文件不存在时说明原因而不是报错。",
+        "operationId": "ops_logs_api_ops_logs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "lines",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Lines",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "level",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "DEBUG",
+                    "INFO",
+                    "WARNING",
+                    "ERROR",
+                    "CRITICAL"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Level"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpsLogResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Ops Logs",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
+    "/api/ops/overview": {
+      "get": {
+        "description": "返回最近 N 天问答的状态分布、耗时分位数和按天趋势。",
+        "operationId": "ops_overview_api_ops_overview_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "maximum": 90,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpsOverviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Ops Overview",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
     "/api/register": {
       "post": {
         "description": "Submit a new account registration for review.",
@@ -3432,6 +5422,352 @@
         "summary": "Update Role",
         "tags": [
           "roles"
+        ]
+      }
+    },
+    "/api/user-analytics/audit-log": {
+      "get": {
+        "description": "按时间倒序返回对话查看的审计记录。",
+        "operationId": "analytics_audit_log_api_user_analytics_audit_log_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Page Size",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsAuditPageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Analytics Audit Log",
+        "tags": [
+          "user-analytics"
+        ]
+      }
+    },
+    "/api/user-analytics/overview": {
+      "get": {
+        "description": "返回窗口内的用户规模、活跃度、按天趋势、按小时分布和各知识库使用情况。",
+        "operationId": "analytics_overview_api_user_analytics_overview_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 90,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsOverviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Analytics Overview",
+        "tags": [
+          "user-analytics"
+        ]
+      }
+    },
+    "/api/user-analytics/users": {
+      "get": {
+        "description": "分页返回账户及其窗口内的提问、会话、评价和登录统计；提问统计只含可读知识库。",
+        "operationId": "analytics_users_api_user_analytics_users_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 90,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Page Size",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "query",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 80,
+              "title": "Query",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "questions",
+              "enum": [
+                "questions",
+                "last_question_at",
+                "last_login_at",
+                "created_at",
+                "downvotes"
+              ],
+              "title": "Sort",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "order",
+            "required": false,
+            "schema": {
+              "default": "desc",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "title": "Order",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsUserPageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Analytics Users",
+        "tags": [
+          "user-analytics"
+        ]
+      }
+    },
+    "/api/user-analytics/users/{user_id}": {
+      "get": {
+        "description": "返回单个用户的统计、趋势、最近登录、会话和提问预览。",
+        "operationId": "analytics_user_detail_api_user_analytics_users__user_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "title": "User Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 90,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsUserDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Analytics User Detail",
+        "tags": [
+          "user-analytics"
+        ]
+      }
+    },
+    "/api/user-analytics/users/{user_id}/sessions/{session_id}": {
+      "get": {
+        "description": "返回用户的完整会话；需要“查看用户对话”权限，每次读取都写入审计记录。",
+        "operationId": "analytics_user_conversation_api_user_analytics_users__user_id__sessions__session_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "title": "User Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsConversationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Analytics User Conversation",
+        "tags": [
+          "user-analytics"
         ]
       }
     },

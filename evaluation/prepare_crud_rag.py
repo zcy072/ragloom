@@ -67,6 +67,10 @@ def main() -> int:
     parser.add_argument("--questions", type=int, default=200)
     parser.add_argument("--distractors", type=int, default=800)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--extension", choices=("txt", "md"), default="txt",
+        help="语料文件扩展名；md 会让固定和结构化两条路线同时入库",
+    )
     args = parser.parse_args()
 
     if args.output.exists() and any(args.output.iterdir()):
@@ -104,7 +108,7 @@ def main() -> int:
     others = [i for i in range(len(lines)) if i not in gold_lines]
     distractor_lines = set(rng.sample(others, min(args.distractors, len(others))))
     selected = sorted(gold_lines | distractor_lines)
-    names = {line_index: f"news_{line_index:06d}.txt" for line_index in selected}
+    names = {line_index: f"news_{line_index:06d}.{args.extension}" for line_index in selected}
     for line_index, name in names.items():
         (corpus_dir / name).write_text(lines[line_index], encoding="utf-8")
 

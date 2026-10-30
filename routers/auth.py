@@ -6,11 +6,11 @@ from fastapi import APIRouter, Depends, Request
 
 from routers import schemas
 from services.core import config as application_config
-from services.core.container import get_application_container
-from services.core.errors import AuthenticationError
+from services.core.container import database_file
+from services.core.errors import AccessDeniedError, AuthenticationError, RateLimitedError
 from services.core.settings import get_settings
 from services.identity import auth as auth_service
-from services.identity import rate_limit, use_cases
+from services.identity import login_events, rate_limit, use_cases
 
 router = APIRouter(prefix="/api", tags=["auth"])
 
@@ -34,19 +34,37 @@ ClientAddress = Annotated[str, Depends(client_address)]
 @router.post("/login")
 def login(data: schemas.LoginRequest, client: ClientAddress = "") -> dict[str, Any]:
     """Authenticate any active account through the same credential path."""
+    db_file = database_file()
     limiter = rate_limit.get_auth_rate_limiter()
-    limiter.check_login(data.username, client)
+    try:
+        limiter.check_login(data.username, client)
+    except RateLimitedError:
+        login_events.record(
+            db_file, username=data.username, success=False, reason="rate_limited", client=client
+        )
+        raise
     try:
         account = use_cases.authenticate_account(
-            db_file=str(get_application_container().database_path()),
+            db_file=db_file,
             username=data.username,
             password=data.password,
         )
     except AuthenticationError:
         # 只统计凭证错误；账号待审核等状态说明密码已经正确，不应计入失败。
         limiter.record_login_failure(data.username, client)
+        login_events.record(
+            db_file, username=data.username, success=False,
+            reason="invalid_credentials", client=client,
+        )
+        raise
+    except AccessDeniedError:
+        login_events.record(
+            db_file, username=data.username, success=False,
+            reason="account_not_active", client=client,
+        )
         raise
     limiter.record_login_success(data.username)
+    login_events.record(db_file, username=account["username"], success=True, client=client)
     return {
         "status": "success",
         "access_token": auth_service.issue_access_token(
@@ -83,7 +101,7 @@ def register_user(
     """Submit a new account registration for review."""
     rate_limit.get_auth_rate_limiter().check_registration(client)
     use_cases.register_account(
-        db_file=str(get_application_container().database_path()),
+        db_file=database_file(),
         now=application_config.db_now,
         username=data.username,
         name=data.name,
@@ -100,7 +118,7 @@ def change_password(
 ) -> dict[str, str]:
     """Change the authenticated account's password and invalidate its old token."""
     use_cases.change_account_password(
-        db_file=str(get_application_container().database_path()),
+        db_file=database_file(),
         account_id=principal.account_id,
         old_password=data.old_password,
         new_password=data.new_password,

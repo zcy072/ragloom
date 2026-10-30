@@ -1,7 +1,7 @@
 # 基础镜像前缀默认走 Daocloud 的 Docker Hub 镜像；可用 DOCKER_LIBRARY_PREFIX=docker.io/library 改回官方源。
 # Python 包索引通过 PIP_INDEX_URL 单独配置。
 ARG DOCKER_LIBRARY_PREFIX=docker.m.daocloud.io/library
-FROM ${DOCKER_LIBRARY_PREFIX}/python:3.10.22-slim AS runtime
+FROM ${DOCKER_LIBRARY_PREFIX}/python:3.12-slim AS runtime
 
 WORKDIR /app
 
@@ -21,8 +21,9 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
 
 COPY requirements.lock .
 # BuildKit 缓存即使 requirements.lock 变化也会保留已下载的 wheel。
+# 锁文件带 hash，换用镜像源时下载内容必须与官方 PyPI 一致。
 RUN --mount=type=cache,id=pymodel-pip,target=/root/.cache/pip,sharing=locked \
-    pip install --prefer-binary --index-url "${PIP_INDEX_URL}" -r requirements.lock
+    pip install --require-hashes --prefer-binary --index-url "${PIP_INDEX_URL}" -r requirements.lock
 
 # Runtime identity is independent from dependency layers so UID/GID changes stay cheap.
 ARG APP_UID=1000
@@ -38,7 +39,8 @@ COPY api.py app_storage.py ./
 COPY routers ./routers
 COPY services ./services
 
-ENV HOME=/home/app
+ENV HOME=/home/app \
+    PYTHONUNBUFFERED=1
 USER app
 
 EXPOSE 8000
@@ -49,11 +51,10 @@ CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
 FROM runtime AS check
 
 USER root
+COPY requirements-check.lock .
 RUN --mount=type=cache,id=pymodel-check-pip,target=/root/.cache/pip,sharing=locked \
     PIP_CACHE_DIR=/root/.cache/pip \
-    pip install --prefer-binary --index-url "${PIP_INDEX_URL}" \
-    ruff==0.16.0 \
-    "pyright[nodejs]==1.1.408" \
-    uv==0.11.18
+    pip install --require-hashes --prefer-binary --index-url "${PIP_INDEX_URL}" \
+    -r requirements-check.lock
 
 USER app

@@ -1,6 +1,7 @@
 """Relational persistence for knowledge-base lifecycle and dashboard data."""
 
 import json
+import uuid
 from collections.abc import Callable
 from typing import cast
 
@@ -33,10 +34,10 @@ def _dashboard_document_from_row(row: tuple[object, ...]) -> DashboardDocumentRo
 
 
 def _dashboard_trend_from_row(row: tuple[object, ...]) -> DashboardTrendRow:
-    """把按日期聚合的会话和回答数量转换为趋势记录。"""
+    """把按日期聚合的提问和回答数量转换为趋势记录。"""
     return DashboardTrendRow(
         date=str(row[0]),
-        session_count=cast(int, row[1] or 0),
+        question_count=cast(int, row[1] or 0),
         answer_count=cast(int, row[2] or 0),
     )
 
@@ -76,14 +77,24 @@ class KnowledgeBaseStore:
         return [_summary_from_row(row) for row in rows]
 
     def create(self, kb_name: str, chunk_size: int, chunk_overlap: int) -> None:
-        """创建知识库并写入初始分块配置。"""
+        """创建知识库并写入稳定的 kb_id 与初始分块配置。"""
         kb_name = self._validate_kb_name(kb_name)
         with application_db.connect(self._db_file()) as conn:
             conn.execute(
                 "INSERT INTO knowledge_bases "
-                "(name, created_at, chunk_size, chunk_overlap) VALUES (?, ?, ?, ?)",
-                (kb_name, self._now(), chunk_size, chunk_overlap),
+                "(name, kb_id, created_at, chunk_size, chunk_overlap) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (kb_name, str(uuid.uuid4()), self._now(), chunk_size, chunk_overlap),
             )
+
+    def kb_id_for(self, kb_name: str) -> str | None:
+        """返回知识库的稳定 kb_id，知识库不存在时返回 None。"""
+        kb_name = self._validate_kb_name(kb_name)
+        with application_db.connect(self._db_file()) as conn:
+            row = conn.execute(
+                "SELECT kb_id FROM knowledge_bases WHERE name = ?", (kb_name,)
+            ).fetchone()
+        return str(row[0]) if row else None
 
     @staticmethod
     def _rewrite_chat_sources(conn, old_name: str, new_name: str | None) -> None:
@@ -159,11 +170,18 @@ class KnowledgeBaseStore:
                 "(SELECT id FROM chat_sessions WHERE kb_name = ?)",
                 (kb_name,),
             )
+            conn.execute(
+                "DELETE FROM chat_traces WHERE session_id IN "
+                "(SELECT id FROM chat_sessions WHERE kb_name = ?)",
+                (kb_name,),
+            )
             conn.execute("DELETE FROM chat_sessions WHERE kb_name = ?", (kb_name,))
             self._rewrite_chat_sources(conn, kb_name, None)
             self._rewrite_role_permissions(conn, kb_name, None)
             conn.execute(
-                "DELETE FROM chroma_disabled_sources WHERE kb_name = ?", (kb_name,)
+                "DELETE FROM parent_chunks WHERE kb_id = "
+                "(SELECT kb_id FROM knowledge_bases WHERE name = ?)",
+                (kb_name,),
             )
             conn.execute("DELETE FROM knowledge_bases WHERE name = ?", (kb_name,))
             conn.execute("DELETE FROM documents WHERE kb_name = ?", (kb_name,))
@@ -181,19 +199,23 @@ class KnowledgeBaseStore:
                 (new_name, old_name),
             )
             conn.execute(
-                "UPDATE documents SET kb_name = ?, path = REPLACE(path, ?, ?) "
-                "WHERE kb_name = ?",
-                (new_name, old_path, new_path, old_name),
+                # 只替换路径前缀，文件名里出现旧知识库名时保持不变。
+                "UPDATE documents SET kb_name = ?, path = CASE "
+                "WHEN substr(path, 1, length(?)) = ? THEN ? || substr(path, length(?) + 1) "
+                "ELSE path END WHERE kb_name = ?",
+                (new_name, old_path, old_path, new_path, old_path, old_name),
             )
             conn.execute(
                 "UPDATE index_jobs SET kb_name = ? WHERE kb_name = ?",
                 (new_name, old_name),
             )
+            # 追踪和运行记录按知识库名做权限校验，改名后必须同步，否则原有记录会变得不可读。
             conn.execute(
-                "DELETE FROM chroma_disabled_sources WHERE kb_name = ?", (new_name,)
+                "UPDATE chat_traces SET kb_name = ? WHERE kb_name = ?",
+                (new_name, old_name),
             )
             conn.execute(
-                "UPDATE chroma_disabled_sources SET kb_name = ? WHERE kb_name = ?",
+                "UPDATE chat_runs SET kb_name = ? WHERE kb_name = ?",
                 (new_name, old_name),
             )
             conn.execute(
@@ -232,28 +254,34 @@ class KnowledgeBaseStore:
         *,
         days: int,
     ) -> list[DashboardTrendRow]:
-        """返回仪表盘时间窗口内每天的会话数和回答数。"""
-        window = f"DATE('now', '-{int(days)} days')"
+        """返回仪表盘时间窗口内每天的提问数和回答数。
+
+        时间以 UTC 保存，按本地日期分组，与用户分析一致。
+        """
+        window = (
+            "strftime('%Y-%m-%dT%H:%M:%S', "
+            f"DATE('now', 'localtime', '-{int(days)} days'), 'utc')"
+        )
         with application_db.connect(self._db_file()) as conn:
             if allowed_kbs is None:
                 rows = conn.execute(
-                    f"SELECT DATE(created_at), "
+                    "SELECT DATE(created_at, 'localtime'), "
                     "SUM(CASE WHEN role = 'user' THEN 1 ELSE 0 END), "
                     "SUM(CASE WHEN role = 'assistant' THEN 1 ELSE 0 END) "
                     f"FROM chat_messages WHERE created_at >= {window} "
-                    "GROUP BY DATE(created_at) ORDER BY DATE(created_at)"
+                    "GROUP BY 1 ORDER BY 1"
                 ).fetchall()
                 return [_dashboard_trend_from_row(row) for row in rows]
             if not visible_kbs:
                 return []
             placeholders = ",".join("?" for _ in visible_kbs)
             rows = conn.execute(
-                "SELECT DATE(m.created_at), "
+                "SELECT DATE(m.created_at, 'localtime'), "
                 "SUM(CASE WHEN m.role = 'user' THEN 1 ELSE 0 END), "
                 "SUM(CASE WHEN m.role = 'assistant' THEN 1 ELSE 0 END) "
                 "FROM chat_messages m JOIN chat_sessions s ON s.id = m.session_id "
                 f"WHERE m.created_at >= {window} AND s.kb_name IN ({placeholders}) "
-                "GROUP BY DATE(m.created_at) ORDER BY DATE(m.created_at)",
+                "GROUP BY 1 ORDER BY 1",
                 visible_kbs,
             ).fetchall()
             return [_dashboard_trend_from_row(row) for row in rows]

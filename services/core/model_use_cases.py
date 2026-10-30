@@ -7,7 +7,7 @@ from services.core.errors import (
     ResourceNotFoundError,
     ServiceUnavailableError,
 )
-from services.core.model_providers import ModelProviderStore
+from services.core.model_providers import ApiKeyRequiredError, ModelProviderStore
 
 
 def check_model_config(
@@ -58,13 +58,16 @@ def save_model_provider(
                 str(exc), code="model_key_encryption_unavailable"
             ) from exc
 
-    is_active = model_providers.save(
-        provider,
-        encrypted_api_key=encrypted_api_key,
-        clear_api_key=clear_api_key,
-        base_url=base_url,
-        default_model=default_model,
-    )
+    try:
+        is_active = model_providers.save(
+            provider,
+            encrypted_api_key=encrypted_api_key,
+            clear_api_key=clear_api_key,
+            base_url=base_url,
+            default_model=default_model,
+        )
+    except ApiKeyRequiredError as exc:
+        raise InvalidRequestError(str(exc), code="model_api_key_required") from exc
     llm_config.clear_api_key_cache()
     return is_active
 

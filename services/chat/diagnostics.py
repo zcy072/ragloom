@@ -2,8 +2,12 @@
 
 import json
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from services.chat.contracts import RankingDiagnostic, RetrievalDiagnosticPayload
+
+if TYPE_CHECKING:
+    from services.chat.trace import TraceDocument, TraceQuery
 
 
 @dataclass
@@ -19,8 +23,11 @@ class RetrievalDiagnostics:
     elapsed_ms: dict[str, float] = field(default_factory=dict)
     context_routes: dict[int, list[str]] = field(default_factory=dict)
     ranking: list[RankingDiagnostic] = field(default_factory=list)
+    # 以下两项只进入持久化的追踪记录，不放进 SSE 诊断事件。
+    rerank_results: list["TraceDocument"] = field(default_factory=list)
+    agentic_queries: list["TraceQuery"] = field(default_factory=list)
 
-    def payload(self, sources: list) -> dict:
+    def payload(self, sources: list) -> RetrievalDiagnosticPayload | dict:
         try:
             result: RetrievalDiagnosticPayload = {
                 "original_question": self.original_question[:4000],

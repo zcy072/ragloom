@@ -17,7 +17,7 @@ class DocumentMetadataTest(IsolatedStorageTestCase):
         app_storage.initialize_database()
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             conn.execute(
-                "INSERT INTO knowledge_bases (name, created_at) VALUES (?, ?)",
+                "INSERT INTO knowledge_bases (name, kb_id, created_at) VALUES (?, lower(hex(randomblob(16))), ?)",
                 ("研发部", application_config.db_now()),
             )
             for filename in ("考勤制度.pdf", "费用报告.pdf"):

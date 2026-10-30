@@ -1,7 +1,11 @@
 """初始化应用默认账号、权限、知识库和模型配置。"""
 
 import json
+import logging
+import os
+import secrets
 import sqlite3
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -10,6 +14,9 @@ from services.core import sqlite_connections as application_db
 from services.core.config import hash_password
 from services.core.settings import get_settings
 
+logger = logging.getLogger(__name__)
+
+INITIAL_ADMIN_PASSWORD_FILENAME = "initial_admin_password.txt"
 OPENAI_DEFAULT_MODEL = "gpt-6-sol"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-flash"
 
@@ -17,6 +24,7 @@ DEEPSEEK_DEFAULT_MODEL = "deepseek-flash"
 class ApplicationDefaults:
     """启动初始化所需的默认账号、角色、知识库和模型配置。"""
     initial_admin_username: str
+    # 为空时生成随机密码，写入数据库同目录下仅属主可读的文件。
     initial_admin_password: str
     role_menu_options: Sequence[str]
     default_chunk_size: int
@@ -61,6 +69,20 @@ def _sync_system_role_permissions(
     )
 
 
+def _generated_admin_password(db_file: str) -> str:
+    """生成随机初始密码并写入数据目录；日志只给文件位置，避免密码出现在运行监控里。"""
+    password = secrets.token_urlsafe(12)
+    path = os.path.join(os.path.dirname(db_file), INITIAL_ADMIN_PASSWORD_FILENAME)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(password + "\n")
+    logger.warning(
+        "INITIAL_ADMIN_PASSWORD 未设置，已生成随机初始密码并写入 %s；登录改密后请删除该文件",
+        path,
+    )
+    return password
+
+
 def bootstrap_defaults(
     db_file: str,
     now: Callable[[], str],
@@ -96,7 +118,10 @@ def bootstrap_defaults(
                 (
                     defaults.initial_admin_username,
                     "系统管理员",
-                    hash_password(defaults.initial_admin_password),
+                    hash_password(
+                        defaults.initial_admin_password
+                        or _generated_admin_password(db_file)
+                    ),
                     administrator_role[0],
                     now(),
                 ),
@@ -106,9 +131,11 @@ def bootstrap_defaults(
         ).fetchone()[0] == 0:
             conn.execute(
                 "INSERT INTO knowledge_bases "
-                "(name, created_at, chunk_size, chunk_overlap) VALUES (?, ?, ?, ?)",
+                "(name, kb_id, created_at, chunk_size, chunk_overlap) "
+                "VALUES (?, ?, ?, ?, ?)",
                 (
                     "通用知识库",
+                    str(uuid.uuid4()),
                     now(),
                     defaults.default_chunk_size,
                     defaults.default_chunk_overlap,

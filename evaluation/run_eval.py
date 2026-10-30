@@ -18,7 +18,7 @@ from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 KB_NAME = "eval_crud_rag"
-KS = (1, 3, 5, 10)
+KS = (1, 3, 5, 10, 20)
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,6 +28,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True, help="报告 JSON 路径")
     parser.add_argument("--limit", type=int, default=0, help="只评测前 N 题（0 为全部）")
     parser.add_argument("--index-timeout", type=int, default=3600)
+    parser.add_argument(
+        "--ranker", choices=("rrf", "weighted"), default="rrf",
+        help="Milvus hybrid_search 的融合方式，只影响本次评测",
+    )
+    parser.add_argument(
+        "--agentic", action="store_true",
+        help="额外评测补充检索（CHAT_AGENTIC_RETRIEVAL）：对重排结果再跑 refine_evidence",
+    )
+    parser.add_argument(
+        "--context-spans", type=int, default=0,
+        help="覆盖最终上下文的最大段数（0 沿用线上默认值），只影响 final_context",
+    )
+    parser.add_argument(
+        "--context-chars", type=int, default=0,
+        help="覆盖最终上下文的字符预算（0 沿用线上默认值），只影响 final_context",
+    )
+    parser.add_argument(
+        "--rerank-top-n", type=int, default=0,
+        help="覆盖重排后保留的片段数（0 沿用线上默认值），只影响本次评测",
+    )
     return parser.parse_args()
 
 
@@ -37,7 +57,9 @@ def configure_environment(storage: Path) -> None:
         raise SystemExit("缺少环境变量 SILICONFLOW_API_KEY")
     storage.mkdir(parents=True, exist_ok=True)
     os.environ["STORAGE_DIR"] = str(storage)
-    for name in ("DATA_DIR", "DB_FILE", "VECTOR_STORE_DIR", "CHROMA_PATH", "MINERU_RESULTS_DIR"):
+    # 评测用独立 collection 前缀，避免与线上数据混用；MILVUS_URI 沿用环境变量。
+    os.environ.setdefault("MILVUS_COLLECTION_PREFIX", "ragloom_eval_")
+    for name in ("DATA_DIR", "DB_FILE", "MINERU_RESULTS_DIR"):
         os.environ.pop(name, None)
     sys.path.insert(0, str(PROJECT_DIR))
 
@@ -51,8 +73,11 @@ def build_knowledge_base(corpus_dir: Path, timeout: int) -> dict:
     from services.knowledge_bases import use_cases as kb_use_cases
 
     app_storage.initialize_app_storage()
+    from services.retrieval.chunk_index import get_chunk_index
+
+    get_chunk_index().ensure_collection()
     container = get_application_container()
-    files = sorted(corpus_dir.glob("*.txt"))
+    files = sorted([*corpus_dir.glob("*.txt"), *corpus_dir.glob("*.md")])
     wanted = {path.name for path in files}
 
     if not container.documents.knowledge_base_exists(KB_NAME):
@@ -115,7 +140,20 @@ def interleave(groups: list[list]) -> list:
     return merged
 
 
-async def evaluate_question(row: dict, container) -> dict:
+def agentic_model_config() -> dict:
+    """补充检索评测使用的对话模型：沿用 SiliconFlow 默认模型，key 来自环境变量。"""
+    from services.core import config as application_config
+
+    return {
+        "api_key": os.environ["SILICONFLOW_API_KEY"],
+        "base_url": application_config.DEFAULT_SILICONFLOW_BASE_URL,
+        "model": os.getenv("EVAL_AGENTIC_MODEL", application_config.DEFAULT_SILICONFLOW_MODEL),
+    }
+
+
+async def evaluate_question(
+    row: dict, container, agentic: bool = False, context_limits: dict | None = None
+) -> dict:
     """对一道题依次跑各检索配置，返回每个配置的来源排名和耗时（毫秒）。"""
     from services.chat import query as chat_query
     from services.chat import ranking as chat_ranking
@@ -132,21 +170,30 @@ async def evaluate_question(row: dict, container) -> dict:
         }
 
     with retrieval.request_source_snapshot(KB_NAME, container):
-        capabilities = retrieval._probe_base_capabilities(KB_NAME, None)
+        from services.retrieval.chunk_index import get_chunk_index
+
+        index = get_chunk_index()
+        kb_id = container.knowledge_bases.kb_id_for(KB_NAME)
+        sources = retrieval.source_state.current_source_allowlist(KB_NAME, None)
+        routes = sorted(index.available_routes(kb_id, sources))
         embeddings = retrieval.CachedQueryEmbeddings(container.create_query_embeddings())
-        pairs = [
-            retrieval._get_base_retrievers(KB_NAME, embeddings, capabilities, route)
-            for route in sorted(capabilities.chroma_routes | capabilities.fts_routes)
-        ]
+        k = retrieval.RETRIEVAL_DENSE_K
         started = time.perf_counter()
-        fts_docs = interleave(
-            [await asyncio.to_thread(fts.invoke, question) for _, fts in pairs if fts]
+        lexical_docs = interleave(
+            [
+                await asyncio.to_thread(index.search_lexical, kb_id, question, route, sources, k)
+                for route in routes
+            ]
         )
-        record("fts_only", sources_of(fts_docs), started)
+        record("fts_only", sources_of(lexical_docs), started)
 
         started = time.perf_counter()
+        query_vector = embeddings.embed_query(question)
         vector_docs = interleave(
-            [await asyncio.to_thread(vec.invoke, question) for vec, _ in pairs if vec]
+            [
+                await asyncio.to_thread(index.search_dense, kb_id, query_vector, route, sources, k)
+                for route in routes
+            ]
         )
         record("vector_only", sources_of(vector_docs), started)
 
@@ -168,22 +215,70 @@ async def evaluate_question(row: dict, container) -> dict:
         "ms": round((time.perf_counter() - started) * 1000, 1),
     }
 
-    spans = await asyncio.to_thread(context_builder.build_context_spans, KB_NAME, ranked)
+    spans = await asyncio.to_thread(
+        context_builder.build_context_spans, KB_NAME, ranked, **(context_limits or {})
+    )
     outputs["final_context"] = {
         "ranked": [span.source for span in spans],
         "ms": round((time.perf_counter() - started) * 1000, 1),
+        "chars": sum(len(span.content) for span in spans),
     }
+    if agentic:
+        from services.chat.agentic import refine_evidence
+        from services.chat.diagnostics import RetrievalDiagnostics
+
+        diagnostics = RetrievalDiagnostics(question)
+        refined = await refine_evidence(
+            KB_NAME, question, question, ranked, agentic_model_config(), None,
+            container=container, diagnostics=diagnostics,
+        )
+        outputs["hybrid_rerank_agentic"] = {
+            "ranked": sources_of(refined),
+            "ms": round((time.perf_counter() - started) * 1000, 1),
+            "rounds": diagnostics.counts.get("agentic_rounds", 0),
+        }
+        refined_spans = await asyncio.to_thread(
+            context_builder.build_context_spans, KB_NAME, refined, **(context_limits or {})
+        )
+        outputs["final_context_agentic"] = {
+            "ranked": [span.source for span in refined_spans],
+            "ms": outputs["hybrid_rerank_agentic"]["ms"],
+        }
     return outputs
 
 
 CONFIG_NOTES = {
-    "fts_only": "仅 FTS5 关键词检索（各路线轮流合并）",
-    "vector_only": "仅 Chroma 向量检索（各路线轮流合并）",
-    "hybrid": "FTS5 + 向量加权融合（EnsembleRetriever）",
+    "fts_only": "仅 Milvus BM25 全文检索（各路线轮流合并）",
+    "vector_only": "仅 Milvus 稠密向量检索（各路线轮流合并）",
+    "hybrid": "Milvus hybrid_search（稠密 + BM25）加知识库、路线加权融合",
     "hybrid_plus_lexical": "融合 + 精确词补充 + 跨路线去重，取重排候选（上限 30）",
-    "hybrid_rerank": "候选经 BAAI/bge-reranker-v2-m3 重排，取前 10",
+    "hybrid_rerank": "候选经 BAAI/bge-reranker-v2-m3 重排，取前 RERANK_TOP_N 个切片",
     "final_context": "重排后恢复上下文，实际交给回答模型的片段（最多 8 段）",
+    "hybrid_rerank_agentic": "重排后再做补充检索（--agentic，最多 2 轮）",
+    "final_context_agentic": "补充检索后恢复上下文，实际交给回答模型的片段",
 }
+
+
+def diagnose_rerank_loss(traces: dict[str, dict], unique_in_order) -> dict:
+    """统计重排后 full@10 丢失的题目：是切片名额被同一文档占满，还是重排把标准文档排出了前 10。"""
+    lost = crowded = pushed_out = 0
+    for trace in traces.values():
+        gold = trace["gold"]
+        before = unique_in_order(trace["candidates"])[:10]
+        after_all = unique_in_order(trace["reranked"])
+        if not (gold <= set(before)) or gold <= set(after_all[:10]):
+            continue
+        lost += 1
+        # 重排输出不足 10 个不同文档，说明同一文档的多个切片占了名额。
+        if len(after_all) < 10:
+            crowded += 1
+        else:
+            pushed_out += 1
+    return {
+        "full10_lost_by_rerank": lost,
+        "of_which_fewer_than_10_documents_returned": crowded,
+        "of_which_gold_ranked_below_10": pushed_out,
+    }
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -191,7 +286,22 @@ async def run(args: argparse.Namespace) -> int:
     from evaluation import metrics
     from services.chat import ranking as chat_ranking
     from services.core.container import get_application_container
+    from services.core.settings import get_settings
 
+    if args.ranker != "rrf":
+        from services.retrieval.chunk_index import set_chunk_index
+        from services.retrieval.milvus_index import MilvusChunkIndex
+
+        settings = get_settings()
+        set_chunk_index(
+            MilvusChunkIndex(
+                settings.milvus_uri, settings.milvus_token,
+                settings.milvus_collection_prefix, settings.embedding_dimension,
+                ranker=args.ranker,
+            )
+        )
+    if args.rerank_top_n > 0:
+        chat_ranking.RERANK_TOP_N = args.rerank_top_n
     manifest = json.loads((args.data / "manifest.json").read_text("utf-8"))
     print("建库（复用已有索引则很快）...", flush=True)
     index_stats = build_knowledge_base(args.data / "corpus", args.index_timeout)
@@ -200,20 +310,36 @@ async def run(args: argparse.Namespace) -> int:
 
     questions = load_questions(args.data, args.limit)
     container = get_application_container()
+    context_limits = {}
+    if args.context_spans > 0:
+        context_limits["max_spans"] = args.context_spans
+    if args.context_chars > 0:
+        context_limits["max_chars"] = args.context_chars
     chat_ranking.start_rerank_client()
     per_config: dict[str, list[dict]] = {}
     latency: dict[str, list[float]] = {}
     # 检索器内部会吞掉调用异常并返回空列表；单独统计空结果，避免把故障误读为效果差。
     empty: dict[str, int] = {}
     errors: list[dict] = []
+    agentic_rounds: list[int] = []
+    context_chars: list[int] = []
+    traces: dict[str, dict] = {}
     try:
         for number, row in enumerate(questions, start=1):
             try:
-                outputs = await evaluate_question(row, container)
+                outputs = await evaluate_question(row, container, args.agentic, context_limits)
             except Exception as exc:  # 单题失败不应中断整轮评测
                 errors.append({"id": row["id"], "error": f"{type(exc).__name__}: {exc}"})
                 print(f"[{number}/{len(questions)}] {row['id']} 失败：{exc}", flush=True)
                 continue
+            traces[row["id"]] = {
+                "gold": set(row["gold"]),
+                "candidates": outputs["hybrid_plus_lexical"]["ranked"],
+                "reranked": outputs["hybrid_rerank"]["ranked"],
+            }
+            context_chars.append(outputs["final_context"]["chars"])
+            if args.agentic:
+                agentic_rounds.append(outputs["hybrid_rerank_agentic"]["rounds"])
             for name, output in outputs.items():
                 per_config.setdefault(name, []).append(
                     metrics.question_metrics(output["ranked"], row["gold"], KS)
@@ -238,18 +364,34 @@ async def run(args: argparse.Namespace) -> int:
         }
         for name, rows in per_config.items()
     }
+    rerank_diagnosis = diagnose_rerank_loss(traces, metrics.unique_in_order)
     report = {
+        "rerank_diagnosis": rerank_diagnosis,
         "metadata": {
             "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "dataset": manifest,
             "index": index_stats,
             "embedding_model": application_config.DEFAULT_EMBEDDING_MODEL,
-            "rerank_model": application_config.DEFAULT_RERANK_MODEL,
+            "rerank_model": get_settings().rerank_model or application_config.DEFAULT_RERANK_MODEL,
             "rerank_top_n": chat_ranking.RERANK_TOP_N,
+            "context_limits": context_limits or None,
+            "final_context_chars_mean": (
+                round(sum(context_chars) / len(context_chars), 1) if context_chars else None
+            ),
             "rerank_max_candidates": application_config.RETRIEVAL_RERANK_MAX_CANDIDATES,
             "chunk_size": application_config.DEFAULT_CHUNK_SIZE,
             "chunk_overlap": application_config.DEFAULT_CHUNK_OVERLAP,
             "ks": list(KS),
+            "hybrid_ranker": args.ranker,
+            "agentic": (
+                {
+                    "model": agentic_model_config()["model"],
+                    "questions_with_followup": sum(1 for n in agentic_rounds if n),
+                    "total_rounds": sum(agentic_rounds),
+                }
+                if args.agentic
+                else None
+            ),
             "evaluated": len(questions) - len(errors),
             "errors": errors,
         },

@@ -8,7 +8,7 @@ import api
 from services.chat import sessions as chat_sessions
 from services.core import config as application_config
 from services.core import model_api_keys, model_use_cases
-from services.knowledge_bases import use_cases as knowledge_base_use_cases
+from services.retrieval.chunk_index import get_chunk_index
 from tests.support import IsolatedStorageAsyncTestCase
 
 
@@ -123,21 +123,31 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
         )
         self.assertEqual(response.status_code, 422)
 
+        api.app_storage.knowledge_bases.create("研发部", 800, 150)
         with patch.object(
-            knowledge_base_use_cases.chroma_index,
-            "chroma_delete_by_knowledge_base",
-            side_effect=RuntimeError("chroma unavailable"),
+            get_chunk_index(),
+            "delete_kb",
+            side_effect=RuntimeError("index unavailable"),
         ):
             response = await self.client.delete(
-                "/api/kbs/通用知识库", headers=self.headers
+                "/api/kbs/研发部", headers=self.headers
             )
         self.assertEqual(response.status_code, 503)
         self.assertEqual(
             response.json()["code"], "knowledge_base_index_cleanup_failed"
         )
         self.assertTrue(
-            api.app_storage.knowledge_bases.exists("通用知识库")
+            api.app_storage.knowledge_bases.exists("研发部")
         )
+
+        deleted = await self.client.delete("/api/kbs/通用知识库", headers=self.headers)
+        renamed = await self.client.put(
+            "/api/kbs/通用知识库", headers=self.headers, json={"name": "公共资料"}
+        )
+        for response in (deleted, renamed):
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.json()["code"], "common_knowledge_base_protected")
+        self.assertTrue(api.app_storage.knowledge_bases.exists("通用知识库"))
 
         response = await self.client.put(
             "/api/kbs/通用知识库/retrieval_config",
@@ -256,7 +266,7 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
 
         models = (await self.client.get("/api/models", headers=self.headers)).json()
         self.assertTrue(models)
-        self.assertIs(type(models[0]["is_active"]), int)
+        self.assertIs(type(models[0]["is_active"]), bool)
 
         typed_get_endpoints = (
             "/api/dashboard/stats",

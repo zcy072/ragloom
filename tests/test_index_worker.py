@@ -1,5 +1,7 @@
 import asyncio
+import sqlite3
 import threading
+import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -81,6 +83,41 @@ class IndexWorkerTest(IsolatedStorageTestCase):
         finally:
             worker.stop()
 
+    def test_worker_survives_a_failing_finish_after_a_dispatch_error(self):
+        second_done = threading.Event()
+
+        def dispatch(job_id):
+            if job_id == "boom":
+                raise RuntimeError("dispatch failed")
+            second_done.set()
+
+        class BrokenJobs:
+            def finish(self, *args):
+                raise sqlite3.OperationalError("database is locked")
+
+        class StubContainer:
+            def index_jobs(self):
+                return BrokenJobs()
+
+        worker = IndexWorker(
+            dispatcher=dispatch,
+            pending_job_ids=lambda: [],
+            container=StubContainer(),
+            worker_count=1,
+        )
+        worker.start()
+        try:
+            with self.assertLogs("services.indexing.worker", level="ERROR"):
+                self.assertTrue(worker.enqueue("boom"))
+                deadline = time.monotonic() + 2
+                while "boom" in worker._queued_job_ids and time.monotonic() < deadline:
+                    time.sleep(0.01)
+            # 唯一的线程必须还活着，才能继续处理下一个任务。
+            self.assertTrue(worker.enqueue("next"))
+            self.assertTrue(second_done.wait(timeout=2))
+        finally:
+            worker.stop()
+
     def test_multi_thread_worker_runs_jobs_in_parallel_and_stops_cleanly(self):
         barrier = threading.Barrier(3, timeout=2)
         finished = []
@@ -149,6 +186,30 @@ class IndexWorkerTest(IsolatedStorageTestCase):
                 close_rerank.assert_awaited_once_with()
 
         asyncio.run(exercise_lifespan())
+
+    def test_periodic_history_pruning_runs_and_survives_failures(self):
+        calls = []
+
+        def prune():
+            calls.append(1)
+            if len(calls) == 1:
+                raise sqlite3.OperationalError("database is locked")
+
+        async def exercise():
+            with patch.object(api.app_storage, "prune_expired_history", side_effect=prune):
+                task = asyncio.create_task(api._prune_history_periodically(0.01))
+                for _ in range(200):
+                    if len(calls) >= 2:
+                        break
+                    await asyncio.sleep(0.01)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+        with self.assertLogs("api", level="ERROR"):
+            asyncio.run(exercise())
+
+        self.assertGreaterEqual(len(calls), 2)  # 第一次失败后仍会继续下一轮
 
 
 if __name__ == "__main__":

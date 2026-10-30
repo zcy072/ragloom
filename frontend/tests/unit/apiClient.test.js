@@ -47,7 +47,7 @@ test('a 401 response clears the session and emits auth-expired', async () => {
   }
 });
 
-test('a FastAPI validation error shows its messages instead of [object Object]', async () => {
+test('a FastAPI validation error is shown as readable Chinese instead of [object Object]', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => ({
     ok: false,
@@ -56,8 +56,10 @@ test('a FastAPI validation error shows its messages instead of [object Object]',
     async text() {
       return JSON.stringify({
         detail: [
-          { type: 'string_too_long', loc: ['body', 'name'], msg: 'String should have at most 80 characters' },
-          { type: 'missing', loc: ['body', 'tags'], msg: 'Field required' }
+          { type: 'string_too_long', loc: ['body', 'name'], msg: 'String should have at most 80 characters', ctx: { max_length: 80 } },
+          { type: 'string_too_short', loc: ['body', 'username'], msg: 'String should have at least 1 character', ctx: { min_length: 1 } },
+          { type: 'missing', loc: ['body', 'unknown_field'], msg: 'Field required' },
+          { type: 'value_error', loc: ['body', 'name'], msg: 'Value error, 名称不合法' }
         ]
       });
     }
@@ -68,7 +70,7 @@ test('a FastAPI validation error shows its messages instead of [object Object]',
       apiGet('/api/kbs'),
       error => error instanceof ApiError
         && error.status === 422
-        && error.message === 'String should have at most 80 characters；Field required'
+        && error.message === '名称不能超过 80 个字符；账号名称不能为空；输入不能为空；Value error, 名称不合法'
     );
   } finally {
     globalThis.fetch = originalFetch;

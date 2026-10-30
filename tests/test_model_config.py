@@ -6,6 +6,7 @@ from unittest.mock import patch
 try:
     import app_storage
     from routers import models, schemas
+    from services.core.errors import InvalidRequestError
 except ModuleNotFoundError:
     app_storage = None
 
@@ -34,6 +35,12 @@ class ModelConfigTest(IsolatedStorageTestCase):
                 default_model=f"{provider}-model",
             )
         )
+
+    def test_saving_a_model_drops_retrievers_holding_the_old_embedding_key(self):
+        with patch.object(models.retriever, "clear_retriever_cache") as clear:
+            self._save("模型 A", "key-a")
+
+        clear.assert_called_once_with()
 
     def test_bootstrap_uses_current_openai_and_deepseek_defaults(self):
         app_storage.bootstrap_defaults()
@@ -108,6 +115,8 @@ class ModelConfigTest(IsolatedStorageTestCase):
                 "sk-test-value",
             )
             self.assertEqual(client.max_tokens, expected_limit)
+        for client in clients[1:]:
+            self.assertEqual(client[0].max_retries, 0)
 
         with patch.object(
             llm_config,
@@ -190,6 +199,31 @@ class ModelConfigTest(IsolatedStorageTestCase):
                 "SELECT provider_name FROM models_config WHERE is_active = 1"
             ).fetchone()[0]
         self.assertEqual(active, "模型 A")
+
+    def test_changing_base_url_requires_reentering_the_saved_key(self):
+        self._save("模型 A", "key-a")
+
+        def save(base_url, api_key=""):
+            return models.save_model(
+                schemas.ModelConfigRequest(
+                    provider="模型 A", api_key=api_key, base_url=base_url,
+                    default_model="模型 A-model",
+                )
+            )
+
+        with self.assertRaises(InvalidRequestError) as error:
+            save("https://attacker.test/v1")
+        self.assertEqual(error.exception.code, "model_api_key_required")
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT base_url FROM models_config WHERE provider_name = '模型 A'"
+                ).fetchone()[0],
+                "https://example.test/v1",
+            )
+        # 地址不变时留空仍保留原 key；换地址并填写新 key 可以保存。
+        save("https://example.test/v1")
+        save("https://other.test/v1", api_key="key-b")
 
     def test_provider_rows_are_mapped_to_public_and_private_contracts(self):
         self._save("模型 A", "key-a")

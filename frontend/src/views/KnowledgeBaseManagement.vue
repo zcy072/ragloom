@@ -29,7 +29,7 @@
           <div class="flex items-center space-x-2 relative">
             <button @click="setManageKb(kb)" class="bg-white hover:bg-[#f3f8f8] text-[#4d6669] border border-[#d8e4e4] px-3 py-1.5 rounded-md text-[12px] font-medium transition-colors">{{ readonly ? '查看文档' : '管理文档' }}</button>
             <button @click="startChat(kb)" class="bg-[#176d70] hover:bg-[#10585c] text-white px-3 py-1.5 rounded-md text-[12px] font-medium transition-colors">开始问答</button>
-            <div v-if="!readonly" class="relative ml-auto">
+            <div v-if="!readonly && kb.name !== '通用知识库'" class="relative ml-auto">
               <button @click="actionMenuId = actionMenuId === kb.name ? null : kb.name" class="h-[28px] w-[28px] flex items-center justify-center bg-gray-50 hover:bg-gray-100 text-gray-500 border border-gray-200 rounded transition-colors" title="更多操作"><MoreHorizontal class="w-3 h-3" /></button>
               <div v-if="actionMenuId === kb.name" class="absolute right-0 top-8 w-40 bg-white border border-gray-200 rounded-md shadow-lg py-1 z-10 text-[12px]">
                 <div v-if="renameKbId === kb.name" class="px-3 py-2 flex flex-col space-y-2">

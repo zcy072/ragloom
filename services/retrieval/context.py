@@ -1,6 +1,7 @@
 """父段落恢复、相邻片段扩展，以及聊天提示上下文格式化。"""
 
 import collections
+import functools
 import hashlib
 import logging
 import os
@@ -9,23 +10,22 @@ from dataclasses import dataclass
 
 from langchain_core.documents import Document as LCDocument
 
-from services.core import sqlite_connections as application_db
 from services.core.config import (
     RETRIEVAL_CONTEXT_MAX_CHARS,
     RETRIEVAL_CONTEXT_MAX_SPANS,
     RETRIEVAL_CONTEXT_NEIGHBOR_CHUNKS,
 )
+from services.core.container import get_application_container
 from services.indexing.chunking import (
-    CHUNK_ROUTE_FIXED,
     CHUNK_ROUTE_STRUCTURED,
     CHUNK_ROUTE_VISUAL,
     STRUCTURED_CHUNK_MIN_CHARS,
     chunk_route,
 )
-from services.retrieval import fts as fts_index
+from services.retrieval import parent_store
+from services.retrieval.chunk_index import get_chunk_index, run_searches
 
 logger = logging.getLogger(__name__)
-PARENT_CHUNK_TABLE = fts_index.PARENT_CHUNK_TABLE
 PARENT_CONTEXT_RESOLVED = "_parent_context_resolved"
 
 
@@ -43,11 +43,15 @@ class ContextSpan:
     contextual_titles: tuple[str, ...] = ()
     kb_name: str = ""
     chunk_routes: tuple[str, ...] = ()
+    # 网页搜索结果的地址；知识库片段为空。
+    url: str = ""
 
 
 def _chunk_index(document: LCDocument) -> int | None:
     """读取文档的稳定切片序号；缺失或不合法时返回 None。"""
     value = document.metadata.get("chunk_index")
+    if value is None:
+        return None
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -65,35 +69,34 @@ def document_kb_name(document: LCDocument, fallback_kb_name: str) -> str:
     return value or fallback_kb_name
 
 
+def _kb_id(kb_name: str) -> str | None:
+    """把知识库名称解析为稳定的 kb_id；知识库不存在时返回 None。"""
+    return get_application_container().knowledge_bases.kb_id_for(kb_name)
+
+
 def _load_parent_chunks(
     kb_name: str,
     parent_ids: set[str],
 ) -> dict[str, dict[str, str]]:
-    """从 FTS5 父段落表批量加载指定 parent_id 对应的完整段落。"""
+    """从父段落表批量加载指定 parent_id 对应的完整段落。"""
     if not parent_ids:
         return {}
-    fts_db_path = fts_index.fts_db_path(kb_name)
-    if not fts_index.fts5_index_is_current(fts_db_path):
+    kb_id = _kb_id(kb_name)
+    if not kb_id:
         return {}
-    placeholders = ", ".join("?" for _ in parent_ids)
     try:
-        with application_db.connect_fts5(fts_db_path) as conn:
-            rows = conn.execute(
-                f"SELECT parent_id, source, page, content, contextual_title FROM {PARENT_CHUNK_TABLE} "
-                f"WHERE parent_id IN ({placeholders})",
-                tuple(parent_ids),
-            ).fetchall()
+        rows = parent_store.load(kb_id, parent_ids)
     except sqlite3.Error as exc:
         logger.warning("Parent passage lookup failed: %s", exc)
         return {}
     return {
-        str(row[0]): {
-            "source": str(row[1]),
-            "page": str(row[2]),
-            "content": str(row[3]),
-            "contextual_title": str(row[4]),
+        parent_id: {
+            "source": source,
+            "page": page,
+            "content": content,
+            "contextual_title": contextual_title,
         }
-        for row in rows
+        for parent_id, (_, source, page, content, contextual_title) in rows.items()
     }
 
 
@@ -151,53 +154,75 @@ def _document_key(document: LCDocument) -> tuple[str, str, str, int | None, str]
     )
 
 
-def _fts_context_neighbors(
-    kb_name: str,
-    source: str,
-    chunk_route: str,
-    chunk_index: int,
-    neighbor_chunks: int,
-) -> list[LCDocument]:
-    """切片位置可用时，从 FTS5 加载其前后相邻的上下文切片。"""
-    fts_db_path = fts_index.fts_db_path(kb_name)
-    if not fts_index.fts5_index_is_current(fts_db_path):
-        return []
-    lower = max(0, chunk_index - neighbor_chunks)
-    upper = chunk_index + neighbor_chunks
-    try:
-        with application_db.connect_fts5(fts_db_path) as conn:
-            rows = conn.execute(
-                "SELECT source, page, original_text, chunk_index, parent_id, contextual_title, "
-                "chunk_route FROM docs WHERE source = ? AND chunk_route = ? "
-                "AND CAST(chunk_index AS INTEGER) BETWEEN ? AND ? "
-                "ORDER BY CAST(chunk_index AS INTEGER)",
-                (source, chunk_route, lower, upper),
-            ).fetchall()
-    except sqlite3.Error as exc:
-        logger.warning("FTS5 context expansion failed: %s", exc)
-        return []
+NeighborKey = tuple[str, str, str]
 
-    return [
-        LCDocument(
-            page_content=row[2],
-            metadata={
-                "source": row[0],
-                "page": row[1],
-                "kb_name": kb_name,
-                "chunk_index": int(row[3]),
-                "chunk_route": row[6] or CHUNK_ROUTE_FIXED,
-                **({"contextual_title": row[5]} if row[5] else {}),
-                **(
-                    {
-                        "parent_id": row[4],
-                    }
-                    if row[4]
-                    else {}
-                ),
-            },
+
+def _neighbor_window(index: int, neighbor_chunks: int) -> tuple[int, int]:
+    """返回一个命中需要的相邻子块闭区间。"""
+    return max(0, index - neighbor_chunks), index + neighbor_chunks
+
+
+def _needs_neighbors(document: LCDocument) -> bool:
+    """判断命中是否要补相邻子块：父段落、视觉和足够长的结构化段落保持自身边界。"""
+    if document.metadata.get("parent_id") or _chunk_index(document) is None:
+        return False
+    route = chunk_route(document)
+    return not (
+        route == CHUNK_ROUTE_VISUAL
+        or (
+            route == CHUNK_ROUTE_STRUCTURED
+            and len(document.page_content.strip()) >= STRUCTURED_CHUNK_MIN_CHARS
         )
-        for row in rows
-    ]
+    )
+
+
+def _fetch_context_neighbors(
+    documents: list[LCDocument],
+    fallback_kb_name: str,
+    neighbor_chunks: int,
+) -> dict[NeighborKey, list[LCDocument]]:
+    """批量取所有命中的相邻子块，按 (知识库, 文件, 路线) 返回已取到的子块。
+
+    同一文件同一路线的窗口先合并成不重叠的区间，每个区间查一次索引，所有区间并发执行；
+    相距很远的命中不合并成一个大区间，避免取回中间无关的子块。
+    """
+    windows: dict[NeighborKey, list[tuple[int, int]]] = collections.defaultdict(list)
+    for document in documents:
+        if _needs_neighbors(document):
+            key = (
+                document_kb_name(document, fallback_kb_name),
+                source_name(document),
+                chunk_route(document),
+            )
+            windows[key].append(_neighbor_window(_chunk_index(document) or 0, neighbor_chunks))
+
+    kb_ids = {kb_name: _kb_id(kb_name) for kb_name, _, _ in windows}
+    queries: list[tuple[NeighborKey, str, int, int]] = []
+    for key, ranges in windows.items():
+        kb_id = kb_ids[key[0]]
+        if not kb_id:
+            continue
+        merged: list[list[int]] = []
+        for lower, upper in sorted(ranges):
+            if merged and lower <= merged[-1][1] + 1:
+                merged[-1][1] = max(merged[-1][1], upper)
+            else:
+                merged.append([lower, upper])
+        queries.extend((key, kb_id, lower, upper) for lower, upper in merged)
+
+    index = get_chunk_index()
+    results = run_searches(
+        [
+            functools.partial(index.neighbors, kb_id, source, route, lower, upper)
+            for (_, source, route), kb_id, lower, upper in queries
+        ]
+    )
+    fetched: dict[NeighborKey, list[LCDocument]] = collections.defaultdict(list)
+    for (key, _, _, _), neighbors in zip(queries, results):
+        for document in neighbors:
+            document.metadata["kb_name"] = key[0]
+        fetched[key].extend(neighbors)
+    return fetched
 
 
 def _span_from_documents(
@@ -230,7 +255,7 @@ def _span_from_documents(
         contextual_title = str(document.metadata.get("contextual_title", "")).strip()
         if contextual_title and contextual_title not in contextual_titles:
             contextual_titles.append(contextual_title)
-    page_unit = "行" if source.lower().endswith((".xlsx", ".xls", ".csv")) else "页"
+    page_unit = "页"
     return ContextSpan(
         source=source,
         content="\n\n".join(unique_contents),
@@ -250,6 +275,7 @@ def _classify_context_hit(
     document: LCDocument,
     fallback_kb_name: str,
     neighbor_chunks: int,
+    fetched_neighbors: dict[NeighborKey, list[LCDocument]],
 ) -> tuple[str, tuple[str, ...], dict]:
     """将单个排序命中分类为独立证据段或带位置区间。"""
     source = source_name(document)
@@ -285,20 +311,16 @@ def _classify_context_hit(
         )
 
     if index is not None:
-        self_contained = route == CHUNK_ROUTE_VISUAL or (
-            route == CHUNK_ROUTE_STRUCTURED
-            and len(document.page_content.strip()) >= STRUCTURED_CHUNK_MIN_CHARS
-        )
+        self_contained = not _needs_neighbors(document)
         if self_contained:
             neighbors = [document]
         else:
-            neighbors = _fts_context_neighbors(
-                kb_name,
-                source,
-                route,
-                index,
-                neighbor_chunks,
-            ) or [document]
+            lower, upper = _neighbor_window(index, neighbor_chunks)
+            neighbors = [
+                item
+                for item in fetched_neighbors.get((kb_name, source, route), [])
+                if lower <= (_chunk_index(item) or 0) <= upper
+            ] or [document]
         indexes = [
             value
             for value in (_chunk_index(item) for item in neighbors)
@@ -364,6 +386,9 @@ def _merge_context_intervals(
     return intervals
 
 
+CONTEXT_TRUNCATION_MARKER = "\n[片段因上下文长度限制而截断]"
+
+
 def _limit_context_spans(
     intervals: list[dict],
     fallback_kb_name: str,
@@ -373,7 +398,9 @@ def _limit_context_spans(
     """将排序区间转换为上下文段，并应用全局字符预算。"""
     spans: list[ContextSpan] = []
     used_chars = 0
-    for interval in intervals[:max_spans]:
+    for interval in intervals:
+        if len(spans) >= max_spans or used_chars >= max_chars:
+            break
         span = _span_from_documents(
             interval["source"],
             interval["documents"],
@@ -382,11 +409,12 @@ def _limit_context_spans(
             chunk_start=interval.get("start"),
             chunk_end=interval.get("end"),
         )
-        if not span.content or used_chars >= max_chars:
+        # 空段不占名额，否则后面有内容的区间会被段数上限截掉。
+        if not span.content:
             continue
         remaining_chars = max_chars - used_chars
         if len(span.content) > remaining_chars:
-            truncation_marker = "\n[片段因上下文长度限制而截断]"
+            truncation_marker = CONTEXT_TRUNCATION_MARKER
             if remaining_chars <= len(truncation_marker):
                 truncated_content = truncation_marker[:remaining_chars]
             else:
@@ -421,7 +449,7 @@ def build_context_spans(
 ) -> list[ContextSpan]:
     """把排序命中扩展为有长度上限、按来源局部聚合的聊天提示段落。
 
-    当前索引让 Chroma 和 FTS5 都能提供文件内位置。完整结构化段落和图片描述保持
+    当前索引（Milvus）为每个子块保存文件内位置。完整结构化段落和图片描述保持
     自身边界，不拉入无关的相邻章节或图片。
     """
     if any(
@@ -437,12 +465,13 @@ def build_context_spans(
     standalone: list[dict] = []
     seen_standalone: set[tuple[str, ...]] = set()
 
+    fetched_neighbors = _fetch_context_neighbors(documents, kb_name, neighbor_chunks)
     for rank, document in enumerate(documents):
         kind, key, interval = _classify_context_hit(
-            rank, document, kb_name, neighbor_chunks
+            rank, document, kb_name, neighbor_chunks, fetched_neighbors
         )
         if kind == "positioned":
-            positioned[key].append(interval)
+            positioned[(key[0], key[1], key[2])].append(interval)
         elif key not in seen_standalone:
             standalone.append(interval)
             seen_standalone.add(key)
@@ -470,6 +499,10 @@ def format_context_spans(spans: list[ContextSpan]) -> str:
     """将限长上下文段渲染为带稳定来源编号的聊天模型输入。"""
     blocks = []
     for index, span in enumerate(spans, start=1):
+        if span.url:
+            details = "，".join([span.source, *span.contextual_titles, span.url])
+            blocks.append(f"【来源 {index}：网页，{details}】\n{span.content}")
+            continue
         source = os.path.basename(span.source) or span.source
         page = context_span_page_label(span)
         location = f"，{page}" if page else ""

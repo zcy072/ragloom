@@ -161,7 +161,7 @@ import { toast } from './toast';
 import { apiGet, apiPost } from './apiClient';
 import { AUTH_STORAGE_KEY, clearAuthSession, loadAuthSession, saveAuthSession } from './authSession';
 import { canManageKnowledgeBases, canOpenKnowledgeBase } from './knowledgeAccess';
-import { LayoutDashboard, FolderOpen, MessageCircle, Settings, Users, UserCog, LogOut, Key, Eye, EyeOff, Database, Menu, LoaderCircle } from 'lucide-vue-next';
+import { LayoutDashboard, FolderOpen, MessageCircle, Settings, Users, UserCog, LogOut, Key, Eye, EyeOff, Database, Menu, LoaderCircle, Activity, BarChart3 } from 'lucide-vue-next';
 
 const ChatWorkspace = defineAsyncComponent(() => import('./views/ChatWorkspace.vue'));
 const DashboardView = defineAsyncComponent(() => import('./views/DashboardView.vue'));
@@ -169,6 +169,8 @@ const KnowledgeBaseManagement = defineAsyncComponent(() => import('./views/Knowl
 const ModelConfiguration = defineAsyncComponent(() => import('./views/ModelConfiguration.vue'));
 const UserManagement = defineAsyncComponent(() => import('./views/UserManagement.vue'));
 const RoleManagement = defineAsyncComponent(() => import('./views/RoleManagement.vue'));
+const OpsMonitor = defineAsyncComponent(() => import('./views/OpsMonitor.vue'));
+const UserAnalytics = defineAsyncComponent(() => import('./views/UserAnalytics.vue'));
 
 // 与后端 services/core/config.py 的 MIN_PASSWORD_LENGTH 保持一致。
 const MIN_PASSWORD_LENGTH = 8;
@@ -191,6 +193,8 @@ const allMenus = [
   { id: '模型管理', icon: Settings, permission: '模型配置', component: ModelConfiguration },
   { id: '用户管理', icon: Users, permission: '用户管理', component: UserManagement },
   { id: '角色管理', icon: UserCog, permission: '角色管理', component: RoleManagement },
+  { id: '运行监控', icon: Activity, permission: '运行监控', component: OpsMonitor },
+  { id: '用户分析', icon: BarChart3, permission: '用户分析', component: UserAnalytics },
 ];
 const menus = computed(() => {
   if (!store.user) return [];

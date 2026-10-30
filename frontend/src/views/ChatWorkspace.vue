@@ -81,6 +81,7 @@
                 <button @click="copyAnswer(msg.content)" :disabled="loading || loadingSession || !msg.content" class="app-icon-button mt-2 disabled:opacity-40" title="复制回答" aria-label="复制回答"><Copy class="h-4 w-4" /></button>
               </div>
               <div v-if="msg.interrupted" class="mt-2 text-[12px] text-amber-700">回答生成中断，以上内容可能不完整，请重试。</div>
+              <ChatMessageTrace :message="msg" @feedback="value => { msg.feedback = value; }" />
               <RetrievalDiagnostics v-if="msg.diagnostics" :diagnostics="msg.diagnostics" />
               <div v-if="visibleSources(msg).length > 0" class="mt-3">
                 <div class="flex items-center text-[12px] text-gray-500 mb-2">
@@ -92,12 +93,14 @@
                     <div class="flex items-center justify-between mb-1">
                       <div class="flex min-w-0 items-center gap-2 text-blue-600 font-medium w-3/4 hover:underline">
                         <span class="truncate">[{{ sourceCitationLabel(src) }}] {{ src.source }}</span>
+                        <span v-if="src.url" class="shrink-0 text-[10px] font-normal text-teal-700">网页</span>
                         <span v-if="src.kb_name && src.kb_name !== selectedKb" class="shrink-0 text-[10px] font-normal text-teal-700">{{ src.kb_name }}</span>
                       </div>
                       <div v-if="src.page" class="text-gray-400 text-[11px] whitespace-nowrap bg-gray-50 px-1.5 py-0.5 rounded">{{ src.page }}</div>
                     </div>
                     <div v-if="src.context_title" class="mb-1 truncate text-[11px] text-teal-700">{{ src.context_title }}</div>
                     <div v-if="src.content" class="text-gray-600">{{ src.content }}</div>
+                    <a v-if="src.url" :href="src.url" target="_blank" rel="noopener noreferrer nofollow" class="mt-1 block truncate text-[11px] text-teal-700 underline" @click.stop>{{ src.url }}</a>
                     <div v-if="src.evidence?.length" class="mt-2 flex flex-wrap gap-2">
                       <button v-for="entry in src.evidence" :key="entry.id" @click.stop="openPreview(entry)" class="text-teal-700 underline" :title="entry.content">[来源 {{ entry.id }}] {{ entry.page }}</button>
                     </div>
@@ -108,8 +111,9 @@
           </template>
         </div>
         <div v-if="loading" class="flex justify-start w-full">
-          <div class="bg-white border border-gray-200 rounded-lg p-4 text-[14px] text-gray-500 shadow-sm flex items-center">
+          <div class="bg-white border border-gray-200 rounded-lg p-4 text-[14px] text-gray-500 shadow-sm">
             <div class="animate-pulse">正在检索知识库思考中...</div>
+            <ChatStageTimeline v-if="liveStages.length" :stages="liveStages" class="mt-2" />
           </div>
         </div>
         <div ref="endRef"></div>
@@ -121,6 +125,8 @@
         :loading="loading"
         :disabled="initializing || loadingSession"
         :attached-image="attachedImage"
+        v-model:web-search="webSearch"
+        :web-search-allowed="webSearchAllowed"
         @send="handleSend"
         @stop="handleStop"
         @image-select="handleImageSelect"
@@ -151,6 +157,8 @@ import { apiGet } from '../apiClient';
 import ChatComposer from '../components/ChatComposer.vue';
 import ChatAnswer from '../components/ChatAnswer.vue';
 import RetrievalDiagnostics from '../components/RetrievalDiagnostics.vue';
+import ChatMessageTrace from '../components/ChatMessageTrace.vue';
+import ChatStageTimeline from '../components/ChatStageTimeline.vue';
 import ChatRetrievalFilters from '../components/ChatRetrievalFilters.vue';
 import ChatSessionSidebar from '../components/ChatSessionSidebar.vue';
 import DocumentPreview from '../components/DocumentPreview.vue';
@@ -167,6 +175,9 @@ const selectedKb = ref('通用知识库');
 const models = ref([]);
 const selectedModel = ref('');
 const modelConfigured = ref(true);
+// 联网搜索需要角色有对应权限；开关只对之后发送的问题生效。
+const webSearchAllowed = computed(() => Boolean(store.user?.menuPermissions?.includes('联网搜索')));
+const webSearch = ref(false);
 const showRetrievalFilters = ref(false);
 const filterOptions = ref({ sources: [], document_types: [], tags: [] });
 const retrievalFilters = ref({
@@ -261,6 +272,7 @@ const {
 const {
   input,
   loading,
+  liveStages,
   attachedImage,
   handleImageSelect,
   handleImagePaste,
@@ -275,7 +287,8 @@ const {
   hasRetrievalFilters,
   retrievalFilterPayload,
   newSessionPending,
-  loadSessions
+  loadSessions,
+  webSearch: computed(() => webSearchAllowed.value && webSearch.value)
 });
 
 /** 切换会话；点击当前会话时什么都不做，避免误点中断正在生成的回答。 */
@@ -375,7 +388,7 @@ onMounted(async () => {
   try {
     const data = await apiGet('/api/models');
     models.value = data;
-    const active = data.find(m => m.is_active === 1);
+    const active = data.find(m => m.is_active);
     if (active) selectedModel.value = active.provider;
     syncModelConfigured();
   } catch {
@@ -426,7 +439,7 @@ const visibleSources = (message) => {
   const groups = new Map();
 
   selected.forEach((source, index) => {
-    const key = `${source.kb_name || selectedKb.value}::${source.source || `source-${index}`}`;
+    const key = source.url ? `web::${source.url}` : `${source.kb_name || selectedKb.value}::${source.source || `source-${index}`}`;
     const group = groups.get(key) || {
       ...source,
       citation_ids: [],
@@ -450,6 +463,11 @@ const visibleSources = (message) => {
 /** 打开来源文档预览，并尽量定位到引用页码。 */
 const openPreview = (src) => {
   if (src.evidence?.length) src = src.evidence[0];
+  // 网页来源没有可预览的知识库文件，直接在新标签页打开原网页。
+  if (src.url) {
+    window.open(src.url, '_blank', 'noopener,noreferrer');
+    return;
+  }
   previewEvidence.value = src;
   previewDoc.value = src.source;
   previewKbName.value = src.kb_name || selectedKb.value;

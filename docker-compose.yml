@@ -1,5 +1,12 @@
 name: ragloom
 
+# 容器标准输出日志按大小轮转，避免 json-file 日志无限增长。
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   backend:
     build:
@@ -20,8 +27,15 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
       HOME: /home/app
       STORAGE_DIR: /app/storage
-      CHROMA_PATH: /app/storage/chroma
+      MILVUS_URI: http://milvus:19530
+      MILVUS_TOKEN: ${MILVUS_TOKEN:-}
+      MILVUS_COLLECTION_PREFIX: ${MILVUS_COLLECTION_PREFIX:-ragloom_}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FILE_MAX_BYTES: ${LOG_FILE_MAX_BYTES:-10485760}
+      LOG_FILE_BACKUPS: ${LOG_FILE_BACKUPS:-5}
+      CHAT_RUN_RETENTION_DAYS: ${CHAT_RUN_RETENTION_DAYS:-90}
+      LOGIN_EVENT_RETENTION_DAYS: ${LOGIN_EVENT_RETENTION_DAYS:-180}
       RETRIEVER_CACHE_MAX_SIZE: ${RETRIEVER_CACHE_MAX_SIZE:-8}
       QUERY_EMBEDDING_CACHE_SIZE: ${QUERY_EMBEDDING_CACHE_SIZE:-64}
       PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: "True"
@@ -30,6 +44,10 @@ services:
       MINERU_MODEL_VERSION: ${MINERU_MODEL_VERSION:-vlm}
       MINERU_DOWNLOAD_ATTEMPTS: ${MINERU_DOWNLOAD_ATTEMPTS:-3}
       MINERU_TIMEOUT_SECONDS: ${MINERU_TIMEOUT_SECONDS:-600}
+      MINERU_LANGUAGE: ${MINERU_LANGUAGE:-ch}
+      MINERU_ENABLE_FORMULA: ${MINERU_ENABLE_FORMULA:-true}
+      MINERU_ENABLE_TABLE: ${MINERU_ENABLE_TABLE:-true}
+      MINERU_POLL_INTERVAL_SECONDS: ${MINERU_POLL_INTERVAL_SECONDS:-3}
       MINERU_RESULTS_DIR: /app/storage/mineru_results
       RAG_IMAGE_ANALYSIS: ${RAG_IMAGE_ANALYSIS:-auto}
       RAG_VISION_PROVIDER: ${RAG_VISION_PROVIDER:-OpenAI}
@@ -42,6 +60,12 @@ services:
       MINERU_MAX_CONCURRENCY: ${MINERU_MAX_CONCURRENCY:-3}
       EMBEDDING_MAX_CONCURRENCY: ${EMBEDDING_MAX_CONCURRENCY:-2}
       VISION_GLOBAL_MAX_CONCURRENCY: ${VISION_GLOBAL_MAX_CONCURRENCY:-6}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
+      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
+      RERANK_BASE_URL: ${RERANK_BASE_URL:-}
+      RERANK_MODEL: ${RERANK_MODEL:-}
+      RERANK_API_KEY: ${RERANK_API_KEY:-}
+      RERANK_TIMEOUT_SECONDS: ${RERANK_TIMEOUT_SECONDS:-15}
       AUTH_SECRET_KEY: ${AUTH_SECRET_KEY:-}
       MODEL_API_KEY_ENCRYPTION_KEY: ${MODEL_API_KEY_ENCRYPTION_KEY:-}
       MODEL_API_KEY_PREVIOUS_ENCRYPTION_KEYS: ${MODEL_API_KEY_PREVIOUS_ENCRYPTION_KEYS:-}
@@ -52,14 +76,60 @@ services:
       AUTH_CLIENT_WINDOW_SECONDS: ${AUTH_CLIENT_WINDOW_SECONDS:-300}
       AUTH_REGISTER_MAX_ATTEMPTS: ${AUTH_REGISTER_MAX_ATTEMPTS:-5}
       AUTH_REGISTER_WINDOW_SECONDS: ${AUTH_REGISTER_WINDOW_SECONDS:-3600}
+      # 仅在后端只经 nginx 访问时安全；若把 8000 端口改为对外暴露，必须改成 false。
       AUTH_TRUST_X_REAL_IP: ${AUTH_TRUST_X_REAL_IP:-true}
       INDEX_JOB_HISTORY_RETENTION_DAYS: ${INDEX_JOB_HISTORY_RETENTION_DAYS:-90}
       INDEX_JOB_HISTORY_MAX_PER_KB: ${INDEX_JOB_HISTORY_MAX_PER_KB:-200}
       CHAT_RETRIEVAL_PLANNING: ${CHAT_RETRIEVAL_PLANNING:-false}
       CHAT_QUERY_VARIANT: ${CHAT_QUERY_VARIANT:-false}
+      CHAT_AGENTIC_RETRIEVAL: ${CHAT_AGENTIC_RETRIEVAL:-false}
+      WEB_SEARCH_DAILY_LIMIT: ${WEB_SEARCH_DAILY_LIMIT:-500}
+      WEB_SEARCH_USER_PER_MINUTE: ${WEB_SEARCH_USER_PER_MINUTE:-5}
+      CHAT_USER_MAX_CONCURRENT: ${CHAT_USER_MAX_CONCURRENT:-2}
+      CHAT_USER_PER_MINUTE: ${CHAT_USER_PER_MINUTE:-10}
+    depends_on:
+      milvus:
+        condition: service_healthy
+    healthcheck:
+      # 镜像里没有 curl，用 Python 标准库探测。
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    # Linux 的 Docker 不自带 host.docker.internal；本地 Ollama/vLLM 默认地址依赖它。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
-      - "8000:8000"
+      # 只绑定本机回环：前端通过容器网络访问后端，8000 仅供本机调试和冒烟测试，局域网不可达。
+      - "127.0.0.1:8000:8000"
     restart: always
+    logging: *default-logging
+
+  # 单容器 Milvus Standalone（内嵌 etcd，本地存储），仅适合单机部署。
+  milvus:
+    # 固定 digest，镜像源换了内容也不会被静默拉取；升级时同时更新 tag 与 digest。
+    image: ${MILVUS_IMAGE:-docker.1ms.run/milvusdb/milvus:v2.6.0@sha256:13bb2bff4b20598e860ee95ad1f42a167d20f50d9acc9718b09bf34792bb8f10}
+    command: ["milvus", "run", "standalone"]
+    environment:
+      DEPLOY_MODE: STANDALONE
+      ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: /var/lib/milvus/etcd
+      COMMON_STORAGETYPE: local
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    restart: always
+    logging: *default-logging
 
   frontend:
     build:
@@ -73,8 +143,10 @@ services:
     environment:
       TZ: ${TZ:-Asia/Shanghai}
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: always
+    logging: *default-logging
 
   frontend-check:
     profiles: ["test"]
@@ -111,7 +183,7 @@ services:
     command:
       - sh
       - -c
-      - ruff check api.py app_storage.py routers services tests && pyright && python -m compileall -q api.py app_storage.py routers services tests
+      - ruff check api.py app_storage.py routers services tests scripts evaluation && pyright && python -m compileall -q api.py app_storage.py routers services tests scripts evaluation
 
   e2e:
     profiles: ["test"]
@@ -123,5 +195,7 @@ services:
     ipc: host
 
 volumes:
+  milvus_data:
+    name: ragloom_milvus_data
   paddle_models:
     name: pymodel_paddle_models

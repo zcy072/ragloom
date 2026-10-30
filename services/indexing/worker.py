@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable
 
 from services.core.container import ApplicationContainer, get_application_container
+from services.core.request_context import bind_request_id, reset_request_id
 from services.core.settings import get_settings
 from services.indexing import pipeline as knowledge_base
 from services.indexing.jobs import INDEX_JOB_FAILED, INDEX_JOB_QUEUED
@@ -119,13 +120,23 @@ class IndexWorker:
                 if job_id is None:
                     return
                 if not self._stopping.is_set():
-                    self._dispatcher(job_id)
+                    # 任务 ID 作为请求 ID，这个任务的日志行都能按任务 ID 检索。
+                    token = bind_request_id(job_id)
+                    try:
+                        self._dispatcher(job_id)
+                    finally:
+                        reset_request_id(token)
             except Exception as exc:
                 logger.exception("Index worker crashed while dispatching %s", job_id)
                 if job_id:
-                    (self._container or get_application_container()).index_jobs().finish(
-                        job_id, INDEX_JOB_FAILED, str(exc)
-                    )
+                    # 标记失败本身也可能出错（例如 SQLite 被锁）；不能让异常带走线程。
+                    # 任务留在 running，下次启动会被恢复为 queued 重新执行。
+                    try:
+                        (self._container or get_application_container()).index_jobs().finish(
+                            job_id, INDEX_JOB_FAILED, str(exc)
+                        )
+                    except Exception:
+                        logger.exception("Failed to mark index job %s as failed", job_id)
             finally:
                 # 无论执行成功还是异常，都释放内存去重标记，使后续重试能重新入队。
                 if job_id:

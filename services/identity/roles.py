@@ -9,6 +9,8 @@ from services.identity.contracts import RolePage, RoleRecord
 from services.identity.pagination import like_pattern, resolve_page_window
 from services.identity.permissions import MENU_PERMISSIONS, decode_permission_list
 
+SUPER_ADMIN_ROLE_NAME = "超级管理员"
+
 
 def _role_from_row(row: tuple[object, ...]) -> RoleRecord:
     """把角色记录转换为对象，并反序列化两类权限列表。"""
@@ -126,7 +128,7 @@ def delete_role(db_file: str, role_id: int) -> None:
         ).fetchone()
         if not row:
             raise ValueError("角色不存在")
-        if row[0] == "超级管理员":
+        if row[0] == SUPER_ADMIN_ROLE_NAME:
             raise ValueError("超级管理员角色不能删除")
         if conn.execute(
             "SELECT 1 FROM accounts WHERE role_id = ? LIMIT 1", (role_id,)

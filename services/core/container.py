@@ -107,3 +107,8 @@ def get_application_container() -> ApplicationContainer:
             index_jobs=lambda: app_storage.index_jobs,
         )
     return _default_container
+
+
+def database_file(container: ApplicationContainer | None = None) -> str:
+    """返回显式容器或默认容器当前的业务数据库路径。"""
+    return str((container or get_application_container()).database_path())

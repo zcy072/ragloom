@@ -9,7 +9,7 @@ if [[ -z "${SMOKE_ADMIN_PASSWORD:-}" ]]; then
     exit 1
 fi
 
-curl -fsS http://127.0.0.1:8000/openapi.json >/dev/null
+curl -fsS http://127.0.0.1:8000/api/health >/dev/null
 curl -fsS http://127.0.0.1:8080/ >/dev/null
 
 run_smoke() {
@@ -24,9 +24,9 @@ run_smoke() {
 
 run_smoke
 
-docker compose restart backend frontend
-for _ in {1..30}; do
-    if curl -fsS http://127.0.0.1:8000/openapi.json >/dev/null \
+docker compose restart milvus backend frontend
+for _ in {1..90}; do
+    if curl -fsS http://127.0.0.1:8000/api/health >/dev/null \
         && curl -fsS http://127.0.0.1:8080/ >/dev/null; then
         run_smoke --probe-only
         printf 'Deployment restart smoke test passed.\n'

@@ -1,5 +1,6 @@
 """Knowledge-base lifecycle, configuration, and dashboard endpoints."""
 
+import logging
 from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -10,8 +11,9 @@ from services.core import config as application_config
 from services.core.contracts import DashboardDocumentRow
 from services.identity import auth as auth_service
 from services.knowledge_bases import use_cases as knowledge_base_use_cases
-from services.retrieval import fts as fts_index
+from services.retrieval.chunk_index import get_chunk_index
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["knowledge-bases"])
 
 
@@ -24,7 +26,9 @@ def _format_size(size_bytes: int | None) -> str:
     return f"{size_bytes / (1024 * 1024):.1f} MB"
 
 
-_DASHBOARD_STATUS_KEYS = {"ready": "success", "error": "fail", "processing": "processing"}
+_DASHBOARD_STATUS_KEYS = {
+    "ready": "success", "error": "fail", "processing": "processing", "rebuilding": "processing",
+}
 _DASHBOARD_TOP_FILE_TYPES = 3
 _DASHBOARD_TREND_DAYS = 30
 
@@ -69,12 +73,12 @@ def _aggregate_dashboard_stats(document_rows: list[DashboardDocumentRow]) -> dic
         stats["size_bytes"] += size
         totals["docs"] += 1
         totals["size_bytes"] += size
-        status_key = _DASHBOARD_STATUS_KEYS.get(status)
+        status_key = _DASHBOARD_STATUS_KEYS.get(status or "")
         if status_key:
             stats[status_key] += 1
         totals["ready"] += int(status == "ready")
         totals["failed"] += int(status == "error")
-        totals["processing"] += int(status == "processing")
+        totals["processing"] += int(status in ("processing", "rebuilding"))
         extension = filename.rsplit(".", 1)[-1].upper() if "." in filename else "UNKNOWN"
         stats["extensions"][extension] += 1
     return {"visible_kbs": visible_kbs, "kb_stats": kb_stats, "totals": totals}
@@ -132,7 +136,7 @@ def dashboard_stats(
         "line_data": [
             {
                 "name": row.date[5:],
-                "会话数": row.session_count,
+                "提问数": row.question_count,
                 "回答数": row.answer_count,
             }
             for row in trend_rows
@@ -222,11 +226,13 @@ def get_kb_chunk_config(
         )
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
-    fts_path = fts_index.fts_db_path(name)
-    needs_rebuild = bool(
-        app_storage.documents.has_documents(name)
-        and not fts_index.fts5_index_is_current(fts_path)
-    )
+    needs_rebuild = False
+    kb_id = app_storage.knowledge_bases.kb_id_for(name)
+    if kb_id and app_storage.documents.has_documents(name):
+        try:
+            needs_rebuild = not get_chunk_index().available_routes(kb_id, None)
+        except Exception:
+            logger.warning("Chunk index probe failed for %s", name, exc_info=True)
     return {
         # chunk_config 已把缺失值换成默认值；这里不能再用真值判断，否则重叠 0 会变回默认。
         "chunk_size": chunk_size,
@@ -294,6 +300,6 @@ def rebuild_knowledge_base(
     name: dependencies.KnowledgeBaseNamePath,
     _principal=Depends(auth_service.require_knowledge_base_manager),
 ):
-    """显式安排 FTS5 和 Chroma 两类检索索引的完整重建。"""
+    """显式安排 Milvus 检索索引的完整重建。"""
     job_id = knowledge_base_use_cases.schedule_rebuild(name)
     return {"status": "success", "rebuilding": True, "job_id": job_id}

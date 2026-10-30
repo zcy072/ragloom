@@ -46,7 +46,7 @@
               <span class="text-gray-500 text-xs">{{ (r.knowledge_base_permissions && r.knowledge_base_permissions.length > 0) ? r.knowledge_base_permissions.join(', ') : '无' }}</span>
             </td>
             <td class="px-6 py-4 text-[13px] text-right pr-6 space-x-3">
-              <button class="text-green-500 hover:underline" @click="openEditModal(r)">配置权限</button>
+              <button v-if="r.name !== '超级管理员'" class="text-green-500 hover:underline" @click="openEditModal(r)">配置权限</button>
               <button v-if="r.name !== '超级管理员'" class="text-red-500 hover:underline" @click="openDeletePopover(r, $event)">删除</button>
             </td>
           </tr>
@@ -212,6 +212,10 @@ const menuList = [
   { id: '模型配置', label: '模型配置' },
   { id: '用户管理', label: '用户管理' },
   { id: '角色管理', label: '角色管理' },
+  { id: '运行监控', label: '运行监控（可查看所有用户的问题前 200 字）' },
+  { id: '用户分析', label: '用户分析（各用户的使用统计和问题预览）' },
+  { id: '查看用户对话', label: '查看用户对话（可打开用户的完整对话，每次查看都记入审计）' },
+  { id: '联网搜索', label: '联网搜索（提问时可搜索网页，按次计费）' },
 ];
 const fetchRoles = () => roleList.fetchPage(searchTerm.value);
 const scheduleSearch = () => roleList.scheduleSearch(searchTerm.value);

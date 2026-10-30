@@ -8,7 +8,7 @@ test('initialization blocks sending until history and models are ready', async (
   const gate = new Promise(resolve => { release = resolve; });
   await page.route('**/api/models', async route => {
     await gate;
-    await route.fulfill({ json: [{ provider: 'mock-model', configured: true, is_active: 1 }] });
+    await route.fulfill({ json: [{ provider: 'mock-model', configured: true, is_active: true }] });
   });
   await page.reload();
   await expect(page.getByText('历史回答')).toBeVisible();

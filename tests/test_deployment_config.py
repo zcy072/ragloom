@@ -37,10 +37,65 @@ class DeploymentConfigTest(unittest.TestCase):
         )
         self.assertNotIn("/root/.paddlex", compose)
 
+    def test_compose_passes_every_backend_setting_documented_in_env_example(self):
+        project_dir = Path(__file__).resolve().parents[1]
+        compose = (project_dir / "docker-compose.yml").read_text(encoding="utf-8")
+
+        # backend 没有 env_file，settings 读取的变量必须在 environment 中显式透传。
+        for name in (
+            "INITIAL_ADMIN_PASSWORD",
+            "SILICONFLOW_API_KEY",
+            "MILVUS_TOKEN",
+            "MINERU_LANGUAGE",
+            "MINERU_ENABLE_FORMULA",
+            "MINERU_ENABLE_TABLE",
+            "MINERU_POLL_INTERVAL_SECONDS",
+            "RERANK_BASE_URL",
+            "RERANK_MODEL",
+            "RERANK_API_KEY",
+            "RERANK_TIMEOUT_SECONDS",
+        ):
+            self.assertIn(f"      {name}: ${{{name}:-", compose)
+
+    def test_frontend_waits_for_a_healthy_backend(self):
+        compose = (Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("http://localhost:8000/api/health", compose)
+        self.assertRegex(compose, r"backend:\n\s+condition: service_healthy")
+
+    def test_deployment_hardening_settings_are_in_place(self):
+        project_dir = Path(__file__).resolve().parents[1]
+        compose = (project_dir / "docker-compose.yml").read_text(encoding="utf-8")
+        dockerfile = (project_dir / "Dockerfile").read_text(encoding="utf-8")
+        smoke = (project_dir / "scripts" / "smoke-test.sh").read_text(encoding="utf-8")
+
+        self.assertEqual(compose.count("logging: *default-logging"), 3)
+        self.assertIn('"host.docker.internal:host-gateway"', compose)
+        self.assertIn("PYTHONUNBUFFERED=1", dockerfile)
+        self.assertNotIn("openapi.json", smoke)
+        self.assertNotIn("admin888", compose)
+        self.assertNotIn("seccomp:unconfined", compose)
+        self.assertRegex(compose, r"milvusdb/milvus:v[\d.]+@sha256:[0-9a-f]{64}")
+        self.assertIn("--require-hashes", dockerfile)
+        lock = (project_dir / "requirements.lock").read_text(encoding="utf-8")
+        self.assertIn("--hash=sha256:", lock)
+        check_lock = (project_dir / "requirements-check.lock").read_text(encoding="utf-8")
+        self.assertIn("--hash=sha256:", check_lock)
+        # 每条 pip install 都必须校验 hash。
+        self.assertEqual(
+            dockerfile.count("pip install "), dockerfile.count("pip install --require-hashes ")
+        )
+        self.assertRegex(
+            (project_dir / ".env.example").read_text(encoding="utf-8"),
+            r"MILVUS_IMAGE=\S+@sha256:[0-9a-f]{64}",
+        )
+        self.assertIn("http://127.0.0.1:8000/api/health", smoke)
+
     def test_backend_direct_dependencies_have_a_lock_source(self):
         project_dir = Path(__file__).resolve().parents[1]
         dockerfile = (project_dir / "Dockerfile").read_text(encoding="utf-8")
-        direct_requirements = (project_dir / "requirements.in").read_text(encoding="utf-8")
+        direct_requirements = (project_dir / "pyproject.toml").read_text(encoding="utf-8")
 
         self.assertIn("COPY requirements.lock .", dockerfile)
         self.assertFalse((project_dir / "uv.lock").exists())
@@ -48,13 +103,27 @@ class DeploymentConfigTest(unittest.TestCase):
             "bcrypt==",
             "cryptography==",
             "fastapi==",
-            "chromadb==",
+            "pymilvus==",
             "langchain-openai==",
             "paddleocr==",
             "paddlepaddle==",
             "python-docx==",
         ):
             self.assertIn(dependency, direct_requirements)
+
+    def test_milvus_runs_as_a_single_healthy_standalone_container(self):
+        project_dir = Path(__file__).resolve().parents[1]
+        compose = (project_dir / "docker-compose.yml").read_text(encoding="utf-8")
+        direct_requirements = (project_dir / "pyproject.toml").read_text(encoding="utf-8")
+
+        self.assertIn("milvus:", compose)
+        self.assertIn("DEPLOY_MODE: STANDALONE", compose)
+        self.assertIn("MILVUS_URI: http://milvus:19530", compose)
+        self.assertIn("condition: service_healthy", compose)
+        self.assertIn(":9091/healthz", compose)
+        self.assertNotIn("CHROMA_PATH", compose)
+        self.assertNotIn("chromadb", direct_requirements)
+        self.assertNotIn("langchain-classic", direct_requirements)
 
     def test_backend_receives_the_model_key_encryption_settings(self):
         project_dir = Path(__file__).resolve().parents[1]
@@ -83,6 +152,14 @@ class DeploymentConfigTest(unittest.TestCase):
 
         self.assertIn("CHAT_QUERY_VARIANT: ${CHAT_QUERY_VARIANT:-false}", compose)
         self.assertIn("CHAT_QUERY_VARIANT=false", env_example)
+
+    def test_agentic_retrieval_is_opt_in_and_documented_in_the_env_example(self):
+        project_dir = Path(__file__).resolve().parents[1]
+        compose = (project_dir / "docker-compose.yml").read_text(encoding="utf-8")
+        env_example = (project_dir / ".env.example").read_text(encoding="utf-8")
+
+        self.assertIn("CHAT_AGENTIC_RETRIEVAL: ${CHAT_AGENTIC_RETRIEVAL:-false}", compose)
+        self.assertIn("CHAT_AGENTIC_RETRIEVAL=false", env_example)
 
     def test_chat_proxy_disables_response_buffering(self):
         frontend_dir = Path(__file__).resolve().parents[1] / "frontend"
@@ -146,9 +223,10 @@ class DeploymentConfigTest(unittest.TestCase):
             compose,
         )
         self.assertIn("FROM runtime AS check", dockerfile)
-        self.assertIn("ruff==0.16.0", dockerfile)
-        self.assertIn('"pyright[nodejs]==1.1.408"', dockerfile)
-        self.assertIn("uv==0.11.18", dockerfile)
+        self.assertIn("-r requirements-check.lock", dockerfile)
+        check_lock = (project_dir / "requirements-check.lock").read_text(encoding="utf-8")
+        for pinned in ("ruff==0.16.0", "pyright==1.1.408", "uv==0.11.18"):
+            self.assertIn(pinned, check_lock)
         self.assertIn("mkdir -p /home/app/.paddlex", dockerfile)
         self.assertIn("chown -R app:app /home/app/.paddlex", dockerfile)
         self.assertIn("RUFF_CACHE_DIR: /tmp/ruff-cache", compose)
@@ -161,7 +239,7 @@ class DeploymentConfigTest(unittest.TestCase):
         self.assertIn("python scripts/deployment_smoke.py", smoke_script)
         self.assertIn("--base-url http://backend:8000", smoke_script)
         self.assertNotIn("python3 scripts/deployment_smoke.py", smoke_script)
-        self.assertIn("docker compose restart backend frontend", smoke_script)
+        self.assertIn("docker compose restart milvus backend frontend", smoke_script)
 
         e2e_dockerfile = (
             Path(__file__).resolve().parents[1] / "frontend" / "Dockerfile.e2e"
@@ -169,35 +247,13 @@ class DeploymentConfigTest(unittest.TestCase):
         self.assertIn("mcr.microsoft.com/playwright:v1.55.1-noble", e2e_dockerfile)
         self.assertIn('CMD ["npm", "run", "test:e2e"]', e2e_dockerfile)
 
-    def test_cleanup_and_source_archive_preserve_runtime_data(self):
-        project_dir = Path(__file__).resolve().parents[1]
-        cleanup = (project_dir / "scripts" / "clean-workspace.sh").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn("frontend/node_modules", cleanup)
-        self.assertIn(".uv-cache", cleanup)
-        self.assertNotIn('rm -rf -- "$PROJECT_DIR/storage"', cleanup)
-
-    def test_pyright_starts_with_typed_boundary_modules(self):
+    def test_pyright_covers_every_backend_package(self):
         project_dir = Path(__file__).resolve().parents[1]
         pyproject = (project_dir / "pyproject.toml").read_text(encoding="utf-8")
 
         self.assertIn("[tool.pyright]", pyproject)
-        self.assertIn('pythonVersion = "3.10"', pyproject)
+        self.assertIn('pythonVersion = "3.12"', pyproject)
         self.assertIn('typeCheckingMode = "standard"', pyproject)
-        for module in (
-            "services/chat/contracts.py",
-            "services/chat/rewrite.py",
-            "services/chat/persistence_contracts.py",
-            "services/chat/sessions.py",
-            "services/chat/sources.py",
-            "services/core/contracts.py",
-            "services/core/llm_config.py",
-            "services/core/errors.py",
-            "services/core/settings.py",
-            "services/documents/contracts.py",
-            "services/documents/types.py",
-            "services/indexing/contracts.py",
-        ):
-            self.assertIn(f'"{module}"', pyproject)
+        # 按目录而不是逐文件列出，新增模块自动进入检查范围。
+        for target in ("api.py", "app_storage.py", "routers", "services"):
+            self.assertIn(f'"{target}"', pyproject)

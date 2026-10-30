@@ -30,6 +30,18 @@
           >
             <ImageIcon class="h-4 w-4" />
           </button>
+          <button
+            v-if="webSearchAllowed"
+            type="button"
+            @click="$emit('update:webSearch', !webSearch)"
+            :disabled="loading || disabled"
+            :aria-pressed="webSearch"
+            title="同时搜索网页（按次计费）"
+            class="flex h-8 items-center gap-1 rounded-full px-3 text-[12px] transition-all disabled:cursor-not-allowed disabled:opacity-40"
+            :class="webSearch ? 'bg-teal-50 text-teal-700' : 'text-gray-400 hover:bg-teal-50 hover:text-teal-700'"
+          >
+            <Globe class="h-4 w-4" />联网
+          </button>
         </div>
         <button v-if="loading" @click="$emit('stop')" title="停止生成" class="flex items-center justify-center w-8 h-8 rounded-full bg-gray-100/80 hover:bg-gray-200 transition-colors">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -47,16 +59,18 @@
 
 <script setup>
 import { ref } from 'vue';
-import { ImageIcon } from 'lucide-vue-next';
+import { Globe, ImageIcon } from 'lucide-vue-next';
 
 defineProps({
   maxLength: { type: Number, default: undefined },
   modelValue: { type: String, default: '' },
   loading: { type: Boolean, default: false },
   disabled: { type: Boolean, default: false },
-  attachedImage: { type: Object, default: null }
+  attachedImage: { type: Object, default: null },
+  webSearch: { type: Boolean, default: false },
+  webSearchAllowed: { type: Boolean, default: false }
 });
-defineEmits(['update:modelValue', 'send', 'stop', 'image-select', 'image-paste', 'remove-image']);
+defineEmits(['update:modelValue', 'update:webSearch', 'send', 'stop', 'image-select', 'image-paste', 'remove-image']);
 
 const imageInput = ref(null);
 </script>

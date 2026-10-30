@@ -95,7 +95,8 @@ async def refresh_conversation_summary(
     container: ApplicationContainer | None = None,
 ) -> bool:
     """在未摘要消息超过阈值时增量更新会话摘要，失败时返回 False。"""
-    batch = chat_sessions.load_summary_batch(
+    batch = await asyncio.to_thread(
+        chat_sessions.load_summary_batch,
         session_id,
         application_config.CHAT_MEMORY_SUMMARY_TRIGGER_MESSAGE_COUNT,
         application_config.CHAT_MEMORY_KEEP_RECENT_MESSAGE_COUNT,
@@ -133,7 +134,8 @@ async def refresh_conversation_summary(
         if not summary:
             return False
         summary = _truncate_summary(summary, application_config.CHAT_MEMORY_SUMMARY_MAX_CHARS)
-        return chat_sessions.save_conversation_summary(
+        return await asyncio.to_thread(
+            chat_sessions.save_conversation_summary,
             session_id,
             summary,
             expected_message_id=batch.previous_message_id,

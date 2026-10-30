@@ -4,9 +4,10 @@ from fastapi import APIRouter, Depends, Query
 
 from routers import schemas
 from services.core import config as application_config
-from services.core.container import get_application_container
+from services.core.container import database_file
 from services.identity import auth as auth_service
 from services.identity import use_cases
+from services.identity.contracts import RolePage
 
 router = APIRouter(prefix="/api", tags=["roles"])
 
@@ -19,10 +20,10 @@ def list_roles(
     _principal: auth_service.Principal = Depends(
         auth_service.require_menu_permission("角色管理")
     ),
-) -> dict:
+) -> RolePage:
     """分页返回角色及其权限集合。"""
     return use_cases.list_roles(
-        str(get_application_container().database_path()),
+        database_file(),
         page=page,
         page_size=page_size,
         query=query,
@@ -38,7 +39,7 @@ def create_role(
 ) -> dict[str, str]:
     """创建一个初始不带任何权限的角色。"""
     use_cases.create_role(
-        db_file=str(get_application_container().database_path()),
+        db_file=database_file(),
         now=application_config.db_now,
         name=data.name,
         description=data.description,
@@ -56,7 +57,7 @@ def update_role(
 ) -> dict[str, str]:
     """整体替换角色的菜单权限和知识库权限。"""
     use_cases.update_role_permissions(
-        db_file=str(get_application_container().database_path()),
+        db_file=database_file(),
         actor_role_id=principal.role_id,
         actor_menu_permissions=principal.menu_permissions,
         actor_knowledge_base_permissions=principal.knowledge_base_permissions,
@@ -76,6 +77,6 @@ def delete_role(
 ) -> dict[str, str]:
     """删除未被用户使用且不是系统内置的角色。"""
     use_cases.delete_role(
-        db_file=str(get_application_container().database_path()), role_id=role_id
+        db_file=database_file(), role_id=role_id
     )
     return {"status": "success"}

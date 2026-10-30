@@ -52,6 +52,8 @@ class ChatRequest(BaseModel):
     image_mime: str | None = None
     model_provider: str | None = None
     filters: RetrievalFilters | None = None
+    # 同时搜索网页；需要角色有“联网搜索”权限。
+    web_search: StrictBool = False
 
     @model_validator(mode="after")
     def validate_session_choice(self):

@@ -104,70 +104,15 @@ class DocumentStore:
         return row is not None
 
     def ready_sources(self, kb_name: str) -> list[str]:
-        """列出最新索引任务已成功完成、允许参与检索的文件。"""
+        """列出允许参与检索的文件：已就绪的，以及重建中仍保留旧版本索引的。"""
         kb_name = self._validate_kb_name(kb_name)
         with application_db.connect(self._db_file()) as conn:
             rows = conn.execute(
-                "SELECT filename FROM documents "
-                "WHERE kb_name = ? AND status = 'ready' ORDER BY filename",
+                "SELECT filename FROM documents WHERE kb_name = ? "
+                "AND status IN ('ready', 'rebuilding') ORDER BY filename",
                 (kb_name,),
             ).fetchall()
         return [row[0] for row in rows]
-
-    def disable_chroma_source(self, kb_name: str, source: str, error_message: str = "") -> None:
-        """某文件的新 Chroma 向量写入失败后，将其标记为仅使用 FTS5。"""
-        kb_name = self._validate_kb_name(kb_name)
-        source = self._validate_filename(source)
-        with application_db.connect(self._db_file()) as conn:
-            conn.execute(
-                """
-                INSERT INTO chroma_disabled_sources (kb_name, source, error_message, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(kb_name, source) DO UPDATE SET
-                    error_message = excluded.error_message,
-                    updated_at = excluded.updated_at
-                """,
-                (kb_name, source, str(error_message or "")[:500], self._now()),
-            )
-
-    def enable_chroma_source(self, kb_name: str, source: str) -> None:
-        """Chroma 向量同步成功后，清除该文件的仅 FTS5 检索标记。"""
-        kb_name = self._validate_kb_name(kb_name)
-        source = self._validate_filename(source)
-        with application_db.connect(self._db_file()) as conn:
-            conn.execute(
-                "DELETE FROM chroma_disabled_sources WHERE kb_name = ? AND source = ?",
-                (kb_name, source),
-            )
-
-    def chroma_disabled_sources(self, kb_name: str) -> list[str]:
-        """列出已就绪但因近期向量同步失败而被排除出 Chroma 的文件。"""
-        kb_name = self._validate_kb_name(kb_name)
-        with application_db.connect(self._db_file()) as conn:
-            rows = conn.execute(
-                "SELECT source FROM chroma_disabled_sources WHERE kb_name = ? ORDER BY source",
-                (kb_name,),
-            ).fetchall()
-        return [row[0] for row in rows]
-
-    def retrieval_source_state(self, kb_name: str) -> tuple[list[str], list[str]]:
-        """通过一次一致性查询返回可用来源及其 Chroma 降级来源。"""
-        kb_name = self._validate_kb_name(kb_name)
-        with application_db.connect(self._db_file()) as conn:
-            rows = conn.execute(
-                """
-                SELECT d.filename, c.source IS NOT NULL
-                FROM documents d
-                LEFT JOIN chroma_disabled_sources c
-                  ON c.kb_name = d.kb_name AND c.source = d.filename
-                WHERE d.kb_name = ? AND d.status = 'ready'
-                ORDER BY d.filename
-                """,
-                (kb_name,),
-            ).fetchall()
-        ready = [row[0] for row in rows]
-        disabled = [filename for filename, is_disabled in rows if is_disabled]
-        return ready, disabled
 
     def has_documents(self, kb_name: str | None = None) -> bool:
         """判断全局或指定知识库中是否至少存在一份文档。"""
@@ -241,7 +186,7 @@ class DocumentStore:
 
     @staticmethod
     def _stored_tags(value) -> list[str]:
-        """安全解析数据库中保存的 JSON 标签，兼容历史或异常数据。"""
+        """解析数据库中保存的 JSON 标签，异常值视为没有标签。"""
         try:
             decoded = json.loads(value) if value else []
         except (TypeError, json.JSONDecodeError):

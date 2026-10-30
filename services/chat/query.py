@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from typing import Any
 
 from services.chat.diagnostics import RetrievalDiagnostics
 from services.chat.ranking import select_rerank_candidates
@@ -13,31 +14,39 @@ from services.retrieval import retriever as retrieval_service
 logger = logging.getLogger(__name__)
 
 
-async def retrieve_rerank_candidates(
+def _collect_candidates(
     kb_name: str,
     question: str,
     has_image: bool,
-    filters: RetrievalFilters | None = None,
-    *,
-    container: ApplicationContainer | None = None,
-    diagnostics: RetrievalDiagnostics | None = None,
-):
-    """执行语义检索，并额外补充一小批 FTS5 精确关键词候选。"""
-    container = container or get_application_container()
+    filters: RetrievalFilters | None,
+    include_common: bool,
+    container: ApplicationContainer,
+) -> tuple[list, list]:
+    """同步完成筛选校验、检索器构建以及语义和 BM25 召回，返回 (语义候选, 词法候选)。
+
+    这里全是同步的 SQLite、Milvus 和检索库调用，必须整体在线程里执行，不能占用事件循环。
+    请求级文件快照用 ContextVar 保存，设置和使用都留在同一个线程里。
+    """
     try:
         filtered = container.documents.has_filters(filters)
     except ValueError as exc:
         raise InvalidRequestError(str(exc), code="invalid_retrieval_filters") from exc
 
     # The cached graph stays valid across requests; its source filters are refreshed once per
-    # request so FTS, Chroma, and lexical supplementation use the same durable state.
-    with retrieval_service.request_source_snapshot(kb_name, container):
+    # request so dense, BM25, and lexical supplementation use the same durable state.
+    with retrieval_service.request_source_snapshot(
+        kb_name, container, include_common=include_common
+    ):
         # Filtered retrievers are request-specific and must not enter the knowledge-base cache.
-        cached = retrieval_service.get_cached_retriever(kb_name) if not filtered else None
+        cached = (
+            retrieval_service.get_cached_retriever(kb_name, include_common=include_common)
+            if not filtered
+            else None
+        )
         if cached is None:
             try:
                 retriever = retrieval_service.build_retriever(
-                    kb_name, filters=filters, container=container
+                    kb_name, filters=filters, include_common=include_common, container=container
                 )
             except ValueError as exc:
                 raise InvalidRequestError(
@@ -45,7 +54,9 @@ async def retrieve_rerank_candidates(
                 ) from exc
             if retriever:
                 if not filtered:
-                    retrieval_service.cache_retriever(kb_name, retriever)
+                    retrieval_service.cache_retriever(
+                        kb_name, retriever, include_common=include_common
+                    )
                 cached = retriever
             elif not has_image:
                 detail = "筛选范围内没有可用文档，请调整检索筛选条件。" if filtered else "当前知识库未上传文档，请先上传文件后再提问。"
@@ -57,15 +68,32 @@ async def retrieve_rerank_candidates(
                         else "knowledge_base_has_no_documents"
                     ),
                 )
-        # Both retrievers are synchronous libraries. Keep them off the FastAPI event loop.
-        semantic_docs = await asyncio.to_thread(cached.invoke, question) if cached else []
-        lexical_docs = await asyncio.to_thread(
-            retrieval_service.retrieve_lexical_candidates,
-            kb_name,
-            question,
-            filters,
-            container=container,
+        semantic_docs = cached.invoke(question) if cached else []
+        lexical_docs = retrieval_service.retrieve_lexical_candidates(
+            kb_name, question, filters, include_common=include_common, container=container
         )
+    return semantic_docs, lexical_docs
+
+
+async def retrieve_rerank_candidates(
+    kb_name: str,
+    question: str,
+    has_image: bool,
+    filters: RetrievalFilters | None = None,
+    *,
+    include_common: bool = False,
+    container: ApplicationContainer | None = None,
+    diagnostics: RetrievalDiagnostics | None = None,
+):
+    """执行语义检索，并额外补充一小批 BM25 精确关键词候选。
+
+    ``include_common`` 表示提问者能读取通用知识库，此时补充检索通用知识库。
+    """
+    container = container or get_application_container()
+    # 检索库和 SQLite 都是同步的，整段放进线程，避免阻塞 FastAPI 事件循环。
+    semantic_docs, lexical_docs = await asyncio.to_thread(
+        _collect_candidates, kb_name, question, has_image, filters, include_common, container
+    )
     # Alternate exact-term and semantic candidates so the best of each survives the 30-candidate
     # cap; concatenating them let a large lexical pool push semantic hits out of the reranker.
     docs = _interleave_candidates(lexical_docs, semantic_docs)
@@ -128,6 +156,7 @@ async def retrieve_candidates_with_query_fallback(
     filters: RetrievalFilters | None = None,
     *,
     variant_query: str = "",
+    include_common: bool = False,
     container: ApplicationContainer | None = None,
     diagnostics: RetrievalDiagnostics | None = None,
 ) -> tuple[list, str]:
@@ -138,8 +167,10 @@ async def retrieve_candidates_with_query_fallback(
     """
     # A rewrite is preferred when it succeeds, but it can occasionally over-specify the
     # user's intent.  Retry the original wording only when the rewrite found no evidence.
-    container_kwargs = {"container": container} if container is not None else {}
-    primary_kwargs = dict(container_kwargs)
+    container_kwargs: dict[str, Any] = {"include_common": include_common}
+    if container is not None:
+        container_kwargs["container"] = container
+    primary_kwargs: dict[str, Any] = dict(container_kwargs)
     if diagnostics is not None:
         primary_kwargs["diagnostics"] = diagnostics
     if variant_query and variant_query != search_query:

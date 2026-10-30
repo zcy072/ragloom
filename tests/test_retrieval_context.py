@@ -1,6 +1,4 @@
-import os
 import re
-import sqlite3
 import unittest
 from unittest.mock import patch
 
@@ -10,21 +8,21 @@ try:
     import app_storage
     from services.indexing import chunking
     from services.retrieval import context as context_builder
-    from services.retrieval import fts as fts_index
-    from services.retrieval import fts as retrieval
+    from services.retrieval import parent_store
     from services.retrieval import retriever as retriever
+    from services.retrieval.chunk_index import get_chunk_index
 except ModuleNotFoundError:
     Document = None
     chunking = None
     context_builder = None
-    fts_index = None
-    retrieval = None
+    parent_store = None
     retriever = None
 
+from tests.retrieval_fixtures import create_knowledge_base, mark_ready, publish
 from tests.support import IsolatedStorageTestCase
 
 
-@unittest.skipUnless(Document and retrieval, "requires the backend Python dependencies")
+@unittest.skipUnless(Document and retriever, "requires the backend Python dependencies")
 class RetrievalContextTest(IsolatedStorageTestCase):
     def setUp(self):
         super().setUp()
@@ -36,8 +34,7 @@ class RetrievalContextTest(IsolatedStorageTestCase):
             Document(page_content=f"内容片段 {index}", metadata={"source": source, "page": 0})
             for index in range(5)
         ]
-        fts_path = os.path.join(retrieval.vector_store_dir(kb_name), "fts5.db")
-        retrieval.build_fts5_index(splits, fts_path)
+        publish(kb_name, source, splits)
 
         hits = [
             Document(page_content="内容片段 1", metadata={"source": source, "page": 0, "chunk_index": 1}),
@@ -68,14 +65,49 @@ class RetrievalContextTest(IsolatedStorageTestCase):
         )
         self.assertLessEqual(len(limited[0].content), 12)
 
+    def test_neighbor_windows_are_merged_into_one_query_per_range(self):
+        kb_name = "研发部"
+        source = "手册.pdf"
+        splits = [
+            Document(page_content=f"内容片段 {index}", metadata={"source": source, "page": 0})
+            for index in range(20)
+        ]
+        publish(kb_name, source, splits)
+        hits = [
+            Document(page_content=f"内容片段 {index}", metadata={"source": source, "page": 0, "chunk_index": index})
+            for index in (1, 3, 15)
+        ]
+        index = get_chunk_index()
+
+        with patch.object(index, "neighbors", wraps=index.neighbors) as neighbors:
+            spans = context_builder.build_context_spans(kb_name, hits, neighbor_chunks=1)
+
+        # 1 和 3 的窗口相接合并成 [0, 4]，15 相距较远单独查 [14, 16]。
+        self.assertEqual(
+            sorted(call.args[3:] for call in neighbors.call_args_list), [(0, 4), (14, 16)]
+        )
+        self.assertEqual([(span.chunk_start, span.chunk_end) for span in spans], [(0, 4), (14, 16)])
+
+    def test_empty_spans_do_not_take_span_slots(self):
+        source = "手册.pdf"
+        hits = [
+            Document(page_content=content, metadata={"source": source, "row": index})
+            for index, content in enumerate(["  ", "第一段", "第二段"])
+        ]
+
+        spans = context_builder.build_context_spans("研发部", hits, max_spans=2)
+
+        self.assertEqual([span.content for span in spans], ["第一段", "第二段"])
+
     def test_long_structured_context_keeps_its_section_boundary(self):
         kb_name = "研发部"
         source = "技术规范.md"
         before = "相邻的前置章节。" * 80
         target = "目标章节的完整说明。" * 80
         after = "相邻的后置章节。" * 80
-        fts_path = os.path.join(retrieval.vector_store_dir(kb_name), "fts5.db")
-        retrieval.build_fts5_index(
+        publish(
+            kb_name,
+            source,
             [
                 Document(
                     page_content=before,
@@ -90,7 +122,6 @@ class RetrievalContextTest(IsolatedStorageTestCase):
                     metadata={"source": source, "page": 0, "chunk_route": chunking.CHUNK_ROUTE_STRUCTURED},
                 ),
             ],
-            fts_path,
         )
 
         spans = context_builder.build_context_spans(
@@ -130,8 +161,9 @@ class RetrievalContextTest(IsolatedStorageTestCase):
         before = "前置内容"
         target = "短章节内容"
         after = "后置内容"
-        fts_path = os.path.join(retrieval.vector_store_dir(kb_name), "fts5.db")
-        retrieval.build_fts5_index(
+        publish(
+            kb_name,
+            source,
             [
                 Document(
                     page_content=before,
@@ -146,7 +178,6 @@ class RetrievalContextTest(IsolatedStorageTestCase):
                     metadata={"source": source, "page": 0, "chunk_route": chunking.CHUNK_ROUTE_STRUCTURED},
                 ),
             ],
-            fts_path,
         )
 
         spans = context_builder.build_context_spans(
@@ -173,7 +204,6 @@ class RetrievalContextTest(IsolatedStorageTestCase):
     def test_visual_context_never_pulls_an_adjacent_image(self):
         kb_name = "研发部"
         source = "指南.pdf"
-        fts_path = os.path.join(retrieval.vector_store_dir(kb_name), "fts5.db")
         documents = [
             Document(
                 page_content=f"图片 {index} 的独立内容",
@@ -185,7 +215,7 @@ class RetrievalContextTest(IsolatedStorageTestCase):
             )
             for index in range(3)
         ]
-        retrieval.build_fts5_index(documents, fts_path)
+        publish(kb_name, source, documents)
 
         spans = context_builder.build_context_spans(
             kb_name,
@@ -246,11 +276,11 @@ class RetrievalContextTest(IsolatedStorageTestCase):
         target = next(split for split in splits if split.metadata["source"] == source)
         self.assertIn("员工手册", target.metadata["contextual_title"])
 
-        fts_path = os.path.join(retrieval.vector_store_dir(kb_name), "fts5.db")
-        retrieval.build_fts5_index(splits, fts_path)
-        found = fts_index.FTS5Retriever(
-            db_path=fts_path, allowed_sources=(source,)
-        ).invoke("请假")
+        publish(kb_name, source, [s for s in splits if s.metadata["source"] == source])
+        publish(kb_name, "费用制度.md", [s for s in splits if s.metadata["source"] != source])
+        found = get_chunk_index().search_lexical(
+            app_storage.knowledge_bases.kb_id_for(kb_name), "请假", None, [source], 5
+        )
 
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0].page_content, target.page_content)
@@ -358,158 +388,6 @@ class RetrievalContextTest(IsolatedStorageTestCase):
         self.assertEqual(merged[0].page_content, parent_text)
         self.assertEqual(merged[0].metadata["start_index"], 0)
 
-    def test_missing_fts_index_requires_a_complete_rebuild(self):
-        with patch.object(
-            retriever.source_state,
-            "current_source_allowlist",
-            return_value=["制度.pdf"],
-        ):
-            with self.assertRaisesRegex(ValueError, "完整重建"):
-                retriever._probe_base_capabilities("研发部", None)
-
-    def test_unversioned_fts_index_is_recognized_as_legacy(self):
-        fts_path = os.path.join(retrieval.vector_store_dir("研发部"), "fts5.db")
-        os.makedirs(os.path.dirname(fts_path), exist_ok=True)
-        with sqlite3.connect(fts_path) as conn:
-            conn.execute("CREATE VIRTUAL TABLE docs USING fts5(content, source UNINDEXED)")
-
-        self.assertEqual(fts_index.fts5_index_version(fts_path), 0)
-        self.assertFalse(fts_index.fts5_index_is_current(fts_path))
-        self.assertEqual(fts_index.FTS5Retriever(db_path=fts_path).invoke("任意查询"), [])
-
-    def test_fts_route_probe_returns_routes_for_allowed_sources(self):
-        fts_path = os.path.join(retrieval.vector_store_dir("研发部"), "fts5.db")
-        retrieval.build_fts5_index(
-            [
-                Document(
-                    page_content="固定路线",
-                    metadata={
-                        "source": "制度.pdf",
-                        "chunk_route": chunking.CHUNK_ROUTE_FIXED,
-                    },
-                ),
-                Document(
-                    page_content="结构化路线",
-                    metadata={
-                        "source": "制度.pdf",
-                        "chunk_route": chunking.CHUNK_ROUTE_STRUCTURED,
-                    },
-                ),
-                Document(
-                    page_content="视觉路线",
-                    metadata={
-                        "source": "其他.pdf",
-                        "chunk_route": chunking.CHUNK_ROUTE_VISUAL,
-                    },
-                ),
-            ],
-            fts_path,
-        )
-
-        self.assertEqual(
-            fts_index.fts5_available_routes(fts_path, ["制度.pdf"]),
-            {chunking.CHUNK_ROUTE_FIXED, chunking.CHUNK_ROUTE_STRUCTURED},
-        )
-
-    def test_successful_fts_rebuild_replaces_legacy_index_and_sets_version(self):
-        fts_path = os.path.join(retrieval.vector_store_dir("研发部"), "fts5.db")
-        retrieval.build_fts5_index(
-            [Document(page_content="旧索引内容", metadata={"source": "制度.pdf"})],
-            fts_path,
-        )
-        with sqlite3.connect(fts_path) as conn:
-            conn.execute("PRAGMA user_version = 0")
-
-        retrieval.build_fts5_index(
-            [Document(page_content="重建后的内容", metadata={"source": "制度.pdf"})],
-            fts_path,
-        )
-
-        self.assertTrue(fts_index.fts5_index_is_current(fts_path))
-        with sqlite3.connect(fts_path) as conn:
-            contents = conn.execute("SELECT original_text FROM docs").fetchall()
-        self.assertEqual(contents, [("重建后的内容",)])
-
-    def test_failed_fts_rebuild_preserves_previous_index(self):
-        fts_path = os.path.join(retrieval.vector_store_dir("研发部"), "fts5.db")
-        retrieval.build_fts5_index(
-            [Document(page_content="仍可使用的旧内容", metadata={"source": "制度.pdf"})],
-            fts_path,
-        )
-
-        with patch.object(fts_index.os, "replace", side_effect=OSError("replace failed")):
-            with self.assertRaisesRegex(OSError, "replace failed"):
-                retrieval.build_fts5_index(
-                    [Document(page_content="未完成的新内容", metadata={"source": "制度.pdf"})],
-                    fts_path,
-                )
-
-        self.assertTrue(fts_index.fts5_index_is_current(fts_path))
-        with sqlite3.connect(fts_path) as conn:
-            contents = conn.execute("SELECT original_text FROM docs").fetchall()
-        self.assertEqual(contents, [("仍可使用的旧内容",)])
-
-    def test_fts_strict_keywords_precede_broad_candidates(self):
-        kb_name = "研发部"
-        source = "术语表.md"
-        fts_path = os.path.join(retrieval.vector_store_dir(kb_name), "fts5.db")
-        retrieval.build_fts5_index(
-            [
-                Document(page_content="alpha beta 精确条目", metadata={"source": source, "page": 0}),
-                Document(page_content="alpha alpha 宽松条目", metadata={"source": source, "page": 1}),
-                Document(page_content="beta beta 宽松条目", metadata={"source": source, "page": 2}),
-            ],
-            fts_path,
-        )
-
-        with patch.object(
-            fts_index.jieba_analyse, "extract_tags", return_value=["alpha", "beta"]
-        ):
-            found = fts_index.FTS5Retriever(db_path=fts_path, k=2).invoke("alpha beta 查询")
-
-        self.assertEqual(found[0].page_content, "alpha beta 精确条目")
-        self.assertEqual(len(found), 2)
-
-    def test_fts_broad_query_fills_when_strict_keywords_do_not_cooccur(self):
-        kb_name = "研发部"
-        source = "术语表.md"
-        fts_path = os.path.join(retrieval.vector_store_dir(kb_name), "fts5.db")
-        retrieval.build_fts5_index(
-            [Document(page_content="alpha 可用条目", metadata={"source": source, "page": 0})],
-            fts_path,
-        )
-
-        with patch.object(
-            fts_index.jieba_analyse, "extract_tags", return_value=["alpha", "missing"]
-        ):
-            found = fts_index.FTS5Retriever(db_path=fts_path, k=2).invoke("alpha missing 查询")
-
-        self.assertEqual([document.page_content for document in found], ["alpha 可用条目"])
-
-    def test_chroma_disabled_source_remains_available_through_fts(self):
-        kb_name = "研发部"
-        source = "制度.pdf"
-        fts_path = os.path.join(retrieval.vector_store_dir(kb_name), "fts5.db")
-        retrieval.build_fts5_index(
-            [Document(page_content="审批制度的完整内容", metadata={"source": source})],
-            fts_path,
-        )
-        fts_retriever = fts_index.FTS5Retriever(
-            db_path=fts_path,
-            kb_name=kb_name,
-            allowed_sources=(source,),
-            enforce_current_sources=True,
-        )
-
-        with patch.object(
-            app_storage.documents, "ready_sources", return_value=[source]
-        ), patch.object(
-            app_storage.documents, "chroma_disabled_sources", return_value=[source]
-        ):
-            found = fts_retriever.invoke("审批制度")
-
-        self.assertEqual([document.metadata["source"] for document in found], [source])
-
     def test_candidate_deduplication_removes_exact_and_cross_route_containment(self):
         shared = "高血压诊断标准参见《国家基层高血压防治管理指南》。" * 8
         documents = [
@@ -538,11 +416,78 @@ class RetrievalContextTest(IsolatedStorageTestCase):
             "胰岛素治疗需要个体化评估。",
         ])
 
+
+    def test_route_probe_returns_routes_for_allowed_sources(self):
+        kb_name = "研发部"
+        kb_id = publish(
+            kb_name,
+            "制度.pdf",
+            [
+                Document(
+                    page_content="固定路线",
+                    metadata={"source": "制度.pdf", "chunk_route": chunking.CHUNK_ROUTE_FIXED},
+                ),
+                Document(
+                    page_content="结构化路线",
+                    metadata={"source": "制度.pdf", "chunk_route": chunking.CHUNK_ROUTE_STRUCTURED},
+                ),
+            ],
+        )
+        publish(
+            kb_name,
+            "其他.pdf",
+            [
+                Document(
+                    page_content="视觉路线",
+                    metadata={"source": "其他.pdf", "chunk_route": chunking.CHUNK_ROUTE_VISUAL},
+                )
+            ],
+        )
+
+        self.assertEqual(
+            get_chunk_index().available_routes(kb_id, ["制度.pdf"]),
+            {chunking.CHUNK_ROUTE_FIXED, chunking.CHUNK_ROUTE_STRUCTURED},
+        )
+
+    def test_missing_index_requires_a_complete_rebuild(self):
+        create_knowledge_base("研发部")
+        mark_ready("研发部", "制度.pdf")
+
+        from services.core.container import get_application_container
+
+        with self.assertRaisesRegex(ValueError, "完整重建"):
+            retriever._route_plans(
+                get_application_container(), get_chunk_index(), "研发部", None, 0.70
+            )
+
+    def test_parent_text_is_restored_from_the_parent_store(self):
+        kb_name = "研发部"
+        source = "制度.pdf"
+        child = Document(
+            page_content="子块中的审批规则",
+            metadata={
+                "source": source,
+                "page": 2,
+                "parent_id": "parent-1",
+                "parent_content": "父块完整内容，包含审批规则和适用范围。",
+            },
+        )
+        kb_id = publish(kb_name, source, [child])
+        parent_store.replace_source(kb_id, source, parent_store.parent_chunk_rows([child]))
+
+        found = get_chunk_index().search_lexical(kb_id, "审批规则", None, [source], 5)
+        self.assertNotIn("parent_content", found[0].metadata)
+        spans = context_builder.build_context_spans(kb_name, found, neighbor_chunks=0)
+
+        self.assertEqual(len(spans), 1)
+        self.assertEqual(spans[0].content, child.metadata["parent_content"])
+
     def test_lexical_candidate_pool_preserves_all_chunk_routes(self):
         kb_name = "研发部"
         source = "指南.pdf"
-        fts_path = os.path.join(retrieval.vector_store_dir(kb_name), "fts5.db")
-        retrieval.build_fts5_index(
+        publish(
+            kb_name,
+            source,
             [
                 Document(
                     page_content="固定块：胰岛素的种类",
@@ -557,19 +502,12 @@ class RetrievalContextTest(IsolatedStorageTestCase):
                     metadata={"source": source, "chunk_route": chunking.CHUNK_ROUTE_VISUAL},
                 ),
             ],
-            fts_path,
         )
+        mark_ready(kb_name, source)
 
-        with patch.object(
-            app_storage.documents, "knowledge_base_exists", return_value=True
-        ), patch.object(
-            app_storage.documents, "ready_sources", return_value=[source]
-        ), patch.object(
-            app_storage.documents, "filtered_sources", return_value=[source]
-        ):
-            candidates = retriever.retrieve_lexical_candidates(
-                kb_name, "胰岛素的种类", per_route=1
-            )
+        candidates = retriever.retrieve_lexical_candidates(
+            kb_name, "胰岛素的种类", per_route=1
+        )
 
         self.assertEqual(
             {candidate.metadata["chunk_route"] for candidate in candidates},
@@ -579,6 +517,22 @@ class RetrievalContextTest(IsolatedStorageTestCase):
                 chunking.CHUNK_ROUTE_VISUAL,
             },
         )
+
+    def test_lexical_candidates_ignore_sources_that_are_not_ready(self):
+        kb_name = "研发部"
+        publish(kb_name, "草稿.pdf", [Document(page_content="审批流程草稿", metadata={"source": "草稿.pdf"})])
+
+        self.assertEqual(retriever.retrieve_lexical_candidates(kb_name, "审批流程"), [])
+
+    def test_lexical_candidates_failure_is_logged_not_raised(self):
+        kb_name = "研发部"
+        create_knowledge_base(kb_name)
+        mark_ready(kb_name, "制度.pdf")
+
+        with patch.object(
+            get_chunk_index(), "search_lexical", side_effect=RuntimeError("milvus down")
+        ):
+            self.assertEqual(retriever.retrieve_lexical_candidates(kb_name, "审批"), [])
 
 
 if __name__ == "__main__":

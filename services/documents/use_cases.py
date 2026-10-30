@@ -130,7 +130,7 @@ def upload_document(
                         "单个文件不能超过 50 MB", code="document_too_large"
                     )
                 output.write(chunk)
-        with indexing_pipeline.knowledge_base_lock(kb_name):
+        with indexing_pipeline.document_lock(kb_name, filename):
             os.replace(temporary_path, path)
             job_id = index_jobs.create(kb_name, "process", filename)
             try:
@@ -167,7 +167,7 @@ def update_document_metadata(
             str(exc), code="invalid_document_metadata"
         ) from exc
     path = documents.document_path(kb_name, filename)
-    with indexing_pipeline.knowledge_base_lock(kb_name):
+    with indexing_pipeline.document_lock(kb_name, filename):
         if not documents.document_exists(
             kb_name, filename
         ) or not os.path.isfile(path):
@@ -193,7 +193,7 @@ def update_document_parser(
         )
     normalized_parser = _validated_parser_mode(filename, parser_mode)
     path = documents.document_path(kb_name, filename)
-    with indexing_pipeline.knowledge_base_lock(kb_name):
+    with indexing_pipeline.document_lock(kb_name, filename):
         if not documents.document_exists(
             kb_name, filename
         ) or not os.path.isfile(path):
@@ -214,7 +214,7 @@ def delete_document(kb_name: str, filename: str) -> DocumentMutationResult:
     """Delete source state and schedule durable cleanup of both indexes."""
     documents = get_application_container().documents
     index_jobs = get_application_container().index_jobs()
-    with indexing_pipeline.knowledge_base_lock(kb_name):
+    with indexing_pipeline.document_lock(kb_name, filename):
         if not documents.document_exists(kb_name, filename):
             raise ResourceNotFoundError("文档不存在", code="document_not_found")
         job_id = index_jobs.create(kb_name, "delete", filename)

@@ -14,9 +14,8 @@ COMMON_KNOWLEDGE_BASE = "通用知识库"
 
 @dataclass(frozen=True)
 class RetrievalSourceState:
-    """Immutable request snapshot of ready and FTS-only sources."""
+    """Immutable request snapshot of ready sources."""
     ready_sources: tuple[str, ...]
-    chroma_disabled_sources: frozenset[str]
 
 
 _active_source_states: ContextVar[dict[str, RetrievalSourceState] | None] = (
@@ -47,35 +46,35 @@ def current_source_allowlist(
     return tuple(source for source in current_sources if source in requested)
 
 
-def chroma_disabled_sources(
-    kb_name: str, container: ApplicationContainer | None = None
-) -> frozenset[str]:
-    """返回因 Chroma 写入失败而暂时只能走关键词检索的文件。"""
-    states = _active_source_states.get()
-    if states is not None and kb_name in states:
-        return states[kb_name].chroma_disabled_sources
-    return frozenset(
-        (container or get_application_container()).documents.chroma_disabled_sources(kb_name)
+def supplements_common(
+    kb_name: str, include_common: bool, container: ApplicationContainer | None = None
+) -> bool:
+    """判断本次检索是否补充通用知识库：调用方须已确认提问者能读取通用知识库。"""
+    return (
+        include_common
+        and kb_name != COMMON_KNOWLEDGE_BASE
+        and (container or get_application_container()).documents.knowledge_base_exists(
+            COMMON_KNOWLEDGE_BASE
+        )
     )
 
 
 @contextmanager
 def request_source_snapshot(
-    kb_name: str, container: ApplicationContainer | None = None
+    kb_name: str,
+    container: ApplicationContainer | None = None,
+    *,
+    include_common: bool = False,
 ) -> Iterator[None]:
     """在一次问答中冻结文件状态，保证多路检索看到同一份允许文件列表。"""
     documents = (container or get_application_container()).documents
     knowledge_bases = [kb_name]
-    if (
-        kb_name != COMMON_KNOWLEDGE_BASE
-        and documents.knowledge_base_exists(COMMON_KNOWLEDGE_BASE)
-    ):
+    if supplements_common(kb_name, include_common, container):
         knowledge_bases.append(COMMON_KNOWLEDGE_BASE)
 
     states = {}
     for name in knowledge_bases:
-        ready, disabled = documents.retrieval_source_state(name)
-        states[name] = RetrievalSourceState(tuple(ready), frozenset(disabled))
+        states[name] = RetrievalSourceState(tuple(documents.ready_sources(name)))
 
     token = _active_source_states.set(states)
     try:

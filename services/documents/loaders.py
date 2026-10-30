@@ -217,7 +217,7 @@ def read_text_document(file_path: str, filename: str) -> str:
     last_error: UnicodeError | None = None
     for encoding in ("utf-8-sig", "gb18030"):
         try:
-            with open(file_path, "r", encoding=encoding) as source:
+            with open(file_path, encoding=encoding) as source:
                 return source.read().replace("\r\n", "\n").replace("\r", "\n")
         except UnicodeError as exc:
             last_error = exc

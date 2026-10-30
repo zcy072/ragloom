@@ -37,7 +37,7 @@
           <div class="space-y-4">
             <div class="space-y-1.5">
               <label class="text-xs font-medium text-gray-500 ml-1">用户名</label>
-              <input type="text" required v-model="username" class="w-full bg-gray-50 border border-gray-200 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100 rounded-md px-3.5 py-2.5 text-sm text-gray-800 transition-all outline-none" placeholder="输入账号名称" />
+              <input type="text" required maxlength="80" v-model="username" class="w-full bg-gray-50 border border-gray-200 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100 rounded-md px-3.5 py-2.5 text-sm text-gray-800 transition-all outline-none" placeholder="输入账号名称" />
             </div>
             <div class="space-y-1.5">
               <label class="text-xs font-medium text-gray-500 ml-1">密码</label>
@@ -83,6 +83,7 @@
                 type="text"
                 required
                 v-model="regUsername"
+                maxlength="80"
                 class="w-full bg-gray-50 border border-gray-200 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100 rounded-md px-3.5 py-2.5 text-sm text-gray-800 transition-all outline-none"
                 placeholder="作为登录账号"
               />
@@ -93,6 +94,7 @@
                 type="text"
                 required
                 v-model="regName"
+                maxlength="80"
                 class="w-full bg-gray-50 border border-gray-200 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100 rounded-md px-3.5 py-2.5 text-sm text-gray-800 transition-all outline-none"
                 placeholder="如：雷勇"
               />
@@ -102,6 +104,7 @@
               <input
                 type="text"
                 v-model="regPhone"
+                maxlength="32"
                 class="w-full bg-gray-50 border border-gray-200 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100 rounded-md px-3.5 py-2.5 text-sm text-gray-800 transition-all outline-none"
                 placeholder="联系方式"
               />
@@ -219,6 +222,10 @@ const handleLogin = async () => {
 /** 校验注册表单后提交普通用户注册申请。 */
 const handleRegister = async () => {
   error.value = '';
+  if (!regUsername.value.trim() || !regName.value.trim()) {
+    error.value = '账号名称和真实姓名不能为空';
+    return;
+  }
   if (regPassword.value !== regConfirmPassword.value) {
     error.value = '两次输入的密码不一致';
     return;

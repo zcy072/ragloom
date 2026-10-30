@@ -3,9 +3,10 @@
 from fastapi import APIRouter, Depends, Query
 
 from routers import schemas
-from services.core.container import get_application_container
+from services.core.container import database_file
 from services.identity import auth as auth_service
 from services.identity import use_cases
+from services.identity.contracts import UserPage
 
 router = APIRouter(prefix="/api", tags=["users"])
 
@@ -19,8 +20,10 @@ def delete_user(
 ) -> dict[str, str]:
     """删除用户账号及其拥有的聊天历史。"""
     use_cases.delete_user(
-        db_file=str(get_application_container().database_path()),
+        db_file=database_file(),
         actor_account_id=principal.account_id,
+        actor_menu_permissions=principal.menu_permissions,
+        actor_knowledge_base_permissions=principal.knowledge_base_permissions,
         user_id=user_id,
     )
     return {"status": "success"}
@@ -36,7 +39,7 @@ def update_user_role(
 ) -> dict[str, str]:
     """为用户账号分配一个已有角色。"""
     use_cases.assign_user_role(
-        db_file=str(get_application_container().database_path()),
+        db_file=database_file(),
         actor_account_id=principal.account_id,
         actor_menu_permissions=principal.menu_permissions,
         actor_knowledge_base_permissions=principal.knowledge_base_permissions,
@@ -56,8 +59,10 @@ def update_user_status(
 ) -> dict[str, str]:
     """修改用户账号的审核或启用状态。"""
     use_cases.update_user_status(
-        db_file=str(get_application_container().database_path()),
+        db_file=database_file(),
         actor_account_id=principal.account_id,
+        actor_menu_permissions=principal.menu_permissions,
+        actor_knowledge_base_permissions=principal.knowledge_base_permissions,
         user_id=user_id,
         status=data.status,
     )
@@ -72,10 +77,10 @@ def list_users(
     _principal: auth_service.Principal = Depends(
         auth_service.require_menu_permission("用户管理")
     ),
-) -> dict:
+) -> UserPage:
     """分页返回用户账号列表，并附带当前角色名称。"""
     return use_cases.list_users(
-        str(get_application_container().database_path()),
+        database_file(),
         page=page,
         page_size=page_size,
         query=query,

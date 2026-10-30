@@ -1,3 +1,4 @@
+import dataclasses
 import os
 import sqlite3
 import unittest
@@ -30,6 +31,7 @@ try:
 except ModuleNotFoundError:
     Document = None
 
+from services.core.container import get_application_container
 from tests.support import IsolatedStorageTestCase
 
 
@@ -40,7 +42,7 @@ class IndexJobTest(IsolatedStorageTestCase):
         app_storage.initialize_database()
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             conn.execute(
-                "INSERT INTO knowledge_bases (name, created_at) VALUES (?, ?)",
+                "INSERT INTO knowledge_bases (name, kb_id, created_at) VALUES (?, lower(hex(randomblob(16))), ?)",
                 ("研发部", application_config.db_now()),
             )
             conn.execute(
@@ -78,7 +80,7 @@ class IndexJobTest(IsolatedStorageTestCase):
             )
 
         file_path = self._write_source("方案.pdf")
-        parsed = knowledge_base._ParsedDocument([], [], "", {})
+        parsed = knowledge_base._ParsedDocument([], [], {})
         with patch.object(
             knowledge_base, "_parse_and_embed_document", return_value=parsed
         ), patch.object(knowledge_base, "_publish_document") as publish:
@@ -122,32 +124,49 @@ class IndexJobTest(IsolatedStorageTestCase):
 
         self.assertEqual(app_storage.documents.ready_sources("研发部"), ["就绪.pdf"])
 
-    def test_chroma_failure_persists_fts_only_fallback_until_a_successful_retry(self):
+    def test_embedding_failure_marks_the_document_error(self):
         if knowledge_base is None or Document is None:
             self.skipTest("requires the backend Python dependencies")
-        splits = [Document(page_content="新的方案内容", metadata={"source": "方案.pdf"})]
+        from services.documents.types import DocumentRoutes
+        from services.retrieval.chunk_index import get_chunk_index
 
-        with patch.object(
-            knowledge_base.chroma_index,
-            "chroma_upsert_splits",
-            side_effect=RuntimeError("embedding unavailable"),
-        ):
-            synced = knowledge_base._sync_chroma_source(
-                splits, "研发部", "方案.pdf", object()
+        job_id = app_storage.index_jobs.create("研发部", "process", "方案.pdf")
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.execute(
+                "UPDATE documents SET index_job_id = ? WHERE kb_name = ? AND filename = ?",
+                (job_id, "研发部", "方案.pdf"),
             )
-
-        self.assertFalse(synced)
-        self.assertEqual(
-            app_storage.documents.chroma_disabled_sources("研发部"), ["方案.pdf"]
+        file_path = self._write_source("方案.pdf")
+        routes = DocumentRoutes(
+            fixed=[
+                Document(page_content="新制度的审批规则", metadata={"source": "方案.pdf", "page": 0})
+            ],
+            structured=[],
         )
-
-        with patch.object(knowledge_base.chroma_index, "chroma_upsert_splits"):
-            synced = knowledge_base._sync_chroma_source(
-                splits, "研发部", "方案.pdf", object()
+        with patch.object(
+            knowledge_base.document_loader, "load_document_routes", return_value=routes
+        ), patch.object(
+            knowledge_base, "embed_splits", side_effect=RuntimeError("embedding unavailable")
+        ):
+            knowledge_base.run_document_job(
+                job_id,
+                "研发部",
+                "方案.pdf",
+                file_path,
+                container=dataclasses.replace(
+                    get_application_container(), create_embeddings=lambda: object()
+                ),
             )
 
-        self.assertTrue(synced)
-        self.assertEqual(app_storage.documents.chroma_disabled_sources("研发部"), [])
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            status, error = conn.execute(
+                "SELECT status, error_message FROM documents WHERE kb_name = ? AND filename = ?",
+                ("研发部", "方案.pdf"),
+            ).fetchone()
+        self.assertEqual(status, "error")
+        self.assertIn("embedding unavailable", error)
+        kb_id = app_storage.knowledge_bases.kb_id_for("研发部")
+        self.assertEqual(get_chunk_index().available_routes(kb_id, None), set())
 
     def test_rebuild_replaces_older_queued_job(self):
         first_job = app_storage.index_jobs.prepare_rebuild("研发部")
@@ -263,7 +282,7 @@ class IndexJobTest(IsolatedStorageTestCase):
 
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             conn.execute(
-                "INSERT INTO knowledge_bases (name, created_at) VALUES (?, ?)",
+                "INSERT INTO knowledge_bases (name, kb_id, created_at) VALUES (?, lower(hex(randomblob(16))), ?)",
                 ("临时知识库", application_config.db_now()),
             )
         orphan_job = app_storage.index_jobs.create("临时知识库", "process", "旧文件.pdf")
@@ -272,7 +291,7 @@ class IndexJobTest(IsolatedStorageTestCase):
             conn.execute("DELETE FROM knowledge_bases WHERE name = ?", ("临时知识库",))
 
         retry_job = app_storage.index_jobs.create("研发部", "delete", "待重试.pdf")
-        app_storage.index_jobs.finish(retry_job, INDEX_JOB_FAILED, "chroma unavailable")
+        app_storage.index_jobs.finish(retry_job, INDEX_JOB_FAILED, "index unavailable")
 
         deleted = app_storage.index_jobs.prune_history(
             retention_days=36500,
@@ -310,55 +329,6 @@ class IndexJobTest(IsolatedStorageTestCase):
             app_storage.documents.document_path("研发部", "方案.pdf"),
             container=ANY,
         )
-
-    def test_legacy_index_requires_explicit_rebuild_without_mutating_indexes(self):
-        if knowledge_base is None or Document is None:
-            self.skipTest("requires the backend Python dependencies")
-        from services.documents.types import DocumentRoutes
-
-        job_id = app_storage.index_jobs.create("研发部", "process", "方案.pdf")
-        with sqlite3.connect(app_storage.DB_FILE) as conn:
-            conn.execute(
-                "UPDATE documents SET index_job_id = ? WHERE kb_name = ? AND filename = ?",
-                (job_id, "研发部", "方案.pdf"),
-            )
-        file_path = self._write_source("方案.pdf")
-        fts_path = knowledge_base.fts_index.fts_db_path("研发部")
-        os.makedirs(os.path.dirname(fts_path), exist_ok=True)
-        with open(fts_path, "wb"):
-            pass
-        current_routes = DocumentRoutes(
-            fixed=[
-                Document(page_content="新制度的审批规则", metadata={"source": "方案.pdf", "page": 0})
-            ],
-            structured=[],
-        )
-        with patch.object(
-            knowledge_base.document_loader, "load_document_routes", return_value=current_routes
-        ), patch.object(
-            knowledge_base.fts_index, "fts5_index_is_current", return_value=False
-        ), patch.object(
-            knowledge_base.chroma_index, "embed_splits"
-        ) as embed, patch.object(
-            knowledge_base.chroma_index, "chroma_upsert_splits"
-        ) as upsert_chroma, patch.object(
-            knowledge_base.fts_index, "build_fts5_index"
-        ) as build_fts, patch.object(
-            knowledge_base.fts_index, "update_fts5_index"
-        ) as update_fts:
-            knowledge_base.run_document_job(job_id, "研发部", "方案.pdf", file_path)
-
-        with sqlite3.connect(app_storage.DB_FILE) as conn:
-            status, error = conn.execute(
-                "SELECT status, error_message FROM documents WHERE kb_name = ? AND filename = ?",
-                ("研发部", "方案.pdf"),
-            ).fetchone()
-        self.assertEqual(status, "error")
-        self.assertIn("完整重建", error)
-        embed.assert_not_called()
-        upsert_chroma.assert_not_called()
-        build_fts.assert_not_called()
-        update_fts.assert_not_called()
 
 
 if __name__ == "__main__":

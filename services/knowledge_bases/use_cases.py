@@ -18,9 +18,9 @@ from services.core.errors import (
 from services.documents import mineru as mineru_client
 from services.indexing import pipeline as indexing_pipeline
 from services.indexing import worker as index_worker
-from services.retrieval import chroma as chroma_index
-from services.retrieval import fts as fts_index
-from services.retrieval import index_coordination, retriever, source_state
+from services.retrieval import retriever
+from services.retrieval.chunk_index import get_chunk_index
+from services.retrieval.source_state import COMMON_KNOWLEDGE_BASE
 
 logger = logging.getLogger(__name__)
 
@@ -65,20 +65,30 @@ def schedule_rebuild(name: str) -> str:
     return job_id
 
 
+def _reject_common_knowledge_base(name: str) -> None:
+    """通用知识库只在空库初始化时创建，删除或改名后部门知识库的补充检索会静默失效。"""
+    if name == COMMON_KNOWLEDGE_BASE:
+        raise InvalidStateError(
+            "通用知识库不能删除或重命名", code="common_knowledge_base_protected"
+        )
+
+
 def delete_knowledge_base(name: str) -> None:
     """Delete indexes, relational state, source files, artifacts, and caches."""
     dependencies = get_application_container()
     documents = dependencies.documents
     index_jobs = dependencies.index_jobs()
     knowledge_bases = dependencies.knowledge_bases
+    _reject_common_knowledge_base(name)
     with indexing_pipeline.knowledge_base_lock(name):
         if not knowledge_bases.exists(name):
             raise ResourceNotFoundError(
                 "知识库不存在", code="knowledge_base_not_found"
             )
         try:
-            chroma_index.chroma_delete_by_knowledge_base(name)
-            fts_index.remove_fts_index(name)
+            kb_id = knowledge_bases.kb_id_for(name)
+            if kb_id:
+                get_chunk_index().delete_kb(kb_id)
         except Exception as exc:
             raise ServiceUnavailableError(
                 f"索引清理失败，知识库未删除：{exc}",
@@ -91,20 +101,19 @@ def delete_knowledge_base(name: str) -> None:
         if os.path.exists(directory):
             shutil.rmtree(directory)
         mineru_client.remove_saved_results_for_knowledge_base(name)
-        if name == source_state.COMMON_KNOWLEDGE_BASE:
-            retriever.clear_retriever_cache()
-        else:
-            retriever.drop_cached_retriever(name)
+        retriever.drop_cached_retriever(name)
 
-    chroma_index.reset_empty_chroma_storage(
-        documents.has_documents, retriever.clear_retriever_cache
-    )
+    try:
+        if get_chunk_index().reset_if_empty(documents.has_documents):
+            retriever.clear_retriever_cache()
+    except Exception as exc:
+        logger.warning("Empty chunk index reset failed: %s", exc)
+    # 不在请求线程里 VACUUM：它会锁住整个数据库的写入，交给启动时和每日清理压缩。
     index_jobs.redact_orphaned_filenames(name)
-    index_jobs.compact_database()
 
 
 def rename_knowledge_base(old_name: str, new_name: str) -> None:
-    """Rename every knowledge-base resource, compensating completed moves on failure."""
+    """Rename a knowledge base; vectors are keyed by kb_id so the index is untouched."""
     dependencies = get_application_container()
     documents = dependencies.documents
     index_jobs = dependencies.index_jobs()
@@ -112,10 +121,10 @@ def rename_knowledge_base(old_name: str, new_name: str) -> None:
     new_name = _validated_name(new_name)
     if new_name == old_name:
         return
+    _reject_common_knowledge_base(old_name)
 
     old_dir = documents.knowledge_base_path(old_name)
     new_dir = documents.knowledge_base_path(new_name)
-    new_index_dir = fts_index.vector_store_dir(new_name)
     old_mineru_dir = mineru_client.result_dir_for_knowledge_base(old_name)
     new_mineru_dir = mineru_client.result_dir_for_knowledge_base(new_name)
     with ExitStack() as locks:
@@ -136,23 +145,20 @@ def rename_knowledge_base(old_name: str, new_name: str) -> None:
                 "知识库有正在处理的文档，请等待处理完成后再重命名",
                 code="knowledge_base_has_running_jobs",
             )
-        if os.path.exists(new_dir) or os.path.exists(new_index_dir) or (
+        if os.path.exists(new_dir) or (
             old_mineru_dir.exists() and new_mineru_dir.exists()
         ):
             raise InvalidStateError(
-                "目标知识库目录或索引已存在",
+                "目标知识库目录已存在",
                 code="knowledge_base_target_exists",
             )
 
         data_moved = False
-        indexes_renamed = False
         mineru_moved = False
         try:
             if os.path.exists(old_dir):
                 os.rename(old_dir, new_dir)
                 data_moved = True
-            index_coordination.rename_knowledge_base_indexes(old_name, new_name)
-            indexes_renamed = True
             mineru_moved = mineru_client.rename_saved_results_for_knowledge_base(
                 old_name, new_name
             )
@@ -168,13 +174,6 @@ def rename_knowledge_base(old_name: str, new_name: str) -> None:
                     )
                 except Exception as rollback_exc:
                     rollback_errors.append(f"MinerU: {rollback_exc}")
-            if indexes_renamed:
-                try:
-                    index_coordination.rename_knowledge_base_indexes(
-                        new_name, old_name
-                    )
-                except Exception as rollback_exc:
-                    rollback_errors.append(f"索引: {rollback_exc}")
             if data_moved:
                 try:
                     os.rename(new_dir, old_dir)
