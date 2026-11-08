@@ -41,4 +41,6 @@ storage/
 *.tar
 *.tar.gz
 
-docs/
+docs/interview/
+
+docs/plus/
