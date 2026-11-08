@@ -4,7 +4,7 @@
       <section class="login-aside hidden lg:flex flex-col justify-between p-12 text-white">
         <div class="flex items-center gap-3">
           <div class="login-logo w-10 h-10 flex items-center justify-center"><BookOpen class="w-5 h-5" /></div>
-          <span class="font-semibold text-lg">知见</span>
+          <span class="font-semibold text-lg">RAGLoom</span>
         </div>
         <div>
           <p class="text-[#94d6d1] text-xs font-semibold tracking-[0.08em]">KNOWLEDGE WORKSPACE</p>
@@ -41,13 +41,7 @@
             </div>
             <div class="space-y-1.5">
               <label class="text-xs font-medium text-gray-500 ml-1">密码</label>
-              <div class="relative">
-                <input :type="showLoginPwd ? 'text' : 'password'" required v-model="password" class="w-full bg-gray-50 border border-gray-200 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100 rounded-md px-3.5 py-2.5 pr-10 text-sm text-gray-800 transition-all outline-none" placeholder="输入密码" />
-                <button type="button" @click="showLoginPwd = !showLoginPwd" class="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600">
-                  <Eye v-if="!showLoginPwd" class="w-4 h-4" />
-                  <EyeOff v-else class="w-4 h-4" />
-                </button>
-              </div>
+              <PasswordInput v-model="password" required placeholder="输入密码" />
             </div>
           </div>
 
@@ -111,35 +105,11 @@
             </div>
             <div class="space-y-1.5">
               <label class="text-xs font-medium text-gray-500 ml-1">设置密码</label>
-              <div class="relative">
-                <input
-                  :type="showRegPwd ? 'text' : 'password'"
-                  required
-                  v-model="regPassword"
-                  class="w-full bg-gray-50 border border-gray-200 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100 rounded-md px-3.5 py-2.5 pr-10 text-sm text-gray-800 transition-all outline-none"
-                  placeholder="设置登录密码"
-                />
-                <button type="button" @click="showRegPwd = !showRegPwd" class="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600">
-                  <Eye v-if="!showRegPwd" class="w-4 h-4" />
-                  <EyeOff v-else class="w-4 h-4" />
-                </button>
-              </div>
+              <PasswordInput v-model="regPassword" required placeholder="设置登录密码" />
             </div>
             <div class="space-y-1.5">
               <label class="text-xs font-medium text-gray-500 ml-1">确认密码</label>
-              <div class="relative">
-                <input
-                  :type="showRegConfirmPwd ? 'text' : 'password'"
-                  required
-                  v-model="regConfirmPassword"
-                  class="w-full bg-gray-50 border border-gray-200 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100 rounded-md px-3.5 py-2.5 pr-10 text-sm text-gray-800 transition-all outline-none"
-                  placeholder="再次输入密码"
-                />
-                <button type="button" @click="showRegConfirmPwd = !showRegConfirmPwd" class="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600">
-                  <Eye v-if="!showRegConfirmPwd" class="w-4 h-4" />
-                  <EyeOff v-else class="w-4 h-4" />
-                </button>
-              </div>
+              <PasswordInput v-model="regConfirmPassword" required placeholder="再次输入密码" />
             </div>
           </div>
 
@@ -168,10 +138,11 @@
 
 <script setup>
 import { ref } from 'vue';
-import { Eye, EyeOff, BookOpen } from 'lucide-vue-next';
+import { BookOpen } from 'lucide-vue-next';
 import { toast } from '../toast';
 import { apiPost } from '../apiClient';
 import { saveAuthSession } from '../authSession';
+import PasswordInput from '../components/PasswordInput.vue';
 
 // 与后端 services/core/config.py 的 MIN_PASSWORD_LENGTH 保持一致。
 const MIN_PASSWORD_LENGTH = 8;
@@ -191,10 +162,6 @@ const regName = ref('');
 const regPhone = ref('');
 const regPassword = ref('');
 const regConfirmPassword = ref('');
-
-const showLoginPwd = ref(false);
-const showRegPwd = ref(false);
-const showRegConfirmPwd = ref(false);
 
 /** 切换登录和注册视图，并清空旧错误。 */
 const setView = (newView) => {

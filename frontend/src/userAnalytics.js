@@ -43,15 +43,6 @@ export function sparseLabelIndexes(count, wanted = 6) {
   return [...new Set(Array.from({ length: wanted }, (_, index) => Math.round(index * (count - 1) / (wanted - 1))))];
 }
 
-/** UTC ISO 时间显示为浏览器本地时间；空值显示短横线。 */
-export function formatLocalTime(value) {
-  if (!value) return '-';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const pad = number => String(number).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
 /** 0 次显示为 0%，避免除零。 */
 export function percent(part, whole) {
   return whole ? `${Math.round((part / whole) * 100)}%` : '0%';

@@ -45,6 +45,8 @@ export function useDocuments({ onKnowledgeBasesChanged, onDocumentDeleted } = {}
   const imageParserOptions = computed(() => parserOptions.value.filter(option =>
     option.extensions?.some(extension => ['.png', '.jpg', '.jpeg'].includes(extension))
   ));
+  // 只在处理中文档条数变化时轮询，避免监视整个文档列表的每个字段。
+  const processingDocumentCount = computed(() => documents.value.filter(isProcessing).length);
   const uploadAccept = ref('.pdf,.docx,.md,.txt,.png,.jpg,.jpeg');
   const uploadParserMode = ref(preferredUploadParserMode);
   const uploadImageParserMode = ref(preferredImageParserMode);
@@ -187,14 +189,14 @@ export function useDocuments({ onKnowledgeBasesChanged, onDocumentDeleted } = {}
     }, delay);
   };
 
-  watch(documents, nextDocuments => {
+  watch(processingDocumentCount, count => {
     // Poll only while the backend has durable indexing work in progress.
-    if (!nextDocuments.some(isProcessing)) {
+    if (!count) {
       stopPolling();
     } else if (pollingTimer === null) {
       schedulePoll();
     }
-  }, { deep: true });
+  });
 
   onUnmounted(stopPolling);
   /** 上传前在本地检查大小和文件名长度，返回不能上传的原因；可以上传则返回空字符串。 */

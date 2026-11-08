@@ -14,7 +14,7 @@
         <div class="app-brand flex items-center gap-3 font-semibold text-[15px]">
           <div class="app-brand-mark flex items-center justify-center"><Database class="w-5 h-5" /></div>
           <div>
-            <div>知见</div>
+            <div>RAGLoom</div>
             <div class="text-[10px] font-medium text-[#8faeaf] mt-0.5">Knowledge Workspace</div>
           </div>
         </div>
@@ -57,9 +57,9 @@
             </span>
             <div class="hidden sm:flex items-center gap-2 border-l border-[#e1e8e8] pl-3">
               <div class="w-7 h-7 rounded-full bg-[#e3f4f2] text-[#246169] flex items-center justify-center text-xs font-semibold">
-                {{ (store.user.username || store.user.name || 'A').slice(0, 1).toUpperCase() }}
+                {{ (store.user.username || 'A').slice(0, 1).toUpperCase() }}
               </div>
-              <span class="text-[#4e6265] text-[13px] max-w-24 truncate">{{ store.user.username || store.user.name || 'admin' }}</span>
+              <span class="text-[#4e6265] text-[13px] max-w-24 truncate">{{ store.user.username }}</span>
             </div>
             <button
               @click="showPwdModal = true"
@@ -104,42 +104,15 @@
           <form @submit.prevent="handlePwdChange" class="space-y-4">
             <div class="space-y-1.5">
               <label class="text-xs font-medium text-gray-500 ml-1">原密码</label>
-              <div class="relative">
-                <input
-                  :type="showOldPwd ? 'text' : 'password'" required v-focus v-model="oldPwd"
-                  class="w-full bg-gray-50 border border-gray-200 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100 rounded-md pl-3.5 pr-10 py-2.5 text-sm outline-none"
-                  placeholder="请输入当前密码"
-                />
-                <button type="button" @click="showOldPwd = !showOldPwd" class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
-                  <component :is="showOldPwd ? EyeOff : Eye" class="w-4 h-4" />
-                </button>
-              </div>
+              <PasswordInput v-model="oldPwd" autofocus required placeholder="请输入当前密码" />
             </div>
             <div class="space-y-1.5">
               <label class="text-xs font-medium text-gray-500 ml-1">新密码</label>
-              <div class="relative">
-                <input
-                  :type="showNewPwd ? 'text' : 'password'" required v-model="newPwd"
-                  class="w-full bg-gray-50 border border-gray-200 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100 rounded-md pl-3.5 pr-10 py-2.5 text-sm outline-none"
-                  placeholder="请输入新密码"
-                />
-                <button type="button" @click="showNewPwd = !showNewPwd" class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
-                  <component :is="showNewPwd ? EyeOff : Eye" class="w-4 h-4" />
-                </button>
-              </div>
+              <PasswordInput v-model="newPwd" required placeholder="请输入新密码" />
             </div>
             <div class="space-y-1.5">
               <label class="text-xs font-medium text-gray-500 ml-1">确认新密码</label>
-              <div class="relative">
-                <input
-                  :type="showConfirmPwd ? 'text' : 'password'" required v-model="confirmPwd"
-                  class="w-full bg-gray-50 border border-gray-200 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100 rounded-md pl-3.5 pr-10 py-2.5 text-sm outline-none"
-                  placeholder="请再次输入新密码"
-                />
-                <button type="button" @click="showConfirmPwd = !showConfirmPwd" class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
-                  <component :is="showConfirmPwd ? EyeOff : Eye" class="w-4 h-4" />
-                </button>
-              </div>
+              <PasswordInput v-model="confirmPwd" required placeholder="请再次输入新密码" />
             </div>
             <div class="pt-2 flex justify-end gap-3">
               <button type="button" @click="closePwdModal" class="px-4 py-2 text-sm text-gray-600 bg-gray-50 hover:bg-gray-100 rounded-md transition-colors">取消</button>
@@ -157,11 +130,12 @@ import { ref, computed, defineAsyncComponent, onMounted, onUnmounted } from 'vue
 import { store } from './store';
 import LoginView from './views/LoginView.vue';
 import ToastContainer from './components/ToastContainer.vue';
+import PasswordInput from './components/PasswordInput.vue';
 import { toast } from './toast';
 import { apiGet, apiPost } from './apiClient';
 import { AUTH_STORAGE_KEY, clearAuthSession, loadAuthSession, saveAuthSession } from './authSession';
 import { canManageKnowledgeBases, canOpenKnowledgeBase } from './knowledgeAccess';
-import { LayoutDashboard, FolderOpen, MessageCircle, Settings, Users, UserCog, LogOut, Key, Eye, EyeOff, Database, Menu, LoaderCircle, Activity, BarChart3 } from 'lucide-vue-next';
+import { LayoutDashboard, FolderOpen, MessageCircle, Settings, Users, UserCog, LogOut, Key, Database, Menu, LoaderCircle, Activity, BarChart3 } from 'lucide-vue-next';
 
 const ChatWorkspace = defineAsyncComponent(() => import('./views/ChatWorkspace.vue'));
 const DashboardView = defineAsyncComponent(() => import('./views/DashboardView.vue'));
@@ -179,12 +153,8 @@ const oldPwd = ref('');
 const newPwd = ref('');
 const confirmPwd = ref('');
 
-const showOldPwd = ref(false);
-const showNewPwd = ref(false);
-const showConfirmPwd = ref(false);
 const sidebarOpen = ref(false);
 const changingPwd = ref(false);
-const vFocus = { mounted: element => element.focus() };
 
 const allMenus = [
   { id: '仪表盘统计', icon: LayoutDashboard, permission: '仪表盘统计', component: DashboardView },

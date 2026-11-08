@@ -284,20 +284,8 @@ export function useChatStream({
         return;
       }
       if (error.name === 'AbortError' || !isCurrent()) return;
-      let errorMessage = '⚠️ 请求失败，请稍后重试。';
-      if (error?.response?.status === 412 || error?.status === 412) {
-        errorMessage = '⚠️ 尚未配置大模型 API Key，请管理员前往左侧菜单「模型管理」页面填写并保存 API Key 后再使用。';
-        modelConfigured.value = false;
-      }
-      try {
-        if (error instanceof Response || error?.json) {
-          const data = await error.json();
-          if (data?.detail) errorMessage = `⚠️ ${data.detail}`;
-        }
-      } catch (_) {
-        // Keep the fallback error message when the response body is not JSON.
-      }
-      if (isCurrent()) messages.value.push({ role: 'assistant', content: errorMessage });
+      // 401/412/422 等响应在前面按状态码处理；能走到这里的只剩网络层异常。
+      messages.value.push({ role: 'assistant', content: '⚠️ 请求失败，请稍后重试。' });
     } finally {
       if (abortController === controller) {
         abortController = null;

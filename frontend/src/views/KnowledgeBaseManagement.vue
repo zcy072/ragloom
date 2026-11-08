@@ -89,11 +89,11 @@
             :documents="docs"
             :is-uploading="isUploading"
             :deleting-document-id="deletingDocId"
-            :parser-options="pdfParserOptions"
+            :parser-options="documentParserOptions"
             :image-parser-options="imageParserOptions"
             :upload-accept="uploadAccept"
             :is-selectable-parser-document="isSelectableParserDocument"
-            :parser-label="pdfParserLabel"
+            :parser-label="parserLabel"
             @upload="handleUpload"
             @preview="openPreview"
             @edit-metadata="startMetadataEdit"
@@ -122,7 +122,7 @@
     />
 
     <DocumentPreview
-      v-if="showPreview && previewDoc && manageKb"
+      v-if="previewDoc && manageKb"
       :filename="previewDoc.filename"
       :url="`/api/documents/${encodeURIComponent(manageKb.name)}/${encodeURIComponent(previewDoc.filename)}?preview=true`"
       @close="closePreview"
@@ -154,7 +154,6 @@ const renameValue = ref('');
 const deleteDocConfirmId = ref(null);
 const actionMenuId = ref(null);
 const previewDoc = ref(null);
-const showPreview = ref(false);
 
 const {
   knowledgeBases: kbs,
@@ -166,7 +165,6 @@ const {
 } = useKnowledgeBases();
 /** 关闭文档预览并清空当前预览对象。 */
 const closePreview = () => {
-  showPreview.value = false;
   previewDoc.value = null;
 };
 
@@ -182,7 +180,7 @@ const {
   showRetrievalConfig,
   retrievalConfig,
   uploadMetadata,
-  documentParserOptions: pdfParserOptions,
+  documentParserOptions,
   imageParserOptions,
   uploadAccept,
   uploadParserMode,
@@ -202,7 +200,7 @@ const {
   saveRetrievalConfig,
   isSelectableParserDocument,
   parserOptionsFor,
-  parserLabel: pdfParserLabel,
+  parserLabel,
   startMetadataEdit,
   cancelMetadataEdit,
   saveDocumentMetadata,
@@ -253,7 +251,6 @@ const startChat = knowledgeBase => {
 /** 打开指定文档的预览面板。 */
 const openPreview = document => {
   previewDoc.value = document;
-  showPreview.value = true;
 };
 /** 响应仪表盘跳转请求，直接打开目标知识库。 */
 const openTargetKnowledgeBase = target => {

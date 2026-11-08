@@ -191,6 +191,7 @@ import { RefreshCw } from 'lucide-vue-next';
 import { apiGet, authorizedFetch } from '../apiClient';
 import ChatTraceDetail from '../components/ChatTraceDetail.vue';
 import PaginationControl from '../components/PaginationControl.vue';
+import { formatLocalTime } from '../timeFormat';
 import { toast } from '../toast';
 
 const statusOptions = [
@@ -226,7 +227,8 @@ const formatMs = value => {
   if (value === null || value === undefined) return '-';
   return value >= 1000 ? `${(value / 1000).toFixed(1)} s` : `${Math.round(value)} ms`;
 };
-const formatTime = value => (value || '').replace('T', ' ').slice(0, 19);
+/** 数据库时间统一存 UTC，展示时换算为浏览器本地时间。 */
+const formatTime = formatLocalTime;
 const dependencyLabel = name => dependencyLabels[name] || name;
 const statusLabel = value => statusOptions.find(item => item.value === value)?.label || value;
 const statusClass = value => ({

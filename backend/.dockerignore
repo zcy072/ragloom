@@ -1,0 +1,31 @@
+.git
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+.env
+.env.*
+.uv-cache/
+.uv-tools/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage/
+htmlcov/
+.idea/
+.vscode/
+
+# 后端运行镜像不需要的测试、评测和脚本
+tests/
+evaluation/
+scripts/
+
+# 避免把运行时数据和打包好的镜像又塞进镜像里
+*.tar
+*.tar.gz
+*.sqlite3
+storage/
+.DS_Store

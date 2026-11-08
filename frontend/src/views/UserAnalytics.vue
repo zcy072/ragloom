@@ -289,8 +289,9 @@ import PaginationControl from '../components/PaginationControl.vue';
 import { usePaginatedList } from '../composables/usePaginatedList';
 import { store } from '../store';
 import { toast } from '../toast';
+import { formatLocalTime } from '../timeFormat';
 import {
-  chartLines, formatLocalTime, loginReasonLabels, niceMax, percent, runStatusLabels, sparseLabelIndexes
+  chartLines, loginReasonLabels, niceMax, percent, runStatusLabels, sparseLabelIndexes
 } from '../userAnalytics';
 
 const BASE = '/api/user-analytics';

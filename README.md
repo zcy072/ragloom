@@ -41,9 +41,9 @@ RAGLoom 把 PDF、Word、Markdown 和图片解析、分块后写入 Milvus 混�
 
 - **混合检索**：Milvus 库内 RRF 融合 HNSW 稠密向量与 BM25，按路线和知识库加权，跨路线去重后经 BGE Reranker 重排。
 - **三路分块**：父子块负责召回与语境恢复，结构化分块保留标题链和表格，视觉内容补充图片证据。
-- **多种解析**：本地文本、PaddleOCR、MinerU 云端解析、视觉模型，失败自动回退。
+- **多种解析**：本地文本、PaddleOCR、MinerU 云端解析、视觉模型；图片的视觉分析失败时改用本地 OCR，OCR 某页为空时读取 PDF 文本层。
 - **可靠回答**：重排分数低于阈值时直接拒答、不调用大模型；回答附 `[来源 N]`，可追溯到文件和页码。
-- **异步索引**：持久化任务 + 线程池；解析与嵌入不持锁，发布时 CAS 校验，重传自动作废旧任务，重启后自动恢复。
+- **异步索引**：持久化任务 + 线程池；解析与嵌入不持锁，发布时 CAS 校验，重传自动作废旧任务，重启后排队中的任务继续执行、执行中的任务标为中断，删除任务自动重试。
 - **权限与安全**：角色与知识库级权限逐请求校验，HMAC 令牌，API Key 加密存储并支持密钥轮换，登录与问答限流。
 - **可观测**：问答全链路阶段追踪、召回与重排明细、运维监控、用户分析。
 
@@ -77,7 +77,7 @@ flowchart LR
 | 混合 | 0.875 | 0.975 | 0.770 | 0.917 | 212 ms |
 | **混合 + 重排** | **0.915** | **0.980** | **0.820** | **0.945** | 414 ms |
 
-`full@5` 指前 5 个文档覆盖全部标准文档的题目比例。评测结果用于确定重排保留数（10 → 20）和补充检索默认关闭。指标定义与复现见 [`evaluation/`](evaluation/README.md)。
+`full@5` 指前 5 个文档覆盖全部标准文档的题目比例。评测结果用于确定重排保留数（10 → 20）和补充检索默认关闭。指标定义与复现见 [`backend/evaluation/`](backend/evaluation/README.md)。
 
 ## 快速开始
 
@@ -96,7 +96,7 @@ mkdir -p storage && docker compose up -d --build
 
 <br>
 
-全部配置项见 [`.env.example`](.env.example)，常用的有：
+`.env.example` 只列出常用项，全部配置项、默认值和取值范围见 [`docs/development/配置项.md`](docs/development/配置项.md)。常用的有：
 
 | 变量 | 说明 |
 | --- | --- |
@@ -105,7 +105,7 @@ mkdir -p storage && docker compose up -d --build
 | `MINERU_API_TOKEN` | 使用 MinerU 云端解析时需要 |
 | `RERANK_BASE_URL` / `RERANK_MODEL` | 自定义重排服务，默认 SiliconFlow |
 | `CHAT_RETRIEVAL_PLANNING` / `CHAT_QUERY_VARIANT` | 检索规划与补充查询，默认关闭 |
-| `DOCKER_LIBRARY_PREFIX` / `PIP_INDEX_URL` / `NPM_REGISTRY` / `MILVUS_IMAGE` | 构建镜像源，默认使用国内镜像 |
+| `DOCKER_LIBRARY_PREFIX` / `PIP_INDEX_URL` / `NPM_REGISTRY` / `MILVUS_IMAGE` | 构建镜像源；PyPI 默认官方源，其余默认国内镜像 |
 
 嵌入与重排发送文本到 SiliconFlow，聊天发送问题与上下文到所选模型服务商，MinerU 与视觉模型会接收原文件或图片。不希望文件外发时，选择本地解析并将图片分析设为 `ocr`。
 
@@ -116,22 +116,25 @@ mkdir -p storage && docker compose up -d --build
 ## 开发
 
 ```text
-routers/            HTTP 路由与鉴权
-services/
-  core/             配置、schema、依赖容器、密钥加密
-  identity/         账户、角色、令牌、限流
-  documents/        解析、OCR、MinerU、视觉内容
-  indexing/         分块、持久化任务、worker、锁
-  retrieval/        Milvus 适配、混合召回、上下文恢复
-  chat/             改写、重排、引用、会话、流式回答
+backend/
+  routers/          HTTP 路由与鉴权
+  services/
+    core/           配置、schema、依赖容器、密钥加密
+    identity/       账户、角色、令牌、限流
+    documents/      解析、OCR、MinerU、视觉内容
+    indexing/       分块、持久化任务、worker、锁
+    retrieval/      Milvus 适配、混合召回、上下文恢复
+    chat/           改写、重排、引用、会话、流式回答
+  tests/            后端测试
+  evaluation/       离线检索评测
 frontend/           Vue 3 前端与 Playwright 测试
-evaluation/         离线检索评测
+scripts/            check.sh、smoke-test.sh
 ```
 
 ```bash
-./scripts/check.sh                                # Ruff、Pyright、后端 516 个测试、前端单元与端到端测试
+./scripts/check.sh                                # Ruff、Pyright、后端 518 个测试、前端单元测试；加 --e2e 跑端到端测试
 SMOKE_ADMIN_PASSWORD=... ./scripts/smoke-test.sh  # 部署冒烟测试
-./evaluation/run_docker.sh                        # 检索评测
+./backend/evaluation/run_docker.sh                # 检索评测
 ```
 
 ## License

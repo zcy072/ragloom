@@ -136,12 +136,12 @@
     </div>
 
     <DocumentPreview
-      v-if="showPreview"
+      v-if="previewDoc"
       :filename="previewDoc"
       :url="documentPreviewUrl"
       :evidence="previewEvidence"
       :context-label="previewKbName && previewKbName !== selectedKb ? previewKbName : ''"
-      @close="showPreview = false"
+      @close="closePreview"
     />
   </div>
 </template>
@@ -192,7 +192,6 @@ const previewDoc = ref(null);
 const previewEvidence = ref(null);
 const previewPage = ref(null);
 const previewKbName = ref('');
-const showPreview = ref(false);
 const hasRetrievalFilters = computed(() => Object.values(retrievalFilters.value).some(Boolean));
 const documentPreviewUrl = computed(() => {
   if (!previewDoc.value) return '';
@@ -335,9 +334,11 @@ const downloadSession = () => {
   }
 };
 
-watch([messages, loading], () => {
+// 只跟随消息条数和最后一条回答的内容，避免遍历整段对话。
+const lastMessageContent = computed(() => messages.value.at(-1)?.content ?? '');
+watch([() => messages.value.length, lastMessageContent], () => {
   scrollToBottom();
-}, { deep: true });
+});
 
 // 历史会话加载完成后从底部开始阅读。不监听 activeSessionId：新会话的首个回答结束时
 // 它才会被赋值，此时强制滚动会打断正在向上翻看的用户。
@@ -475,7 +476,11 @@ const openPreview = (src) => {
   previewPage.value = Array.isArray(src.page_numbers)
     ? src.page_numbers.find(page => Number.isInteger(page) && page > 0) || null
     : pageMatch ? Number(pageMatch[1]) : null;
-  showPreview.value = true;
+};
+
+/** 关闭来源文档预览。 */
+const closePreview = () => {
+  previewDoc.value = null;
 };
 
 </script>

@@ -14,7 +14,7 @@ curl -fsS http://127.0.0.1:8080/ >/dev/null
 
 run_smoke() {
     docker compose run --rm --no-deps \
-        -v "$PROJECT_DIR:/app" \
+        -v "$PROJECT_DIR/backend:/app" \
         -e PYTHONPYCACHEPREFIX=/tmp/pymodel-pycache \
         -e SMOKE_ADMIN_PASSWORD \
         -e SMOKE_ADMIN_USERNAME="${SMOKE_ADMIN_USERNAME:-admin}" \

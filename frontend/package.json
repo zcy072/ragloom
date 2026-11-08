@@ -8,7 +8,6 @@
     "build": "vite build",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "vue-tsc --noEmit -p jsconfig.json",
-    "format": "prettier --write src tests *.js *.html",
     "test:unit": "node --test tests/unit/*.test.js",
     "preview": "vite preview",
     "test:e2e": "playwright test",
@@ -27,10 +26,12 @@
     "eslint": "^10.8.0",
     "eslint-plugin-vue": "^10.10.0",
     "globals": "^16.3.0",
-    "prettier": "^3.6.2",
     "tailwindcss": "^4.3.2",
     "typescript": "^5.8.3",
     "vite": "^8.1.6",
     "vue-tsc": "^3.0.4"
+  },
+  "overrides": {
+    "minimatch": "11.0.5"
   }
 }
