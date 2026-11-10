@@ -18,6 +18,20 @@ from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 KB_NAME = "eval_crud_rag"
+
+
+def eval_kb_id(container, *, create: bool = False) -> str:
+    """固定评测名称只用于发现种子知识库，其后始终传递返回的 ID。"""
+    from services.knowledge_bases import use_cases as kb_use_cases
+
+    for summary in container.knowledge_bases.list_summaries():
+        if summary["name"] == KB_NAME:
+            return summary["kb_id"]
+    if not create:
+        raise SystemExit(f"评测知识库“{KB_NAME}”不存在，请先导入语料")
+    return kb_use_cases.create_knowledge_base(KB_NAME).kb_id
+
+
 KS = (1, 3, 5, 10, 20)
 
 
@@ -29,23 +43,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=0, help="只评测前 N 题（0 为全部）")
     parser.add_argument("--index-timeout", type=int, default=3600)
     parser.add_argument(
-        "--ranker", choices=("rrf", "weighted"), default="rrf",
+        "--ranker",
+        choices=("rrf", "weighted"),
+        default="rrf",
         help="Milvus hybrid_search 的融合方式，只影响本次评测",
     )
     parser.add_argument(
-        "--agentic", action="store_true",
+        "--agentic",
+        action="store_true",
         help="额外评测补充检索（CHAT_AGENTIC_RETRIEVAL）：对重排结果再跑 refine_evidence",
     )
     parser.add_argument(
-        "--context-spans", type=int, default=0,
+        "--context-spans",
+        type=int,
+        default=0,
         help="覆盖最终上下文的最大段数（0 沿用线上默认值），只影响 final_context",
     )
     parser.add_argument(
-        "--context-chars", type=int, default=0,
+        "--context-chars",
+        type=int,
+        default=0,
         help="覆盖最终上下文的字符预算（0 沿用线上默认值），只影响 final_context",
     )
     parser.add_argument(
-        "--rerank-top-n", type=int, default=0,
+        "--rerank-top-n",
+        type=int,
+        default=0,
         help="覆盖重排后保留的片段数（0 沿用线上默认值），只影响本次评测",
     )
     return parser.parse_args()
@@ -70,7 +93,6 @@ def build_knowledge_base(corpus_dir: Path, timeout: int) -> dict:
     from services.core.container import get_application_container
     from services.documents import use_cases as document_use_cases
     from services.indexing import worker as index_worker
-    from services.knowledge_bases import use_cases as kb_use_cases
 
     app_storage.initialize_app_storage()
     from services.retrieval.chunk_index import get_chunk_index
@@ -80,24 +102,45 @@ def build_knowledge_base(corpus_dir: Path, timeout: int) -> dict:
     files = sorted([*corpus_dir.glob("*.txt"), *corpus_dir.glob("*.md")])
     wanted = {path.name for path in files}
 
-    if not container.documents.knowledge_base_exists(KB_NAME):
-        kb_use_cases.create_knowledge_base(KB_NAME)
-    existing = {record["filename"] for record in container.documents.list_documents(KB_NAME)}
+    kb_id = eval_kb_id(container, create=True)
+    from services.core.settings import get_settings
+
+    mapping_path = Path(get_settings().storage_dir) / "evaluation_document_ids.json"
+    mapping = (
+        json.loads(mapping_path.read_text())
+        if mapping_path.exists()
+        else {"kb_id": kb_id, "documents": {}}
+    )
+    if mapping["kb_id"] != kb_id:
+        raise SystemExit("评测文档映射与知识库不匹配，请重建隔离评测存储")
+    document_ids = mapping["documents"]
+    existing = {
+        record["document_id"]: record for record in container.documents.list_documents(kb_id)
+    }
+    if set(existing) - set(document_ids.values()):
+        raise SystemExit("发现未映射的评测文档，请重建隔离评测存储，不能按文件名猜测身份")
     started = time.perf_counter()
     index_worker.start()
     try:
         for number, path in enumerate(files, start=1):
-            if path.name in existing:
+            if document_ids.get(path.name) in existing:
+                document_id = document_ids[path.name]
+                if existing[document_id]["status"] == "error":
+                    document_use_cases.reindex_document(kb_id, document_id)
                 continue
             with path.open("rb") as handle:
-                document_use_cases.upload_document(
-                    KB_NAME, path.name, handle, metadata=None, parser_mode=None
+                uploaded = document_use_cases.upload_document(
+                    kb_id, path.name, handle, metadata=None, parser_mode=None
                 )
+            document_ids[path.name] = uploaded.document_id
+            temporary_mapping = mapping_path.with_suffix(".tmp")
+            temporary_mapping.write_text(json.dumps(mapping, ensure_ascii=False), encoding="utf-8")
+            temporary_mapping.replace(mapping_path)
             if number % 100 == 0:
                 print(f"  已提交上传：{number} / {len(files)}", flush=True)
         deadline = time.monotonic() + timeout
         while True:
-            records = container.documents.list_documents(KB_NAME)
+            records = container.documents.list_documents(kb_id)
             pending = [r for r in records if r["status"] == "processing"]
             if not pending:
                 break
@@ -108,10 +151,12 @@ def build_knowledge_base(corpus_dir: Path, timeout: int) -> dict:
     finally:
         index_worker.stop()
 
-    records = container.documents.list_documents(KB_NAME)
-    ready = {r["filename"] for r in records if r["status"] == "ready"}
+    records = container.documents.list_documents(kb_id)
+    ready_ids = {r["document_id"] for r in records if r["status"] == "ready"}
+    ready = {label for label, document_id in document_ids.items() if document_id in ready_ids}
     failed = sorted(wanted - ready)
     return {
+        "document_ids": document_ids,
         "documents": len(wanted),
         "ready": len(ready & wanted),
         "failed": failed,
@@ -128,8 +173,16 @@ def load_questions(data_dir: Path, limit: int) -> list[dict]:
     return rows[:limit] if limit > 0 else rows
 
 
-def sources_of(documents: list) -> list[str]:
-    return [str((doc.metadata or {}).get("source", "")) for doc in documents]
+def document_ids_of(documents: list) -> list[str]:
+    return [str((doc.metadata or {}).get("document_id", "")) for doc in documents]
+
+
+def ranked_labels(document_ids: list[str], labels: dict[str, str]) -> list[str]:
+    """按 document_id 把排名映射回语料标签，与 questions.jsonl 的 gold 对齐。
+
+    身份只认 document_id，同名文档不会合并；映射里没有的 ID 原样保留，不会命中 gold。
+    """
+    return [labels.get(document_id, document_id) for document_id in document_ids]
 
 
 def interleave(groups: list[list]) -> list:
@@ -152,9 +205,16 @@ def agentic_model_config() -> dict:
 
 
 async def evaluate_question(
-    row: dict, container, agentic: bool = False, context_limits: dict | None = None
+    row: dict,
+    container,
+    labels: dict[str, str],
+    agentic: bool = False,
+    context_limits: dict | None = None,
 ) -> dict:
-    """对一道题依次跑各检索配置，返回每个配置的来源排名和耗时（毫秒）。"""
+    """对一道题依次跑各检索配置，返回每个配置的文档排名（语料标签）和耗时（毫秒）。
+
+    `labels` 是 document_id 到语料标签的映射。
+    """
     from services.chat import query as chat_query
     from services.chat import ranking as chat_ranking
     from services.retrieval import context as context_builder
@@ -163,18 +223,21 @@ async def evaluate_question(
     question = row["question"]
     outputs: dict[str, dict] = {}
 
+    def ranked_of(documents: list) -> list[str]:
+        return ranked_labels(document_ids_of(documents), labels)
+
     def record(name: str, ranked: list[str], started: float) -> None:
         outputs[name] = {
             "ranked": ranked,
             "ms": round((time.perf_counter() - started) * 1000, 1),
         }
 
-    with retrieval.request_source_snapshot(KB_NAME, container):
+    kb_id = eval_kb_id(container)
+    with retrieval.request_document_snapshot(kb_id, container):
         from services.retrieval.chunk_index import get_chunk_index
 
         index = get_chunk_index()
-        kb_id = container.knowledge_bases.kb_id_for(KB_NAME)
-        sources = retrieval.source_state.current_source_allowlist(KB_NAME, None)
+        sources = retrieval.source_state.current_document_allowlist(kb_id, None)
         routes = sorted(index.available_routes(kb_id, sources))
         embeddings = retrieval.CachedQueryEmbeddings(container.create_query_embeddings())
         k = retrieval.RETRIEVAL_DENSE_K
@@ -185,7 +248,7 @@ async def evaluate_question(
                 for route in routes
             ]
         )
-        record("fts_only", sources_of(lexical_docs), started)
+        record("fts_only", ranked_of(lexical_docs), started)
 
         started = time.perf_counter()
         query_vector = embeddings.embed_query(question)
@@ -195,31 +258,31 @@ async def evaluate_question(
                 for route in routes
             ]
         )
-        record("vector_only", sources_of(vector_docs), started)
+        record("vector_only", ranked_of(vector_docs), started)
 
         started = time.perf_counter()
-        ensemble = retrieval.build_retriever(KB_NAME, container=container)
+        ensemble = retrieval.build_retriever(kb_id, container=container)
         hybrid_docs = await asyncio.to_thread(ensemble.invoke, question) if ensemble else []
-        record("hybrid", sources_of(hybrid_docs), started)
+        record("hybrid", ranked_of(hybrid_docs), started)
 
     started = time.perf_counter()
     candidates = await chat_query.retrieve_rerank_candidates(
-        KB_NAME, question, False, None, container=container
+        kb_id, question, False, None, container=container
     )
-    record("hybrid_plus_lexical", sources_of(candidates), started)
+    record("hybrid_plus_lexical", ranked_of(candidates), started)
 
     ranked = await chat_ranking.rerank(question, candidates, container=container)
     # 耗时从候选召回开始累计，反映加上重排序后的总成本。
     outputs["hybrid_rerank"] = {
-        "ranked": sources_of(ranked),
+        "ranked": ranked_of(ranked),
         "ms": round((time.perf_counter() - started) * 1000, 1),
     }
 
     spans = await asyncio.to_thread(
-        context_builder.build_context_spans, KB_NAME, ranked, **(context_limits or {})
+        context_builder.build_context_spans, kb_id, ranked, **(context_limits or {})
     )
     outputs["final_context"] = {
-        "ranked": [span.source for span in spans],
+        "ranked": ranked_labels([span.document_id for span in spans], labels),
         "ms": round((time.perf_counter() - started) * 1000, 1),
         "chars": sum(len(span.content) for span in spans),
     }
@@ -229,19 +292,25 @@ async def evaluate_question(
 
         diagnostics = RetrievalDiagnostics(question)
         refined = await refine_evidence(
-            KB_NAME, question, question, ranked, agentic_model_config(), None,
-            container=container, diagnostics=diagnostics,
+            kb_id,
+            question,
+            question,
+            ranked,
+            agentic_model_config(),
+            None,
+            container=container,
+            diagnostics=diagnostics,
         )
         outputs["hybrid_rerank_agentic"] = {
-            "ranked": sources_of(refined),
+            "ranked": ranked_of(refined),
             "ms": round((time.perf_counter() - started) * 1000, 1),
             "rounds": diagnostics.counts.get("agentic_rounds", 0),
         }
         refined_spans = await asyncio.to_thread(
-            context_builder.build_context_spans, KB_NAME, refined, **(context_limits or {})
+            context_builder.build_context_spans, kb_id, refined, **(context_limits or {})
         )
         outputs["final_context_agentic"] = {
-            "ranked": [span.source for span in refined_spans],
+            "ranked": ranked_labels([span.document_id for span in refined_spans], labels),
             "ms": outputs["hybrid_rerank_agentic"]["ms"],
         }
     return outputs
@@ -295,8 +364,10 @@ async def run(args: argparse.Namespace) -> int:
         settings = get_settings()
         set_chunk_index(
             MilvusChunkIndex(
-                settings.milvus_uri, settings.milvus_token,
-                settings.milvus_collection_prefix, settings.embedding_dimension,
+                settings.milvus_uri,
+                settings.milvus_token,
+                settings.milvus_collection_prefix,
+                settings.embedding_dimension,
                 ranker=args.ranker,
             )
         )
@@ -310,6 +381,7 @@ async def run(args: argparse.Namespace) -> int:
 
     questions = load_questions(args.data, args.limit)
     container = get_application_container()
+    labels = {document_id: label for label, document_id in index_stats["document_ids"].items()}
     context_limits = {}
     if args.context_spans > 0:
         context_limits["max_spans"] = args.context_spans
@@ -327,7 +399,9 @@ async def run(args: argparse.Namespace) -> int:
     try:
         for number, row in enumerate(questions, start=1):
             try:
-                outputs = await evaluate_question(row, container, args.agentic, context_limits)
+                outputs = await evaluate_question(
+                    row, container, labels, args.agentic, context_limits
+                )
             except Exception as exc:  # 单题失败不应中断整轮评测
                 errors.append({"id": row["id"], "error": f"{type(exc).__name__}: {exc}"})
                 print(f"[{number}/{len(questions)}] {row['id']} 失败：{exc}", flush=True)

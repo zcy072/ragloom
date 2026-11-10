@@ -17,6 +17,7 @@ class DailyActivityPoint(TypedDict):
 class KnowledgeBaseUsage(TypedDict):
     """某个知识库在统计窗口内被多少人、问了多少次、收到多少差评。"""
 
+    kb_id: str
     kb_name: str
     users: int
     questions: int
@@ -74,6 +75,7 @@ class LoginEventRecord(TypedDict):
 class UserSessionRecord(TypedDict):
     id: str
     title: str
+    kb_id: str
     kb_name: str
     created_at: str
     updated_at: str
@@ -82,6 +84,7 @@ class UserSessionRecord(TypedDict):
 
 class UserQuestionRecord(TypedDict):
     created_at: str
+    kb_id: str
     kb_name: str
     question_preview: str
     status: str
@@ -118,6 +121,7 @@ class ConversationMessage(TypedDict):
 class UserConversation(TypedDict):
     session_id: str
     title: str
+    kb_id: str
     kb_name: str
     username: str
     messages: list[ConversationMessage]

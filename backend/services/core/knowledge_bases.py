@@ -1,35 +1,59 @@
 """Relational persistence for knowledge-base lifecycle and dashboard data."""
 
 import json
+import sqlite3
 import uuid
 from collections.abc import Callable
 from typing import cast
 
+from services.chat import source_access
 from services.core import sqlite_connections as application_db
 from services.core.contracts import (
     DashboardDocumentRow,
     DashboardTrendRow,
+    KnowledgeBase,
     KnowledgeBaseSummary,
 )
+
+COMMON_SYSTEM_KEY = "common"
+
+
+class KnowledgeBaseNameConflict(ValueError):
+    """知识库显示名称已被占用（包括正在删除、尚未清理完的库）。"""
+
+
+def _knowledge_base_from_row(row: tuple[object, ...]) -> KnowledgeBase:
+    """把 knowledge_bases 的 (kb_id, name, system_key, state, created_at) 行转换为记录。"""
+    return KnowledgeBase(
+        kb_id=str(row[0]),
+        name=str(row[1]),
+        system_key=application_db.optional_text(row[2]),
+        state=str(row[3]),
+        created_at=str(row[4]),
+    )
 
 
 def _summary_from_row(row: tuple[object, ...]) -> KnowledgeBaseSummary:
     """把知识库聚合查询结果转换为列表摘要。"""
-    created_at = str(row[1]) if row[1] else ""
+    created_at = str(row[4]) if row[4] else ""
     return {
-        "name": str(row[0]),
+        "kb_id": str(row[0]),
+        "name": str(row[1]),
+        "system_key": application_db.optional_text(row[2]),
+        "state": str(row[3]),
         "date": created_at[:10],
-        "docs": cast(int, row[2]),
+        "docs": cast(int, row[5]),
     }
 
 
 def _dashboard_document_from_row(row: tuple[object, ...]) -> DashboardDocumentRow:
     """把仪表盘文档查询结果转换为带类型的文档记录。"""
     return DashboardDocumentRow(
-        kb_name=str(row[0]),
-        filename=str(row[1]) if row[1] is not None else None,
-        size=cast(int, row[2]) if row[2] is not None else None,
-        status=str(row[3]) if row[3] is not None else None,
+        kb_id=str(row[0]),
+        kb_name=str(row[1]),
+        filename=str(row[2]) if row[2] is not None else None,
+        size=cast(int, row[3]) if row[3] is not None else None,
+        status=str(row[4]) if row[4] is not None else None,
     )
 
 
@@ -43,69 +67,183 @@ def _dashboard_trend_from_row(row: tuple[object, ...]) -> DashboardTrendRow:
 
 
 class KnowledgeBaseStore:
-    """Persist knowledge-base lifecycle state and cross-table references."""
+    """Persist knowledge-base lifecycle state; every lookup is by `kb_id`."""
 
     def __init__(
         self,
         db_file: Callable[[], str],
         now: Callable[[], str],
         validate_kb_name: Callable[[str], str],
+        validate_kb_id: Callable[[str], str],
     ) -> None:
-        """保存延迟解析的数据库路径、时钟和名称校验依赖。"""
+        """保存延迟解析的数据库路径、时钟和名称、ID 校验依赖。"""
         self._db_file = db_file
         self._now = now
         self._validate_kb_name = validate_kb_name
+        self._validate_kb_id = validate_kb_id
 
-    def exists(self, kb_name: str) -> bool:
-        """判断通过校验的知识库是否存在。"""
-        kb_name = self._validate_kb_name(kb_name)
+    def get(self, kb_id: str) -> KnowledgeBase | None:
+        """按 ID 返回知识库记录（含 deleting 状态），不存在时返回 None。"""
+        kb_id = self._validate_kb_id(kb_id)
         with application_db.connect(self._db_file()) as conn:
             row = conn.execute(
-                "SELECT 1 FROM knowledge_bases WHERE name = ?", (kb_name,)
+                "SELECT kb_id, name, system_key, state, created_at "
+                "FROM knowledge_bases WHERE kb_id = ?",
+                (kb_id,),
+            ).fetchone()
+        return _knowledge_base_from_row(row) if row else None
+
+    def exists(self, kb_id: str) -> bool:
+        """判断知识库是否存在且处于 active 状态。"""
+        kb_id = self._validate_kb_id(kb_id)
+        with application_db.connect(self._db_file()) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM knowledge_bases WHERE kb_id = ? AND state = 'active'",
+                (kb_id,),
             ).fetchone()
         return row is not None
 
-    def list_summaries(self) -> list[KnowledgeBaseSummary]:
-        """返回知识库列表及其创建时间和文档数量。"""
-        with application_db.connect(self._db_file()) as conn:
-            rows = conn.execute(
-                "SELECT kb.name, kb.created_at, COUNT(doc.id) "
-                "FROM knowledge_bases kb "
-                "LEFT JOIN documents doc ON kb.name = doc.kb_name "
-                "GROUP BY kb.name"
-            ).fetchall()
-        return [_summary_from_row(row) for row in rows]
-
-    def create(self, kb_name: str, chunk_size: int, chunk_overlap: int) -> None:
-        """创建知识库并写入稳定的 kb_id 与初始分块配置。"""
-        kb_name = self._validate_kb_name(kb_name)
-        with application_db.connect(self._db_file()) as conn:
-            conn.execute(
-                "INSERT INTO knowledge_bases "
-                "(name, kb_id, created_at, chunk_size, chunk_overlap) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (kb_name, str(uuid.uuid4()), self._now(), chunk_size, chunk_overlap),
-            )
-
-    def kb_id_for(self, kb_name: str) -> str | None:
-        """返回知识库的稳定 kb_id，知识库不存在时返回 None。"""
-        kb_name = self._validate_kb_name(kb_name)
+    def common_kb_id(self) -> str | None:
+        """返回通用知识库的 ID；它由 system_key 识别，与显示名称无关。"""
         with application_db.connect(self._db_file()) as conn:
             row = conn.execute(
-                "SELECT kb_id FROM knowledge_bases WHERE name = ?", (kb_name,)
+                "SELECT kb_id FROM knowledge_bases WHERE system_key = ? AND state = 'active'",
+                (COMMON_SYSTEM_KEY,),
             ).fetchone()
         return str(row[0]) if row else None
 
+    def names_for(self, kb_ids: list[str]) -> dict[str, str]:
+        """批量取当前显示名称，仅用于响应展示；已删除的 ID 不出现在结果里。"""
+        if not kb_ids:
+            return {}
+        placeholders = ",".join("?" for _ in kb_ids)
+        with application_db.connect(self._db_file()) as conn:
+            rows = conn.execute(
+                f"SELECT kb_id, name FROM knowledge_bases WHERE kb_id IN ({placeholders})",
+                tuple(kb_ids),
+            ).fetchall()
+        return {str(kb_id): str(name) for kb_id, name in rows}
+
+    def list_summaries(self, *, include_deleting: bool = False) -> list[KnowledgeBaseSummary]:
+        """返回知识库列表及其创建时间和文档数量；默认只含 active。"""
+        statement = (
+            "SELECT kb.kb_id, kb.name, kb.system_key, kb.state, kb.created_at, "
+            "COUNT(doc.document_id) FROM knowledge_bases kb "
+            "LEFT JOIN documents doc ON kb.kb_id = doc.kb_id "
+        )
+        if not include_deleting:
+            statement += "WHERE kb.state = 'active' "
+        statement += "GROUP BY kb.kb_id"
+        with application_db.connect(self._db_file()) as conn:
+            rows = conn.execute(statement).fetchall()
+        return [_summary_from_row(row) for row in rows]
+
+    def create(
+        self,
+        name: str,
+        chunk_size: int,
+        chunk_overlap: int,
+        *,
+        system_key: str | None = None,
+        grant_role_id: int | None = None,
+    ) -> KnowledgeBase:
+        """创建知识库，生成不可变的 kb_id；名称已被占用时抛出 KnowledgeBaseNameConflict。
+
+        grant_role_id 不为空时，在同一事务里把新知识库授予该角色。
+        """
+        name = self._validate_kb_name(name)
+        record = KnowledgeBase(str(uuid.uuid4()), name, system_key, "active", self._now())
+        try:
+            with application_db.connect(self._db_file()) as conn:
+                conn.execute(
+                    "INSERT INTO knowledge_bases "
+                    "(kb_id, name, system_key, state, created_at, chunk_size, chunk_overlap) "
+                    "VALUES (?, ?, ?, 'active', ?, ?, ?)",
+                    (
+                        record.kb_id,
+                        record.name,
+                        record.system_key,
+                        record.created_at,
+                        chunk_size,
+                        chunk_overlap,
+                    ),
+                )
+                if grant_role_id is not None:
+                    conn.execute(
+                        "INSERT INTO role_knowledge_bases (role_id, kb_id) VALUES (?, ?)",
+                        (grant_role_id, record.kb_id),
+                    )
+        except sqlite3.IntegrityError as exc:
+            raise KnowledgeBaseNameConflict("知识库名称已存在") from exc
+        return record
+
+    def rename(self, kb_id: str, new_name: str) -> KnowledgeBase:
+        """只更新显示名称：一个事务、一行 UPDATE，不触碰文件、任务、权限或索引。
+
+        不存在或不处于 active 状态时抛出 LookupError，名称冲突时抛出
+        KnowledgeBaseNameConflict。
+        """
+        kb_id = self._validate_kb_id(kb_id)
+        new_name = self._validate_kb_name(new_name)
+        try:
+            with application_db.connect(self._db_file()) as conn:
+                cursor = conn.execute(
+                    "UPDATE knowledge_bases SET name = ? WHERE kb_id = ? AND state = 'active'",
+                    (new_name, kb_id),
+                )
+                if cursor.rowcount != 1:
+                    raise LookupError("知识库不存在")
+                row = conn.execute(
+                    "SELECT kb_id, name, system_key, state, created_at "
+                    "FROM knowledge_bases WHERE kb_id = ?",
+                    (kb_id,),
+                ).fetchone()
+        except sqlite3.IntegrityError as exc:
+            raise KnowledgeBaseNameConflict("知识库名称已存在") from exc
+        return _knowledge_base_from_row(row)
+
+    def mark_deleting(self, kb_id: str) -> KnowledgeBase | None:
+        """把 active 的库改为 deleting 并清空重建指针；已在 deleting 则幂等返回。
+
+        不存在时返回 None。调用方必须已持有该 kb_id 的整库锁。
+        """
+        kb_id = self._validate_kb_id(kb_id)
+        with application_db.connect(self._db_file()) as conn:
+            conn.execute(
+                "UPDATE knowledge_bases SET state = 'deleting', "
+                "active_rebuild_job_id = NULL WHERE kb_id = ?",
+                (kb_id,),
+            )
+            row = conn.execute(
+                "SELECT kb_id, name, system_key, state, created_at "
+                "FROM knowledge_bases WHERE kb_id = ?",
+                (kb_id,),
+            ).fetchone()
+        return _knowledge_base_from_row(row) if row else None
+
+    def deleting_ids(self) -> list[str]:
+        """返回上次未完成删除的知识库 ID，供启动时重试清理。"""
+        with application_db.connect(self._db_file()) as conn:
+            rows = conn.execute(
+                "SELECT kb_id FROM knowledge_bases WHERE state = 'deleting'"
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
     @staticmethod
-    def _rewrite_chat_sources(conn, old_name: str, new_name: str | None) -> None:
-        """重命名或移除已保存引用中的知识库名称。"""
+    def _strip_chat_sources(conn: sqlite3.Connection, kb_id: str) -> None:
+        """从其他会话已保存的引用中移除指向该库的顶层来源和嵌套 evidence。
+
+        只按结构化的 kb_id 字段匹配，不触碰回答正文。
+        """
         rows = conn.execute(
             "SELECT id, sources FROM chat_messages "
             "WHERE EXISTS ("
             "SELECT 1 FROM json_each("
             "CASE WHEN json_valid(chat_messages.sources) THEN chat_messages.sources ELSE '[]' END"
-            ") AS source WHERE json_extract(source.value, '$.kb_name') = ?)",
-            (old_name,),
+            ") AS source WHERE json_extract(source.value, '$.kb_id') = ? "
+            "OR EXISTS (SELECT 1 FROM json_each(source.value, '$.evidence') AS ev "
+            "WHERE json_extract(ev.value, '$.kb_id') = ?))",
+            (kb_id, kb_id),
         ).fetchall()
         for message_id, raw_sources in rows:
             try:
@@ -114,143 +252,77 @@ class KnowledgeBaseStore:
                 continue
             if not isinstance(sources, list):
                 continue
-            changed = False
-            rewritten = []
+            kept = []
             for source in sources:
-                source_kb_name = source.get("kb_name") if isinstance(source, dict) else None
-                if isinstance(source, dict) and source_kb_name == old_name:
-                    changed = True
-                    if new_name is None:
-                        continue
-                    source = {**source, "kb_name": new_name}
-                rewritten.append(source)
-            if changed:
-                conn.execute(
-                    "UPDATE chat_messages SET sources = ? WHERE id = ?",
-                    (json.dumps(rewritten, ensure_ascii=False), message_id),
+                if not isinstance(source, dict):
+                    kept.append(source)
+                    continue
+                if source.get("kb_id") == kb_id:
+                    continue
+                evidence = source.get("evidence")
+                if isinstance(evidence, list):
+                    source = {
+                        **source,
+                        "evidence": [
+                            item
+                            for item in evidence
+                            if not (isinstance(item, dict) and item.get("kb_id") == kb_id)
+                        ],
+                    }
+                kept.append(source)
+            conn.execute(
+                "UPDATE chat_messages SET sources = ? WHERE id = ?",
+                (json.dumps(kept, ensure_ascii=False), message_id),
+            )
+
+    def delete_relational_data(self, kb_id: str) -> None:
+        """外部资源清理完成后，一个事务内删除知识库行；其余记录由外键级联清理。"""
+        kb_id = self._validate_kb_id(kb_id)
+        with application_db.connect(self._db_file()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            traces = conn.execute(
+                "SELECT id, payload FROM chat_traces WHERE EXISTS "
+                "(SELECT 1 FROM json_tree(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END) "
+                "WHERE key = 'kb_id' AND value = ?)",
+                (kb_id,),
+            ).fetchall()
+            for trace_id, raw_payload in traces:
+                payload = json.loads(raw_payload)
+                filtered = source_access.filter_trace_payload(
+                    payload, lambda source_id: source_id != kb_id
                 )
-
-    @staticmethod
-    def _rewrite_role_permissions(conn, old_name: str, new_name: str | None) -> None:
-        """在所有角色权限列表中重命名或移除知识库。"""
-        rows = conn.execute(
-            "SELECT id, knowledge_base_permissions FROM roles "
-            "WHERE EXISTS ("
-            "SELECT 1 FROM json_each("
-            "CASE WHEN json_valid(roles.knowledge_base_permissions) "
-            "THEN roles.knowledge_base_permissions ELSE '[]' END"
-            ") AS permission WHERE permission.value = ?)",
-            (old_name,),
-        ).fetchall()
-        for role_id, raw_permissions in rows:
-            try:
-                permissions = json.loads(raw_permissions or "[]")
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(permissions, list) or old_name not in permissions:
-                continue
-            rewritten = [new_name if item == old_name else item for item in permissions]
-            rewritten = list(dict.fromkeys(item for item in rewritten if item))
-            conn.execute(
-                "UPDATE roles SET knowledge_base_permissions = ? WHERE id = ?",
-                (json.dumps(rewritten, ensure_ascii=False), role_id),
-            )
-
-    def delete_relational_data(self, kb_name: str) -> None:
-        """在一个事务中删除知识库拥有的全部主数据库记录。"""
-        kb_name = self._validate_kb_name(kb_name)
-        with application_db.connect(self._db_file()) as conn:
-            conn.execute(
-                "DELETE FROM chat_session_memory WHERE session_id IN "
-                "(SELECT id FROM chat_sessions WHERE kb_name = ?)",
-                (kb_name,),
-            )
-            conn.execute(
-                "DELETE FROM chat_messages WHERE session_id IN "
-                "(SELECT id FROM chat_sessions WHERE kb_name = ?)",
-                (kb_name,),
-            )
-            conn.execute(
-                "DELETE FROM chat_traces WHERE session_id IN "
-                "(SELECT id FROM chat_sessions WHERE kb_name = ?)",
-                (kb_name,),
-            )
-            conn.execute("DELETE FROM chat_sessions WHERE kb_name = ?", (kb_name,))
-            self._rewrite_chat_sources(conn, kb_name, None)
-            self._rewrite_role_permissions(conn, kb_name, None)
-            conn.execute(
-                "DELETE FROM parent_chunks WHERE kb_id = "
-                "(SELECT kb_id FROM knowledge_bases WHERE name = ?)",
-                (kb_name,),
-            )
-            conn.execute("DELETE FROM knowledge_bases WHERE name = ?", (kb_name,))
-            conn.execute("DELETE FROM documents WHERE kb_name = ?", (kb_name,))
-
-    def rename_relational_data(
-        self, old_name: str, new_name: str, old_path: str, new_path: str
-    ) -> None:
-        """外部文件迁移完成后，统一改写主数据库中的知识库引用。"""
-        old_name = self._validate_kb_name(old_name)
-        new_name = self._validate_kb_name(new_name)
-        with application_db.connect(self._db_file()) as conn:
-            conn.execute(
-                "UPDATE knowledge_bases SET name = ?, active_rebuild_job_id = '' "
-                "WHERE name = ?",
-                (new_name, old_name),
-            )
-            conn.execute(
-                # 只替换路径前缀，文件名里出现旧知识库名时保持不变。
-                "UPDATE documents SET kb_name = ?, path = CASE "
-                "WHEN substr(path, 1, length(?)) = ? THEN ? || substr(path, length(?) + 1) "
-                "ELSE path END WHERE kb_name = ?",
-                (new_name, old_path, old_path, new_path, old_path, old_name),
-            )
-            conn.execute(
-                "UPDATE index_jobs SET kb_name = ? WHERE kb_name = ?",
-                (new_name, old_name),
-            )
-            # 追踪和运行记录按知识库名做权限校验，改名后必须同步，否则原有记录会变得不可读。
-            conn.execute(
-                "UPDATE chat_traces SET kb_name = ? WHERE kb_name = ?",
-                (new_name, old_name),
-            )
-            conn.execute(
-                "UPDATE chat_runs SET kb_name = ? WHERE kb_name = ?",
-                (new_name, old_name),
-            )
-            conn.execute(
-                "UPDATE chat_sessions "
-                "SET kb_name = ?, title = CASE WHEN title = ? THEN ? ELSE title END "
-                "WHERE kb_name = ?",
-                (new_name, f"{old_name} 会话", f"{new_name} 会话", old_name),
-            )
-            self._rewrite_chat_sources(conn, old_name, new_name)
-            self._rewrite_role_permissions(conn, old_name, new_name)
+                conn.execute(
+                    "UPDATE chat_traces SET payload = ? WHERE id = ?",
+                    (json.dumps(filtered, ensure_ascii=False), trace_id),
+                )
+            self._strip_chat_sources(conn, kb_id)
+            conn.execute("DELETE FROM knowledge_bases WHERE kb_id = ?", (kb_id,))
 
     def dashboard_documents(
-        self, allowed_kbs: tuple[str, ...] | None
+        self, allowed_kb_ids: tuple[str, ...] | None
     ) -> list[DashboardDocumentRow]:
         """返回用于汇总仪表盘状态和容量的数据行。"""
-        if allowed_kbs is not None and not allowed_kbs:
+        if allowed_kb_ids is not None and not allowed_kb_ids:
             return []
         statement = (
-            "SELECT kb.name, doc.filename, doc.size, doc.status "
-            "FROM knowledge_bases kb LEFT JOIN documents doc ON doc.kb_name = kb.name"
+            "SELECT kb.kb_id, kb.name, doc.filename, doc.size, doc.status "
+            "FROM knowledge_bases kb LEFT JOIN documents doc ON doc.kb_id = kb.kb_id "
+            "WHERE kb.state = 'active'"
         )
         params: tuple[str, ...] = ()
-        if allowed_kbs is not None:
-            placeholders = ",".join("?" for _ in allowed_kbs)
-            statement += f" WHERE kb.name IN ({placeholders})"
-            params = allowed_kbs
-        statement += " ORDER BY doc.id"
+        if allowed_kb_ids is not None:
+            placeholders = ",".join("?" for _ in allowed_kb_ids)
+            statement += f" AND kb.kb_id IN ({placeholders})"
+            params = allowed_kb_ids
+        statement += " ORDER BY kb.rowid, doc.uploaded_at, doc.document_id"
         with application_db.connect(self._db_file()) as conn:
             rows = conn.execute(statement, params).fetchall()
         return [_dashboard_document_from_row(row) for row in rows]
 
     def dashboard_trend(
         self,
-        allowed_kbs: tuple[str, ...] | None,
-        visible_kbs: list[str],
+        allowed_kb_ids: tuple[str, ...] | None,
+        visible_kb_ids: list[str],
         *,
         days: int,
     ) -> list[DashboardTrendRow]:
@@ -259,11 +331,10 @@ class KnowledgeBaseStore:
         时间以 UTC 保存，按本地日期分组，与用户分析一致。
         """
         window = (
-            "strftime('%Y-%m-%dT%H:%M:%S', "
-            f"DATE('now', 'localtime', '-{int(days)} days'), 'utc')"
+            f"strftime('%Y-%m-%dT%H:%M:%S', DATE('now', 'localtime', '-{int(days)} days'), 'utc')"
         )
         with application_db.connect(self._db_file()) as conn:
-            if allowed_kbs is None:
+            if allowed_kb_ids is None:
                 rows = conn.execute(
                     "SELECT DATE(created_at, 'localtime'), "
                     "SUM(CASE WHEN role = 'user' THEN 1 ELSE 0 END), "
@@ -272,16 +343,16 @@ class KnowledgeBaseStore:
                     "GROUP BY 1 ORDER BY 1"
                 ).fetchall()
                 return [_dashboard_trend_from_row(row) for row in rows]
-            if not visible_kbs:
+            if not visible_kb_ids:
                 return []
-            placeholders = ",".join("?" for _ in visible_kbs)
+            placeholders = ",".join("?" for _ in visible_kb_ids)
             rows = conn.execute(
                 "SELECT DATE(m.created_at, 'localtime'), "
                 "SUM(CASE WHEN m.role = 'user' THEN 1 ELSE 0 END), "
                 "SUM(CASE WHEN m.role = 'assistant' THEN 1 ELSE 0 END) "
                 "FROM chat_messages m JOIN chat_sessions s ON s.id = m.session_id "
-                f"WHERE m.created_at >= {window} AND s.kb_name IN ({placeholders}) "
+                f"WHERE m.created_at >= {window} AND s.kb_id IN ({placeholders}) "
                 "GROUP BY 1 ORDER BY 1",
-                visible_kbs,
+                visible_kb_ids,
             ).fetchall()
             return [_dashboard_trend_from_row(row) for row in rows]

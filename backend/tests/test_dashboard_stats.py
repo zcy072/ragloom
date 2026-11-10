@@ -8,37 +8,65 @@ import app_storage
 from routers import knowledge_bases, schemas
 from services.core import sqlite_connections as application_db
 from services.identity import auth as auth_service
-from tests.support import IsolatedStorageTestCase, add_knowledge_bases
+from tests.support import IsolatedStorageTestCase, add_knowledge_bases, fixture_document_id
 
 
 class DashboardStatsTest(IsolatedStorageTestCase):
     def setUp(self):
         super().setUp()
         app_storage.initialize_database()
-        add_knowledge_bases("研发知识库", "财务知识库", "空知识库")
+        self.rd, self.fin, self.empty = add_knowledge_bases("研发知识库", "财务知识库", "空知识库")
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             now = conn.execute("SELECT datetime('now')").fetchone()[0]
             conn.executemany(
                 """
                 INSERT INTO documents
-                    (kb_name, filename, path, size, uploaded_at, status)
+                    (document_id, kb_id, filename, size, uploaded_at, status)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    ("研发知识库", "规范.pdf", "a", 1024, now, "ready"),
-                    ("研发知识库", "说明.txt", "b", 2048, now, "error"),
-                    ("研发知识库", "附录.PDF", "c", 512, now, "processing"),
-                    ("财务知识库", "报表.docx", "d", 1024 * 1024, now, "ready"),
-                    ("财务知识库", "README", "e", 0, now, "ready"),
+                    (
+                        fixture_document_id(self.rd, "规范.pdf"),
+                        self.rd,
+                        "规范.pdf",
+                        1024,
+                        now,
+                        "ready",
+                    ),
+                    (
+                        fixture_document_id(self.rd, "说明.txt"),
+                        self.rd,
+                        "说明.txt",
+                        2048,
+                        now,
+                        "error",
+                    ),
+                    (
+                        fixture_document_id(self.rd, "附录.PDF"),
+                        self.rd,
+                        "附录.PDF",
+                        512,
+                        now,
+                        "processing",
+                    ),
+                    (
+                        fixture_document_id(self.fin, "报表.docx"),
+                        self.fin,
+                        "报表.docx",
+                        1024 * 1024,
+                        now,
+                        "ready",
+                    ),
+                    (fixture_document_id(self.fin, "README"), self.fin, "README", 0, now, "ready"),
                 ],
             )
             conn.executemany(
                 """
                 INSERT INTO chat_sessions
-                    (id, account_id, username, kb_name, title, created_at, updated_at)
+                    (id, account_id, username, kb_id, title, created_at, updated_at)
                 VALUES (?, 1, 'user', ?, 'session', ?, ?)
                 """,
-                [("session-rd", "研发知识库", now, now), ("session-fin", "财务知识库", now, now)],
+                [("session-rd", self.rd, now, now), ("session-fin", self.fin, now, now)],
             )
             conn.executemany(
                 """
@@ -55,20 +83,21 @@ class DashboardStatsTest(IsolatedStorageTestCase):
             today = conn.execute("SELECT DATE('now', 'localtime')").fetchone()[0]
         self.today = today[5:]
 
-    def _stats(self, permissions: tuple[str, ...]) -> dict:
+    def _stats(self, kb_ids: tuple[str, ...] = (), *, all_knowledge_bases: bool = False) -> dict:
         result = knowledge_bases.dashboard_stats(
             auth_service.Principal(
                 username="viewer",
                 role="user",
                 menu_permissions=("仪表盘统计",),
-                knowledge_base_permissions=permissions,
+                all_knowledge_bases=all_knowledge_bases,
+                knowledge_base_ids=kb_ids,
             )
         )
         schemas.DashboardStatsResponse.model_validate(result)
         return result
 
     def test_restricted_dashboard_contains_only_existing_authorized_knowledge_bases(self):
-        result = self._stats(("研发知识库", "空知识库", "不存在"))
+        result = self._stats((self.rd, self.empty, "不存在"))
 
         self.assertEqual((result["kbs"], result["docs"], result["tasks"]), (2, 3, 1))
         self.assertEqual(result["size"], "3.5 KB")
@@ -76,6 +105,7 @@ class DashboardStatsTest(IsolatedStorageTestCase):
         self.assertEqual(
             result["kb_list"][0],
             {
+                "kb_id": self.rd,
                 "name": "研发知识库",
                 "docs": 3,
                 "size": "3.5 KB",
@@ -99,7 +129,7 @@ class DashboardStatsTest(IsolatedStorageTestCase):
         )
 
     def test_company_wide_dashboard_includes_all_knowledge_bases(self):
-        result = self._stats(("全公司",))
+        result = self._stats(all_knowledge_bases=True)
 
         self.assertEqual((result["kbs"], result["docs"], result["tasks"]), (3, 5, 1))
         self.assertEqual(result["size"], "1.0 MB")
@@ -139,23 +169,28 @@ class DashboardStatsTest(IsolatedStorageTestCase):
             return conn
 
         with patch.object(application_db.sqlite3, "connect", side_effect=traced_connect):
-            self._stats(("研发知识库", "财务知识库"))
+            self._stats((self.rd, self.fin))
 
-        selects = [statement for statement in statements if statement.lstrip().upper().startswith("SELECT")]
+        selects = [
+            statement for statement in statements if statement.lstrip().upper().startswith("SELECT")
+        ]
         self.assertEqual(len(selects), 2)
-        self.assertFalse(any("SELECT filename FROM documents" in statement for statement in selects))
+        self.assertFalse(
+            any("SELECT filename FROM documents" in statement for statement in selects)
+        )
 
     def test_dashboard_rows_are_mapped_to_named_contracts(self):
-        document = app_storage.knowledge_bases.dashboard_documents(("研发知识库",))[0]
-        trend = app_storage.knowledge_bases.dashboard_trend(
-            ("研发知识库",), ["研发知识库"], days=30
-        )[0]
+        document = next(
+            row
+            for row in app_storage.knowledge_bases.dashboard_documents((self.rd,))
+            if row.filename == "规范.pdf"
+        )
+        trend = app_storage.knowledge_bases.dashboard_trend((self.rd,), [self.rd], days=30)[0]
 
-        self.assertEqual(document.kb_name, "研发知识库")
+        self.assertEqual((document.kb_id, document.kb_name), (self.rd, "研发知识库"))
         self.assertEqual(document.filename, "规范.pdf")
         self.assertEqual(trend.date[5:], self.today)
         self.assertEqual((trend.question_count, trend.answer_count), (1, 1))
-
 
     def test_trend_groups_by_local_date(self):
         previous_tz = os.environ.get("TZ")
@@ -176,9 +211,7 @@ class DashboardStatsTest(IsolatedStorageTestCase):
             utc_evening = conn.execute(
                 "SELECT strftime('%Y-%m-%dT20:00:00+00:00', 'now', '-1 day')"
             ).fetchone()[0]
-            local_day = conn.execute(
-                "SELECT DATE(?, 'localtime')", (utc_evening,)
-            ).fetchone()[0]
+            local_day = conn.execute("SELECT DATE(?, 'localtime')", (utc_evening,)).fetchone()[0]
             conn.execute(
                 "INSERT INTO chat_messages (session_id, role, content, created_at) "
                 "VALUES ('session-rd', 'user', 'q', ?)",
@@ -189,6 +222,7 @@ class DashboardStatsTest(IsolatedStorageTestCase):
 
         self.assertNotEqual(utc_evening[:10], local_day)
         self.assertEqual([(row.date, row.question_count) for row in trend], [(local_day, 1)])
+
 
 if __name__ == "__main__":
     unittest.main()

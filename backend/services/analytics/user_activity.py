@@ -29,6 +29,7 @@ from services.analytics.contracts import (
     UserQuestionRecord,
     UserSessionRecord,
 )
+from services.chat import source_access
 from services.core import sqlite_connections as application_db
 from services.core.errors import ResourceNotFoundError
 from services.identity.pagination import like_pattern, page_of, resolve_page_window
@@ -69,14 +70,12 @@ def _clamp_days(days: int) -> int:
     return max(1, min(days, DAYS_MAX))
 
 
-def overview(
-    db_file: str, *, days: int, visible_kbs: tuple[str, ...] | None
-) -> ActivityOverview:
+def overview(db_file: str, *, days: int, visible_kbs: tuple[str, ...] | None) -> ActivityOverview:
     """统计窗口内的用户规模、活跃度、按天趋势、按小时分布和各知识库使用情况。"""
     days = _clamp_days(days)
     start, dates = _window_start(days)
-    run_kb, run_kb_params = _kb_filter("kb_name", visible_kbs)
-    trace_kb, trace_kb_params = _kb_filter("kb_name", visible_kbs)
+    run_kb, run_kb_params = _kb_filter("kb_id", visible_kbs)
+    trace_kb, trace_kb_params = _kb_filter("kb_id", visible_kbs)
     with application_db.connect(db_file) as conn:
         total_users, pending_users, new_users = conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(status = '审核中'), 0), "
@@ -158,25 +157,35 @@ def _knowledge_base_usage(
     account_id: int | None,
 ) -> list[KnowledgeBaseUsage]:
     """按知识库汇总提问人数、提问数和差评数，按提问数降序。"""
-    run_kb, run_kb_params = _kb_filter("kb_name", visible_kbs)
+    run_kb, run_kb_params = _kb_filter("kb_id", visible_kbs)
     account_clause = " AND account_id = ?" if account_id is not None else ""
     account_params = [account_id] if account_id is not None else []
     usage: dict[str, KnowledgeBaseUsage] = {}
-    for kb_name, users, count in conn.execute(
-        f"SELECT kb_name, COUNT(DISTINCT account_id), COUNT(*) FROM chat_runs "
-        f"WHERE created_at >= ?{run_kb}{account_clause} GROUP BY kb_name",
+    for kb_id, users, count in conn.execute(
+        f"SELECT kb_id, COUNT(DISTINCT account_id), COUNT(*) FROM chat_runs "
+        f"WHERE created_at >= ?{run_kb}{account_clause} GROUP BY kb_id",
         (start, *run_kb_params, *account_params),
-    ):
-        usage[str(kb_name)] = {
-            "kb_name": str(kb_name), "users": int(users), "questions": int(count), "downvotes": 0,
+    ).fetchall():
+        usage[str(kb_id)] = {
+            "kb_id": str(kb_id),
+            "kb_name": "",
+            "users": int(users),
+            "questions": int(count),
+            "downvotes": 0,
         }
-    for kb_name, downvotes in conn.execute(
-        f"SELECT kb_name, COUNT(*) FROM chat_traces "
-        f"WHERE created_at >= ? AND feedback = -1{run_kb}{account_clause} GROUP BY kb_name",
+    for kb_id, downvotes in conn.execute(
+        f"SELECT kb_id, COUNT(*) FROM chat_traces "
+        f"WHERE created_at >= ? AND feedback = -1{run_kb}{account_clause} GROUP BY kb_id",
         (start, *run_kb_params, *account_params),
-    ):
-        if str(kb_name) in usage:
-            usage[str(kb_name)]["downvotes"] = int(downvotes)
+    ).fetchall():
+        if str(kb_id) in usage:
+            usage[str(kb_id)]["downvotes"] = int(downvotes)
+    if usage:
+        marks = ",".join("?" for _ in usage)
+        for kb_id, name in conn.execute(
+            f"SELECT kb_id, name FROM knowledge_bases WHERE kb_id IN ({marks})", tuple(usage)
+        ).fetchall():
+            usage[str(kb_id)]["kb_name"] = str(name)
     return sorted(usage.values(), key=lambda item: (-item["questions"], item["kb_name"]))
 
 
@@ -194,7 +203,7 @@ def _user_rows_statement(
     *, visible_kbs: tuple[str, ...] | None, where: str, order_by: str
 ) -> tuple[str, dict]:
     """构造用户统计查询；返回 SQL 和知识库过滤用到的命名参数。"""
-    kb_clause, kb_params = _kb_named_filter("kb_name", visible_kbs)
+    kb_clause, kb_params = _kb_named_filter("kb_id", visible_kbs)
     statement = f"""
         WITH q AS (
             SELECT account_id, COUNT(*) AS questions,
@@ -326,13 +335,17 @@ def user_detail(
     """返回单个用户的统计、按天提问数、知识库分布、最近登录、会话和提问。"""
     days = _clamp_days(days)
     start, dates = _window_start(days)
-    run_kb, run_kb_params = _kb_filter("kb_name", visible_kbs)
-    session_kb, session_kb_params = _kb_filter("s.kb_name", visible_kbs)
-    question_kb, question_kb_params = _kb_filter("r.kb_name", visible_kbs)
+    run_kb, run_kb_params = _kb_filter("kb_id", visible_kbs)
+    session_kb, session_kb_params = _kb_filter("s.kb_id", visible_kbs)
+    question_kb, question_kb_params = _kb_filter("r.kb_id", visible_kbs)
     with application_db.connect(db_file) as conn:
         rows = _query_user_rows(
-            conn, start=start, visible_kbs=visible_kbs,
-            where="WHERE a.id = :user_id", order_by="", extra={"user_id": user_id},
+            conn,
+            start=start,
+            visible_kbs=visible_kbs,
+            where="WHERE a.id = :user_id",
+            order_by="",
+            extra={"user_id": user_id},
         )
         if not rows:
             raise ResourceNotFoundError("用户不存在", code="user_not_found")
@@ -373,17 +386,18 @@ def user_detail(
             {
                 "id": str(session_id),
                 "title": str(title),
+                "kb_id": str(kb_id),
                 "kb_name": str(kb_name),
                 "created_at": str(created_at),
                 "updated_at": str(updated_at),
                 "questions": int(questions),
             }
-            for session_id, title, kb_name, created_at, updated_at, questions in conn.execute(
+            for session_id, title, kb_id, kb_name, created_at, updated_at, questions in conn.execute(
                 f"""
-                SELECT s.id, s.title, s.kb_name, s.created_at, s.updated_at,
+                SELECT s.id, s.title, s.kb_id, k.name, s.created_at, s.updated_at,
                        (SELECT COUNT(*) FROM chat_messages m
                          WHERE m.session_id = s.id AND m.role = 'user')
-                FROM chat_sessions s
+                FROM chat_sessions s JOIN knowledge_bases k ON k.kb_id = s.kb_id
                 WHERE s.account_id = ?{session_kb}
                 ORDER BY s.updated_at DESC LIMIT ?
                 """,
@@ -393,17 +407,19 @@ def user_detail(
         recent_questions: list[UserQuestionRecord] = [
             {
                 "created_at": str(created_at),
+                "kb_id": str(kb_id),
                 "kb_name": str(kb_name),
                 "question_preview": str(preview),
                 "status": str(status),
                 "total_ms": float(total_ms),
                 "feedback": int(feedback or 0),
             }
-            for created_at, kb_name, preview, status, total_ms, feedback in conn.execute(
+            for created_at, kb_id, kb_name, preview, status, total_ms, feedback in conn.execute(
                 f"""
-                SELECT r.created_at, r.kb_name, r.question_preview, r.status, r.total_ms,
+                SELECT r.created_at, r.kb_id, k.name, r.question_preview, r.status, r.total_ms,
                        t.feedback
                 FROM chat_runs r LEFT JOIN chat_traces t ON t.run_id = r.id
+                JOIN knowledge_bases k ON k.kb_id = r.kb_id
                 WHERE r.account_id = ?{question_kb}
                 ORDER BY r.id DESC LIMIT ?
                 """,
@@ -425,7 +441,7 @@ def user_detail(
     }
 
 
-def _source_names(raw_sources: object) -> list[str]:
+def _source_names(raw_sources: object, readable: source_access.KbReadable) -> list[str]:
     """从消息的来源快照中取出去重后的文件名；损坏的快照按没有来源处理。"""
     try:
         sources = json.loads(str(raw_sources or "[]"))
@@ -434,24 +450,34 @@ def _source_names(raw_sources: object) -> list[str]:
     if not isinstance(sources, list):
         return []
     names = [
-        str(item.get("source") or "") for item in sources if isinstance(item, dict)
+        str(item.get("source") or "")
+        for item in source_access.filter_message_sources(sources, readable)
+        if isinstance(item, dict)
     ]
     return list(dict.fromkeys(name for name in names if name))
 
 
 def find_session_owner(
     conn: sqlite3.Connection, user_id: int, session_id: str
-) -> tuple[str, str, str] | None:
-    """返回属于该用户的会话的 (知识库, 标题, 用户名)；不存在或不属于该用户时返回 None。"""
+) -> tuple[str, str, str, str] | None:
+    """返回属于该用户的会话的 (知识库 ID, 知识库名称, 标题, 用户名)；不存在或不属于该用户时返回 None。"""
     row = conn.execute(
-        "SELECT kb_name, title, username FROM chat_sessions WHERE id = ? AND account_id = ?",
+        "SELECT s.kb_id, k.name, s.title, s.username FROM chat_sessions s "
+        "JOIN knowledge_bases k ON k.kb_id = s.kb_id WHERE s.id = ? AND s.account_id = ? AND k.state = 'active'",
         (session_id, user_id),
     ).fetchone()
-    return (str(row[0]), str(row[1]), str(row[2])) if row else None
+    return (str(row[0]), str(row[1]), str(row[2]), str(row[3])) if row else None
 
 
 def load_conversation(
-    conn: sqlite3.Connection, session_id: str, *, kb_name: str, title: str, username: str
+    conn: sqlite3.Connection,
+    session_id: str,
+    *,
+    kb_id: str,
+    kb_name: str,
+    title: str,
+    username: str,
+    readable: source_access.KbReadable,
 ) -> UserConversation:
     """读取会话的全部消息，包括回答引用的文件名和提问者给出的评价。"""
     messages: list[ConversationMessage] = [
@@ -459,7 +485,7 @@ def load_conversation(
             "role": str(role),
             "content": str(content),
             "created_at": str(created_at),
-            "source_names": _source_names(sources),
+            "source_names": _source_names(sources, readable),
             "feedback": int(feedback or 0),
         }
         for role, content, created_at, sources, feedback in conn.execute(
@@ -472,6 +498,7 @@ def load_conversation(
     return {
         "session_id": session_id,
         "title": title,
+        "kb_id": kb_id,
         "kb_name": kb_name,
         "username": username,
         "messages": messages,

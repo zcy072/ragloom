@@ -1,28 +1,36 @@
 import { expect } from '@playwright/test';
 
 export const adminUser = {
+  id: 1,
+  name: 'E2E 管理员',
   role: '超级管理员',
   username: 'e2e-admin',
   menuPermissions: ['仪表盘统计', '知识库', '知识库管理', '问答对话', '模型配置', '用户管理', '角色管理', '运行监控', '用户分析', '查看用户对话'],
-  knowledgeBasePermissions: ['全公司']
+  allKnowledgeBases: true,
+  knowledgeBaseIds: []
 };
 
+export const COMMON_KB_ID = '11111111-1111-4111-8111-111111111111';
+export const DOCUMENT_ID = '33333333-3333-4333-8333-333333333333';
+
+export const DEV_KB_ID = '22222222-2222-4222-8222-222222222222';
+
 const knowledgeBases = [
-  { name: '通用知识库', description: '公共制度与流程', docs: 1, date: '2026-07-23' },
-  { name: '研发知识库', description: '研发资料', docs: 0, date: '2026-07-22' }
+  { kb_id: COMMON_KB_ID, name: '通用知识库', system_key: 'common', state: 'active', docs: 1, date: '2026-07-23' },
+  { kb_id: DEV_KB_ID, name: '研发知识库', system_key: null, state: 'active', docs: 0, date: '2026-07-22' }
 ];
 
 const roles = [
-  { id: 1, name: '超级管理员', description: '系统内置角色', menu_permissions: [], knowledge_base_permissions: ['全公司'] },
-  { id: 2, name: '研发访客', description: '只读访问研发资料', menu_permissions: ['问答对话'], knowledge_base_permissions: ['研发知识库'] },
-  { id: 3, name: '研发编辑', description: '维护研发资料', menu_permissions: ['知识库', '知识库管理'], knowledge_base_permissions: ['研发知识库'] },
-  { id: 4, name: '研发管理员', description: '管理研发角色和资料', menu_permissions: ['角色管理'], knowledge_base_permissions: ['研发知识库'] },
+  { id: 1, name: '超级管理员', description: '系统内置角色', menu_permissions: [], all_knowledge_bases: true, knowledge_base_ids: [] },
+  { id: 2, name: '研发访客', description: '只读访问研发资料', menu_permissions: ['问答对话'], all_knowledge_bases: false, knowledge_base_ids: [DEV_KB_ID] },
+  { id: 3, name: '研发编辑', description: '维护研发资料', menu_permissions: ['知识库', '知识库管理'], all_knowledge_bases: false, knowledge_base_ids: [DEV_KB_ID] },
+  { id: 4, name: '研发管理员', description: '管理研发角色和资料', menu_permissions: ['角色管理'], all_knowledge_bases: false, knowledge_base_ids: [DEV_KB_ID] },
   ...Array.from({ length: 21 }, (_, index) => ({
     id: index + 5,
     name: `项目角色 ${String(index + 1).padStart(2, '0')}`,
     description: `用于分页验证的角色 ${index + 1}`,
     menu_permissions: [],
-    knowledge_base_permissions: ['研发知识库']
+    all_knowledge_bases: false, knowledge_base_ids: [DEV_KB_ID]
   }))
 ];
 
@@ -43,6 +51,7 @@ const dashboardStats = {
   tasks: 5,
   kb_list: [
     {
+      kb_id: COMMON_KB_ID,
       name: '通用知识库',
       docs: 5,
       size: '12.5 MB',
@@ -68,6 +77,7 @@ const opsRun = (id, status, totalMs, extra = {}) => ({
   id,
   created_at: '2026-07-23T08:00:00+00:00',
   username: 'alice',
+  kb_id: COMMON_KB_ID,
   kb_name: '通用知识库',
   session_id: 'session-1',
   question_preview: `运行记录问题 ${id}`,
@@ -126,8 +136,8 @@ const analyticsOverview = {
   daily: analyticsDaily,
   hourly: Array.from({ length: 24 }, (_, hour) => (hour >= 9 && hour <= 18 ? hour - 8 : 0)),
   knowledge_bases: [
-    { kb_name: '通用知识库', users: 7, questions: 45, downvotes: 2 },
-    { kb_name: '研发知识库', users: 3, questions: 15, downvotes: 1 }
+    { kb_id: COMMON_KB_ID, kb_name: '通用知识库', users: 7, questions: 45, downvotes: 2 },
+    { kb_id: DEV_KB_ID, kb_name: '研发知识库', users: 3, questions: 15, downvotes: 1 }
   ]
 };
 
@@ -154,10 +164,10 @@ const analyticsDetail = {
   user: analyticsUsers[0],
   no_evidence: 2,
   daily: analyticsDaily.map(point => ({ date: point.date, questions: point.questions })),
-  knowledge_bases: [{ kb_name: '通用知识库', users: 1, questions: 23, downvotes: 0 }],
+  knowledge_bases: [{ kb_id: COMMON_KB_ID, kb_name: '通用知识库', users: 1, questions: 23, downvotes: 0 }],
   recent_logins: [{ created_at: '2026-07-23T07:00:00+00:00', success: false, reason: 'invalid_credentials', client: '10.0.0.8' }],
-  recent_sessions: [{ id: 'session-9', title: '年假怎么请', kb_name: '通用知识库', created_at: '2026-07-23T08:00:00+00:00', updated_at: '2026-07-23T08:05:00+00:00', questions: 2 }],
-  recent_questions: [{ created_at: '2026-07-23T08:00:00+00:00', kb_name: '通用知识库', question_preview: '年假可以分几次休', status: 'answered', total_ms: 2100, feedback: 1 }]
+  recent_sessions: [{ id: 'session-9', title: '年假怎么请', kb_id: COMMON_KB_ID, kb_name: '通用知识库', created_at: '2026-07-23T08:00:00+00:00', updated_at: '2026-07-23T08:05:00+00:00', questions: 2 }],
+  recent_questions: [{ created_at: '2026-07-23T08:00:00+00:00', kb_id: COMMON_KB_ID, kb_name: '通用知识库', question_preview: '年假可以分几次休', status: 'answered', total_ms: 2100, feedback: 1 }]
 };
 
 const json = (route, body, status = 200) => route.fulfill({
@@ -185,7 +195,15 @@ const paginate = (items, url, fields) => {
   };
 };
 
-export async function installApiMocks(page, { onAdminLogin, onChatRequest, onSessionRename } = {}) {
+/** 与后端一致：除 GET/HEAD/OPTIONS 外的 /api 请求必须带固定标记头。 */
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+/**
+ * 模拟 Cookie 会话契约：authenticated 决定 /api/me 返回 200 还是 401，
+ * 登录成功后变为已登录，退出或改密成功后变为未登录。返回的 state 记录写请求和认证调用。
+ */
+export async function installApiMocks(page, { authenticated = false, onAdminLogin, onChatRequest, onSessionRename } = {}) {
+  const state = { authenticated, writeRequests: [], logins: 0, logouts: 0, logoutStatus: 204 };
   // 重命名后列表接口要返回新标题，和真实后端一致。
   const sessionTitles = { 'session-1': '已有会话', 'session-2': '研发排期' };
   // 查看对话后审计列表要多出一条，和真实后端一致。
@@ -195,11 +213,37 @@ export async function installApiMocks(page, { onAdminLogin, onChatRequest, onSes
     const path = new URL(request.url()).pathname;
     const method = request.method();
 
-    if (path === '/api/login' && method === 'POST') {
-      onAdminLogin?.(request.postDataJSON());
-      return json(route, { access_token: 'e2e-token', token_type: 'bearer', user: adminUser });
+    if (!SAFE_METHODS.has(method)) {
+      const header = await request.headerValue('x-ragloom-request');
+      state.writeRequests.push({ method, path, header });
+      if (header !== '1') return json(route, { detail: '缺少请求标记', code: 'csrf_rejected' }, 403);
     }
-    if (path === '/api/me' && method === 'GET') return json(route, adminUser);
+    if (request.headers().authorization) {
+      return json(route, { detail: 'E2E 不应再发送 Authorization 头' }, 400);
+    }
+
+    if (path === '/api/login' && method === 'POST') {
+      const payload = request.postDataJSON();
+      onAdminLogin?.(payload);
+      state.logins += 1;
+      if (payload.password !== 'admin888') return json(route, { detail: '用户名或密码错误' }, 401);
+      state.authenticated = true;
+      return json(route, { status: 'success', user: adminUser });
+    }
+    if (path === '/api/logout' && method === 'POST') {
+      state.logouts += 1;
+      if (state.logoutStatus !== 204) return json(route, { detail: '服务暂时不可用' }, state.logoutStatus);
+      state.authenticated = false;
+      return route.fulfill({ status: 204, body: '' });
+    }
+    if (path === '/api/me' && method === 'GET') {
+      return state.authenticated ? json(route, adminUser) : json(route, { detail: '未登录' }, 401);
+    }
+    if (!state.authenticated) return json(route, { detail: '未登录' }, 401);
+    if (path === '/api/change_password' && method === 'POST') {
+      state.authenticated = false;
+      return json(route, { status: 'success', message: '密码修改成功' });
+    }
     if (path === '/api/kbs' && method === 'GET') return json(route, knowledgeBases);
     if (path === '/api/users' && method === 'GET') return json(route, paginate(users, request.url(), ['username', 'name']));
     if (path === '/api/roles' && method === 'GET') return json(route, paginate(roles, request.url(), ['name', 'description']));
@@ -209,8 +253,8 @@ export async function installApiMocks(page, { onAdminLogin, onChatRequest, onSes
     }
     if (path === '/api/chat/sessions' && method === 'GET') {
       return json(route, [
-        { id: 'session-1', title: sessionTitles['session-1'], kb_name: '通用知识库' },
-        { id: 'session-2', title: sessionTitles['session-2'], kb_name: '研发知识库' }
+        { id: 'session-1', title: sessionTitles['session-1'], kb_id: COMMON_KB_ID, kb_name: '通用知识库' },
+        { id: 'session-2', title: sessionTitles['session-2'], kb_id: DEV_KB_ID, kb_name: '研发知识库' }
       ]);
     }
     const renameMatch = path.match(/^\/api\/chat\/sessions\/([^/]+)\/title$/);
@@ -224,7 +268,7 @@ export async function installApiMocks(page, { onAdminLogin, onChatRequest, onSes
       return json(route, [{ role: 'assistant', content: '历史回答', sources: [] }]);
     }
     if (path.endsWith('/document_filters') && method === 'GET') {
-      return json(route, { sources: ['制度.pdf'], document_types: ['制度'], tags: ['有效'] });
+      return json(route, { documents: [{ document_id: DOCUMENT_ID, filename: '制度.pdf' }], document_types: ['制度'], tags: ['有效'] });
     }
     if (path === '/api/chat' && method === 'POST') {
       const payload = request.postDataJSON();
@@ -235,7 +279,7 @@ export async function installApiMocks(page, { onAdminLogin, onChatRequest, onSes
       const body = [
         'data: {"chunk":"冒烟"}\n\n',
         'data: {"chunk":"回答"}\n\n',
-        'data: {"is_end":true,"final_answer":"冒烟回答 [来源 1]","sources":[{"id":1,"citation_ids":[1],"source":"制度.pdf","kb_name":"通用知识库","page":"第 1 页","content":"制度引用内容"}],"session_id":"session-1"}\n\n'
+        'data: {"is_end":true,"final_answer":"冒烟回答 [来源 1]","sources":[{"id":1,"citation_ids":[1],"source":"制度.pdf","document_id":"33333333-3333-4333-8333-333333333333","kb_id":"11111111-1111-4111-8111-111111111111","kb_name_snapshot":"通用知识库","page":"第 1 页","content":"制度引用内容"}],"session_id":"session-1"}\n\n'
       ].join('');
       return route.fulfill({ status: 200, contentType: 'text/event-stream', body });
     }
@@ -258,8 +302,9 @@ export async function installApiMocks(page, { onAdminLogin, onChatRequest, onSes
     if (path.endsWith('/retrieval_config') && method === 'GET') {
       return json(route, { query_rewrite_enabled: true });
     }
-    if (path === '/api/documents/%E9%80%9A%E7%94%A8%E7%9F%A5%E8%AF%86%E5%BA%93' && method === 'GET') {
+    if (path === `/api/documents/${COMMON_KB_ID}` && method === 'GET') {
       return json(route, [{
+        document_id: DOCUMENT_ID,
         filename: '制度.pdf',
         title: '制度文件',
         document_type: '制度',
@@ -271,7 +316,7 @@ export async function installApiMocks(page, { onAdminLogin, onChatRequest, onSes
         uploaded_at: '2026-07-23T08:00:00+00:00'
       }]);
     }
-    if (path.includes('/api/documents/') && path.endsWith('%E5%88%B6%E5%BA%A6.pdf') && method === 'GET') {
+    if (path.includes('/api/documents/') && path.endsWith(DOCUMENT_ID) && method === 'GET') {
       return route.fulfill({ status: 200, contentType: 'application/pdf', body: '%PDF-1.4\n%%EOF' });
     }
     if (path === '/api/ops/overview' && method === 'GET') return json(route, opsOverview);
@@ -293,7 +338,7 @@ export async function installApiMocks(page, { onAdminLogin, onChatRequest, onSes
     }
     if (path === '/api/ops/index-jobs' && method === 'GET') {
       return json(route, [{
-        id: 'job-1', kb_name: '通用知识库', filename: '坏文件.pdf', operation: 'process',
+        id: 'job-1', kb_id: COMMON_KB_ID, kb_name: '通用知识库', filename: '坏文件.pdf', operation: 'process',
         status: 'failed', error_message: '解析失败', created_at: '2026-07-23T07:00:00+00:00',
         started_at: null, finished_at: null
       }]);
@@ -324,6 +369,7 @@ export async function installApiMocks(page, { onAdminLogin, onChatRequest, onSes
       return json(route, {
         session_id: 'session-9',
         title: '年假怎么请',
+        kb_id: COMMON_KB_ID,
         kb_name: '通用知识库',
         username: 'member-01',
         messages: [
@@ -337,12 +383,7 @@ export async function installApiMocks(page, { onAdminLogin, onChatRequest, onSes
 
     return json(route, { detail: `Unhandled E2E request: ${method} ${path}` }, 501);
   });
-}
-
-export async function seedAuthSession(page) {
-  await page.addInitScript(session => {
-    localStorage.setItem('pymodel.auth', JSON.stringify(session));
-  }, { token: 'e2e-token', user: adminUser });
+  return state;
 }
 
 export function collectPageErrors(page) {
@@ -356,8 +397,7 @@ export function collectPageErrors(page) {
 
 export async function prepareAuthenticatedPage(page, options = {}) {
   const errors = collectPageErrors(page);
-  await seedAuthSession(page);
-  await installApiMocks(page, options);
+  await installApiMocks(page, { ...options, authenticated: true });
   await page.goto('/');
   await expect(page.getByRole('heading', { name: '问答对话' })).toBeVisible();
   return errors;

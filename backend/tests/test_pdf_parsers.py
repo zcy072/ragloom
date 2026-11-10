@@ -109,11 +109,7 @@ class PdfParserTest(unittest.TestCase):
                     "content": {
                         "list_type": "reference_list",
                         "list_items": [
-                            {
-                                "item_content": [
-                                    {"type": "text", "content": "1. 建议每周规律运动。"}
-                                ]
-                            }
+                            {"item_content": [{"type": "text", "content": "1. 建议每周规律运动。"}]}
                         ],
                     },
                 },
@@ -143,9 +139,7 @@ class PdfParserTest(unittest.TestCase):
                 },
                 {
                     "type": "paragraph",
-                    "content": {
-                        "paragraph_content": [{"type": "text", "content": "后续正文。"}]
-                    },
+                    "content": {"paragraph_content": [{"type": "text", "content": "后续正文。"}]},
                 },
             ],
         ]
@@ -161,11 +155,7 @@ class PdfParserTest(unittest.TestCase):
             [
                 {
                     "type": "algorithm",
-                    "content": {
-                        "algorithm_content": [
-                            {"type": "text", "content": "诊疗流程建议"}
-                        ]
-                    },
+                    "content": {"algorithm_content": [{"type": "text", "content": "诊疗流程建议"}]},
                 },
                 {"type": "equation_interline", "content": {"math_content": "HbA1c >= 6.5%"}},
             ]
@@ -202,9 +192,7 @@ class PdfParserTest(unittest.TestCase):
             [
                 {
                     "type": "title",
-                    "content": {
-                        "title_content": [{"type": "text", "content": "2 规范性引用文件"}]
-                    },
+                    "content": {"title_content": [{"type": "text", "content": "2 规范性引用文件"}]},
                 },
                 {
                     "type": "paragraph",
@@ -216,9 +204,7 @@ class PdfParserTest(unittest.TestCase):
                 },
                 {
                     "type": "title",
-                    "content": {
-                        "title_content": [{"type": "text", "content": "3. 参考文献"}]
-                    },
+                    "content": {"title_content": [{"type": "text", "content": "3. 参考文献"}]},
                 },
                 {
                     "type": "list",
@@ -265,7 +251,10 @@ class PdfParserTest(unittest.TestCase):
 
         self.assertEqual([document.metadata["page"] for document in documents], [2, 5])
         self.assertTrue(
-            all(document.metadata["parser_mode"] == PDF_PARSER_MINERU_CLOUD for document in documents)
+            all(
+                document.metadata["parser_mode"] == PDF_PARSER_MINERU_CLOUD
+                for document in documents
+            )
         )
 
     def test_cloud_client_uploads_with_ocr_and_reads_structured_pages(self):
@@ -274,7 +263,16 @@ class PdfParserTest(unittest.TestCase):
             archive.writestr(
                 "result/job_content_list_v2.json",
                 json.dumps(
-                    [[{"type": "paragraph", "content": {"paragraph_content": [{"type": "text", "content": "云端结果"}]}}]],
+                    [
+                        [
+                            {
+                                "type": "paragraph",
+                                "content": {
+                                    "paragraph_content": [{"type": "text", "content": "云端结果"}]
+                                },
+                            }
+                        ]
+                    ],
                     ensure_ascii=False,
                 ),
             )
@@ -305,7 +303,9 @@ class PdfParserTest(unittest.TestCase):
 
             def post(self, url, headers, json, timeout):
                 self.request_payload = json
-                return FakeResponse({"code": 0, "data": {"batch_id": "batch", "file_urls": ["upload-url"]}})
+                return FakeResponse(
+                    {"code": 0, "data": {"batch_id": "batch", "file_urls": ["upload-url"]}}
+                )
 
             def put(self, url, data, timeout):
                 return FakeResponse()
@@ -316,7 +316,9 @@ class PdfParserTest(unittest.TestCase):
                 return FakeResponse(
                     {
                         "code": 0,
-                        "data": {"extract_result": [{"state": "done", "full_zip_url": "result-url"}]},
+                        "data": {
+                            "extract_result": [{"state": "done", "full_zip_url": "result-url"}]
+                        },
                     }
                 )
 
@@ -324,18 +326,22 @@ class PdfParserTest(unittest.TestCase):
                 return None
 
         session = FakeSession()
-        with tempfile.TemporaryDirectory() as output_directory, tempfile.NamedTemporaryFile(
-            suffix=".pdf"
-        ) as source:
+        with (
+            tempfile.TemporaryDirectory() as output_directory,
+            tempfile.NamedTemporaryFile(suffix=".pdf") as source,
+        ):
             result_dir = Path(output_directory) / "mineru-result"
             source.write(b"%PDF-1.4")
             source.flush()
-            with patch.dict(os.environ, {"MINERU_API_TOKEN": "test-token"}, clear=False), patch.object(
-                mineru_api_client.requests, "Session", return_value=session
+            with (
+                patch.dict(os.environ, {"MINERU_API_TOKEN": "test-token"}, clear=False),
+                patch.object(mineru_api_client.requests, "Session", return_value=session),
             ):
                 pages = mineru_client.parse_document(source.name, result_dir=result_dir)
 
-            manifest = json.loads((result_dir / "pymodel_manifest.json").read_text(encoding="utf-8"))
+            manifest = json.loads(
+                (result_dir / "pymodel_manifest.json").read_text(encoding="utf-8")
+            )
             self.assertTrue((result_dir / "result.zip").is_file())
             self.assertTrue(list(result_dir.rglob("*_content_list_v2.json")))
             self.assertEqual(manifest["parser"], "mineru_cloud")
@@ -371,15 +377,16 @@ class PdfParserTest(unittest.TestCase):
         session = FakeSession()
         retry_session = FakeSession()
         retry_session.calls = 1
-        with tempfile.TemporaryDirectory() as directory, patch.dict(
-            os.environ, {"MINERU_DOWNLOAD_ATTEMPTS": "3"}, clear=False
-        ), patch.object(mineru_api_client.time, "sleep") as sleep, patch.object(
-            mineru_api_client.requests, "Session", return_value=retry_session
-        ) as new_session:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"MINERU_DOWNLOAD_ATTEMPTS": "3"}, clear=False),
+            patch.object(mineru_api_client.time, "sleep") as sleep,
+            patch.object(
+                mineru_api_client.requests, "Session", return_value=retry_session
+            ) as new_session,
+        ):
             archive_path = Path(directory) / "result.zip"
-            mineru_api_client._download_result_archive(
-                session, "result-url", archive_path
-            )
+            mineru_api_client._download_result_archive(session, "result-url", archive_path)
 
             self.assertEqual(archive_path.read_bytes(), b"completed archive")
 
@@ -395,15 +402,18 @@ class PdfParserTest(unittest.TestCase):
                 "STORAGE_DIR": storage_dir,
                 "MINERU_RESULTS_DIR": os.path.join(storage_dir, "mineru_results"),
             }
-            with patch.dict(os.environ, environment, clear=False), patch.object(
-                app_storage, "STORAGE_DIR", storage_dir
+            with (
+                patch.dict(os.environ, environment, clear=False),
+                patch.object(app_storage, "STORAGE_DIR", storage_dir),
             ):
-                source = os.path.join(storage_dir, "data", "研发部", "制度.pdf")
+                kb_id = "11111111-1111-4111-8111-111111111111"
+                document_id = "22222222-2222-4222-8222-222222222222"
+                source = os.path.join(storage_dir, "data", kb_id, document_id, "制度.pdf")
                 result_dir = mineru_client.result_dir_for_document(source)
                 result_dir.mkdir(parents=True)
                 (result_dir / "result.zip").write_bytes(b"archive")
 
-                self.assertTrue(mineru_client.remove_saved_result("研发部", "制度.pdf"))
+                mineru_client.remove_document_results(kb_id, document_id)
                 self.assertFalse(result_dir.exists())
 
     def test_result_directory_has_bundle_suffix(self):
@@ -412,14 +422,17 @@ class PdfParserTest(unittest.TestCase):
             results_dir = storage_dir / "mineru_results"
             source = storage_dir / "data" / "研发部" / "制度.pdf"
 
-            with patch.dict(
-                os.environ,
-                {
-                    "STORAGE_DIR": str(storage_dir),
-                    "MINERU_RESULTS_DIR": str(results_dir),
-                },
-                clear=False,
-            ), patch.object(app_storage, "STORAGE_DIR", str(storage_dir)):
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "STORAGE_DIR": str(storage_dir),
+                        "MINERU_RESULTS_DIR": str(results_dir),
+                    },
+                    clear=False,
+                ),
+                patch.object(app_storage, "STORAGE_DIR", str(storage_dir)),
+            ):
                 result_dir = mineru_client.result_dir_for_document(str(source))
 
             self.assertEqual(result_dir.name, "制度.pdf.mineru")
@@ -429,9 +442,11 @@ class PdfParserTest(unittest.TestCase):
             source = os.path.join(directory, "大.pdf")
             Path(source).write_bytes(b"%PDF-1.4")
             reader = type("Reader", (), {"pages": [object()] * 201})
-            with patch("pypdf.PdfReader", return_value=reader()), patch.object(
-                mineru_api_client, "_parse_document"
-            ) as upload, patch.object(mineru_api_client.requests, "Session") as session:
+            with (
+                patch("pypdf.PdfReader", return_value=reader()),
+                patch.object(mineru_api_client, "_parse_document") as upload,
+                patch.object(mineru_api_client.requests, "Session") as session,
+            ):
                 with self.assertRaisesRegex(mineru_client.MinerUError, "201 页"):
                     mineru_api_client.parse_document(source)
 
@@ -450,15 +465,17 @@ class PdfParserTest(unittest.TestCase):
             mineru_api_client.check_page_limit(os.path.join(directory, "说明.docx"))
 
     def test_rebuild_reuses_saved_mineru_pages_without_cloud_upload(self):
-        with tempfile.TemporaryDirectory() as directory, patch.dict(
-            os.environ,
-            {
-                "STORAGE_DIR": os.path.join(directory, "storage"),
-                "MINERU_RESULTS_DIR": os.path.join(directory, "mineru_results"),
-            },
-            clear=False,
-        ), patch.object(
-            app_storage, "STORAGE_DIR", os.path.join(directory, "storage")
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ,
+                {
+                    "STORAGE_DIR": os.path.join(directory, "storage"),
+                    "MINERU_RESULTS_DIR": os.path.join(directory, "mineru_results"),
+                },
+                clear=False,
+            ),
+            patch.object(app_storage, "STORAGE_DIR", os.path.join(directory, "storage")),
         ):
             source = os.path.join(directory, "storage", "data", "研发部", "制度.pdf")
             os.makedirs(os.path.dirname(source), exist_ok=True)
@@ -468,7 +485,18 @@ class PdfParserTest(unittest.TestCase):
             content_name = "result_content_list_v2.json"
             (result_dir / content_name).write_text(
                 json.dumps(
-                    [[{"type": "paragraph", "content": {"paragraph_content": [{"type": "text", "content": "已保存页面文本"}]}}]],
+                    [
+                        [
+                            {
+                                "type": "paragraph",
+                                "content": {
+                                    "paragraph_content": [
+                                        {"type": "text", "content": "已保存页面文本"}
+                                    ]
+                                },
+                            }
+                        ]
+                    ],
                     ensure_ascii=False,
                 ),
                 encoding="utf-8",
@@ -478,9 +506,7 @@ class PdfParserTest(unittest.TestCase):
                 json.dumps({"content_list": content_name}, ensure_ascii=False), encoding="utf-8"
             )
 
-            with patch.object(
-                document_loader.mineru_client, "parse_document"
-            ) as parse_document:
+            with patch.object(document_loader.mineru_client, "parse_document") as parse_document:
                 pages = document_loader.load_document_routes(
                     source,
                     "制度.pdf",
@@ -502,7 +528,9 @@ class PdfParserTest(unittest.TestCase):
                 metadata={"source": "制度.pdf", "page": 0, "parser_mode": PDF_PARSER_NATIVE_TEXT},
             )
         ]
-        with patch.object(document_loader, "_load_pdf_native_text", return_value=expected) as loader:
+        with patch.object(
+            document_loader, "_load_pdf_native_text", return_value=expected
+        ) as loader:
             documents = document_loader.load_document_routes(
                 "/tmp/制度.pdf", "制度.pdf", PDF_PARSER_NATIVE_TEXT
             ).fixed
@@ -527,7 +555,9 @@ class PdfParserTest(unittest.TestCase):
         with (
             patch.dict(sys.modules, {"pdf2image": fake_pdf2image}),
             patch.object(document_loader, "get_ocr_engine", return_value=object()),
-            patch.object(document_loader, "ocr_image", side_effect=lambda image, ocr: f"文本-{image}"),
+            patch.object(
+                document_loader, "ocr_image", side_effect=lambda image, ocr: f"文本-{image}"
+            ),
         ):
             documents = document_loader._load_pdf_paddle_ocr("/tmp/扫描件.pdf", "扫描件.pdf")
 

@@ -30,7 +30,7 @@ ARG APP_UID=1000
 ARG APP_GID=1000
 RUN groupadd --gid "${APP_GID}" app \
     && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home app \
-    && mkdir -p /home/app/.paddlex \
+    && mkdir -p /home/app/.paddlex/official_models \
     && chown -R app:app /home/app/.paddlex
 
 # Keep the runtime image limited to application code. Tests, frontend

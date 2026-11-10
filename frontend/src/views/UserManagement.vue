@@ -147,8 +147,8 @@
                 <div class="text-sm font-medium text-gray-800">{{ role.name }}</div>
                 <div class="text-xs text-gray-400 truncate">{{ role.description || '暂无描述' }}</div>
               </div>
-              <span v-if="role.knowledge_base_permissions?.length > 0" class="text-[11px] text-gray-400 bg-gray-100 px-2 py-0.5 rounded ml-2 whitespace-nowrap">
-                {{ role.knowledge_base_permissions.join(', ') }}
+              <span v-if="role.all_knowledge_bases || role.knowledge_base_ids?.length > 0" class="text-[11px] text-gray-400 bg-gray-100 px-2 py-0.5 rounded ml-2 whitespace-nowrap">
+                {{ role.all_knowledge_bases ? '全部知识库' : `${role.knowledge_base_ids.length} 个知识库` }}
               </span>
             </label>
             <div v-if="roleOptionsLoading" class="py-4 text-center text-sm text-gray-400">正在加载角色...</div>

@@ -1,193 +1,119 @@
-"""登录令牌签发、验证，以及 FastAPI 路由权限依赖。"""
+"""Cookie 会话鉴权、写请求来源校验，以及 FastAPI 路由权限依赖。"""
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
-import json
-import secrets
-import time
 from dataclasses import dataclass
-from typing import cast
 
 from fastapi import Depends, HTTPException, Request
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from services.core import sqlite_connections as application_db
-from services.core.config import ALL_KNOWLEDGE_BASES_PERMISSION
-from services.core.container import database_file
+from services.core.config import validate_kb_id
+from services.core.container import database_file, get_application_container
+from services.core.errors import AccessDeniedError
 from services.core.settings import get_settings
-from services.identity.contracts import AccessTokenPayload
+from services.identity import roles, sessions
 from services.identity.permissions import decode_permission_list
 
-_TOKEN_VERSION = 4
-_bearer = HTTPBearer(auto_error=False)
-
-# 签名密钥在进程生命周期内固定不变；按数据库路径缓存，确保测试隔离。
-_signing_key_cache: dict[str, bytes] = {}
+# 认证相关响应不允许被浏览器或代理缓存。
+NO_STORE_HEADERS = {"Cache-Control": "no-store"}
+WRITE_HEADER_NAME = "X-RAGLoom-Request"
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 @dataclass(frozen=True)
 class Principal:
     """Authenticated identity with resolved menu and knowledge-base access."""
+
     username: str
     role: str
     account_id: int = 0
     role_id: int | None = None
     menu_permissions: tuple[str, ...] = ()
-    knowledge_base_permissions: tuple[str, ...] = ()
+    all_knowledge_bases: bool = False
+    knowledge_base_ids: tuple[str, ...] = ()
+    name: str = ""
 
-    def can_read_knowledge_base(self, kb_name: str) -> bool:
+    def can_read_knowledge_base(self, kb_id: str) -> bool:
         """判断主体是否拥有指定知识库的读取权限。"""
-        return (
-            ALL_KNOWLEDGE_BASES_PERMISSION in self.knowledge_base_permissions
-            or kb_name in self.knowledge_base_permissions
-        )
+        return self.all_knowledge_bases or kb_id in self.knowledge_base_ids
 
     def can_manage_knowledge_bases(self) -> bool:
         """判断主体是否拥有知识库管理菜单权限。"""
         return "知识库管理" in self.menu_permissions
 
 
-def _urlsafe_encode(value: bytes) -> str:
-    """将字节编码为令牌中使用的无填充 URL 安全 Base64 文本。"""
-    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+def require_api_write_header(request: Request) -> None:
+    """全局 CSRF 防护：/api 下的非安全方法必须带固定请求头 X-RAGLoom-Request: 1。
+
+    跨站表单无法设置自定义请求头，跨源脚本设置它必须先预检，而服务端不批准跨源预检。
+    该头不是秘密；直接读取原始请求头，避免缺头先被声明式校验转成 422。
+    登录、注册、退出也受此约束，防止登录 CSRF。
+    """
+    path = request.url.path
+    if request.method in _SAFE_METHODS or not (path == "/api" or path.startswith("/api/")):
+        return
+    if request.headers.get(WRITE_HEADER_NAME) != "1":
+        raise AccessDeniedError("请求缺少来源校验头，已拒绝", code="csrf_rejected")
 
 
-def _urlsafe_decode(value: str) -> bytes:
-    """把无填充 URL 安全 Base64 文本还原为字节。"""
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+def session_digest(request: Request) -> str | None:
+    """返回请求 Cookie 中会话令牌的摘要；缺失或格式不符时返回 None。"""
+    return sessions.token_hash(request.cookies.get(sessions.COOKIE_NAME, ""))
 
 
-def _signing_key() -> bytes:
-    """读取稳定的令牌签名密钥；未配置时生成并持久化到应用设置。"""
-    configured = get_settings().auth_secret_key
-    if configured:
-        return configured.encode("utf-8")
-    db_file = database_file()
-    cached = _signing_key_cache.get(db_file)
-    if cached is not None:
-        return cached
-    with application_db.connect(db_file) as conn:
-        row = conn.execute(
-            "SELECT value FROM app_settings WHERE key = 'auth_signing_key'"
-        ).fetchone()
-        if row:
-            _signing_key_cache[db_file] = row[0].encode("utf-8")
-            return _signing_key_cache[db_file]
-        # 持久化随机密钥，避免普通服务重启导致所有用户令牌全部失效。
-        # 并发的首个请求可能同时走到这里：OR IGNORE 让后到者不报错，再读回胜出的那一个。
-        conn.execute(
-            "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('auth_signing_key', ?)",
-            (secrets.token_urlsafe(48),),
-        )
-        stored = conn.execute(
-            "SELECT value FROM app_settings WHERE key = 'auth_signing_key'"
-        ).fetchone()[0]
-    _signing_key_cache[db_file] = stored.encode("utf-8")
-    return _signing_key_cache[db_file]
+def _unauthenticated(message: str) -> HTTPException:
+    """未登录或会话失效的 401；不附带删除 Cookie，避免晚到的旧请求清掉新登录。"""
+    return HTTPException(401, message, headers=NO_STORE_HEADERS)
 
 
-def _credential_fingerprint(value: str) -> str:
-    """生成不可逆的凭证指纹，用于判断密码修改后令牌是否仍有效。"""
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+def _load_principal(digest: str) -> Principal | None:
+    """在一个连接内按会话摘要读取账号、角色和知识库权限；会话无效时返回 None。
 
-
-def issue_access_token(
-    account_id: int,
-    username: str,
-    credential: str,
-) -> str:
-    """签发与当前密码凭证绑定的紧凑 HMAC 登录令牌。"""
-    now = int(time.time())
-    # 令牌中的角色仅作身份提示；每次请求仍从 SQLite 读取权限，使角色修改立即生效。
-    payload = {
-        "v": _TOKEN_VERSION,
-        "aid": account_id,
-        "sub": username,
-        "iat": now,
-        "exp": now + max(60, get_settings().auth_token_ttl_seconds),
-        "cred": _credential_fingerprint(credential),
-    }
-    body = _urlsafe_encode(
-        json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    )
-    signature = hmac.new(_signing_key(), body.encode("ascii"), hashlib.sha256).digest()
-    return f"{body}.{_urlsafe_encode(signature)}"
-
-
-def _decode_access_token(token: str) -> AccessTokenPayload:
-    """验证令牌格式、规范 Base64 编码、HMAC 签名和过期时间。"""
-    try:
-        body, encoded_signature = token.split(".", 1)
-        signature = _urlsafe_decode(encoded_signature)
-        if _urlsafe_encode(signature) != encoded_signature:
-            raise ValueError("non-canonical signature")
-        if _urlsafe_encode(_urlsafe_decode(body)) != body:
-            raise ValueError("non-canonical payload")
-        expected = hmac.new(_signing_key(), body.encode("ascii"), hashlib.sha256).digest()
-        if not hmac.compare_digest(signature, expected):
-            raise ValueError("invalid signature")
-        payload = json.loads(_urlsafe_decode(body))
-    except (ValueError, TypeError, json.JSONDecodeError) as exc:
-        raise HTTPException(401, "登录凭证无效") from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(401, "登录凭证无效")
-    if (
-        payload.get("v") != _TOKEN_VERSION
-        or not isinstance(payload.get("exp"), int)
-        or not isinstance(payload.get("sub"), str)
-        or not payload["sub"]
-        or not isinstance(payload.get("aid"), int)
-        or payload["aid"] <= 0
-        or not isinstance(payload.get("iat"), int)
-        or not isinstance(payload.get("cred"), str)
-    ):
-        raise HTTPException(401, "登录凭证无效")
-    if payload["exp"] <= int(time.time()):
-        raise HTTPException(401, "登录凭证已过期")
-    return cast(AccessTokenPayload, payload)
-
-
-def _load_principal(payload: AccessTokenPayload) -> Principal:
-    """重新读取账号和角色状态，而不是直接信任令牌中携带的旧权限。"""
-    username = payload["sub"]
-    account_id = payload["aid"]
-    db_file = database_file()
-    with application_db.connect(db_file) as conn:
+    权限每次请求实时读取，角色修改无需撤销会话即可在下一请求生效。
+    有效会话顺带滑动续期，持续使用的用户不会在空闲时限到点时被登出。
+    数据库异常照常抛出，不能被当作未登录。
+    """
+    with application_db.connect(database_file()) as conn:
         row = conn.execute(
             """
-            SELECT a.password, a.status, a.role_id, r.name,
-                   r.menu_permissions, r.knowledge_base_permissions
-            FROM accounts a LEFT JOIN roles r ON a.role_id = r.id
-            WHERE a.id = ? AND a.username = ?
+            SELECT a.id, a.username, a.name, a.role_id, r.name,
+                   r.menu_permissions, r.all_knowledge_bases, s.expires_at
+            FROM auth_sessions s
+            JOIN accounts a ON a.id = s.account_id
+            LEFT JOIN roles r ON a.role_id = r.id
+            WHERE s.token_hash = ? AND s.expires_at > ? AND a.status = ?
             """,
-            (account_id, username),
+            (digest, sessions.now(), sessions.ACTIVE_ACCOUNT_STATUS),
         ).fetchone()
-    # 对比凭证指纹即可在不维护令牌黑名单表的情况下，让改密后的旧令牌失效。
-    if not row or row[1] != "正常" or not hmac.compare_digest(
-        _credential_fingerprint(row[0]), str(payload.get("cred", ""))
-    ):
-        raise HTTPException(401, "登录状态已失效，请重新登录")
+        if not row:
+            return None
+        kb_ids = (
+            roles.role_knowledge_base_ids(conn, [row[3]], include_deleting=True)[row[3]]
+            if row[3] is not None
+            else []
+        )
+    sessions.renew(database_file(), digest, int(row[7]), get_settings().auth_session_ttl_seconds)
     return Principal(
-        username=username,
-        role=str(row[3] or "未分配"),
-        account_id=account_id,
-        role_id=int(row[2]) if row[2] is not None else None,
-        menu_permissions=tuple(decode_permission_list(row[4])),
-        knowledge_base_permissions=tuple(decode_permission_list(row[5])),
+        username=str(row[1]),
+        role=str(row[4] or "未分配"),
+        account_id=int(row[0]),
+        role_id=int(row[3]) if row[3] is not None else None,
+        menu_permissions=tuple(decode_permission_list(row[5])),
+        all_knowledge_bases=bool(row[6]),
+        knowledge_base_ids=tuple(kb_ids),
+        name=str(row[2] or ""),
     )
 
 
-def current_principal(
-    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
-) -> Principal:
-    """验证 Bearer 凭证并从数据库加载当前仍有效的访问主体。"""
-    if credentials is None or credentials.scheme.lower() != "bearer":
-        raise HTTPException(401, "请先登录")
-    # 签名只能证明令牌来自本服务；后续数据库查询还要确认账号仍启用且登录后没有改密。
-    return _load_principal(_decode_access_token(credentials.credentials))
+def current_principal(request: Request) -> Principal:
+    """只从 ragloom_session Cookie 读取会话，并加载当前仍有效的访问主体。"""
+    if sessions.COOKIE_NAME not in request.cookies:
+        raise _unauthenticated("请先登录")
+    digest = session_digest(request)
+    principal = _load_principal(digest) if digest else None
+    if principal is None:
+        raise _unauthenticated("登录状态已失效，请重新登录")
+    return principal
 
 
 def require_menu_permission(permission: str):
@@ -203,19 +129,23 @@ def require_menu_permission(permission: str):
     return dependency
 
 
-def _path_knowledge_base_name(request: Request) -> str:
-    """路由使用了不同的路径参数名；在这里统一解析，保证所有接口都做同一套后端鉴权。"""
-    params = request.path_params
-    return str(params.get("kb_name") or params.get("name") or params.get("old_name") or "")
+def _path_knowledge_base_id(request: Request) -> str:
+    """所有知识库路径参数统一叫 kb_id；规范化失败的值一律视为无权访问。"""
+    try:
+        return validate_kb_id(str(request.path_params.get("kb_id") or ""))
+    except ValueError:
+        return ""
 
 
 def require_knowledge_base_reader(
     request: Request, principal: Principal = Depends(current_principal)
 ) -> Principal:
     """校验当前主体是否有读取请求路径中知识库的权限。"""
-    kb_name = _path_knowledge_base_name(request)
-    if not kb_name or not principal.can_read_knowledge_base(kb_name):
+    kb_id = _path_knowledge_base_id(request)
+    if not kb_id or not principal.can_read_knowledge_base(kb_id):
         raise HTTPException(403, "无权访问该知识库")
+    if not get_application_container().knowledge_bases.exists(kb_id):
+        raise HTTPException(404, "知识库不存在")
     return principal
 
 
@@ -225,7 +155,13 @@ def require_knowledge_base_manager(
     """校验当前主体是否有管理权限，并可访问请求路径中的目标知识库。"""
     if not principal.can_manage_knowledge_bases():
         raise HTTPException(403, "无权管理知识库")
-    kb_name = _path_knowledge_base_name(request)
-    if kb_name and not principal.can_read_knowledge_base(kb_name):
+    kb_id = _path_knowledge_base_id(request)
+    if kb_id and not principal.can_read_knowledge_base(kb_id):
         raise HTTPException(403, "无权管理该知识库")
+    if (
+        kb_id
+        and request.method != "DELETE"
+        and not get_application_container().knowledge_bases.exists(kb_id)
+    ):
+        raise HTTPException(404, "知识库不存在")
     return principal

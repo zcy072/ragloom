@@ -83,6 +83,8 @@ class LoggingSetupTest(unittest.TestCase):
             with patch.object(api, "configure_logging") as configure, patch.object(
                 api.app_storage, "initialize_app_storage"
             ), patch.object(api, "get_chunk_index"), patch.object(
+                api.kb_use_cases, "resume_pending_deletions"
+            ), patch.object(
                 api.index_worker, "start"
             ), patch.object(api.index_worker, "stop"), patch.object(
                 api.retriever, "start_retriever_cache_warmup"

@@ -17,8 +17,7 @@ def _query_phrases(question: str) -> list[str]:
     if not query:
         return []
     tokens = [
-        re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", token)
-        for token in jieba.lcut(question or "")
+        re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", token) for token in jieba.lcut(question or "")
     ]
     tokens = [token for token in tokens if token][:16]
     phrases = [query]
@@ -70,23 +69,30 @@ def _web_source(index: int, span: context_builder.ContextSpan, question: str) ->
         "context_title": "",
         "content": content,
         "url": span.url,
-        "evidence": [{
-            "id": index,
-            "source": span.source,
-            "kb_name": "",
-            "page": label,
-            "page_numbers": [],
-            "context_title": "",
-            "content": content,
-            "url": span.url,
-        }],
+        "evidence": [
+            {
+                "id": index,
+                "source": span.source,
+                "page": label,
+                "page_numbers": [],
+                "context_title": "",
+                "content": content,
+                "url": span.url,
+            }
+        ],
     }
 
 
 def build_source_catalog(
-    spans: list[context_builder.ContextSpan], question: str = ""
+    spans: list[context_builder.ContextSpan],
+    question: str = "",
+    kb_names: dict[str, str] | None = None,
 ) -> list[ChatSource]:
-    """将上下文片段编号并序列化为 Prompt 和前端共用的来源目录。"""
+    """将上下文片段编号并序列化为 Prompt 和前端共用的来源目录。
+
+    ``kb_names`` 把知识库 ID 映射为当前显示名称，作为来源的名称快照保存；身份始终是 ``kb_id``。
+    """
+    kb_names = kb_names or {}
     sources: list[ChatSource] = []
     for index, span in enumerate(spans, start=1):
         if span.url:
@@ -101,20 +107,29 @@ def build_source_catalog(
             "context_title": " / ".join(span.contextual_titles[:3]),
             "content": _source_preview(span.content, question),
         }
-        if span.kb_name:
-            item["kb_name"] = span.kb_name
-        item["evidence"] = [{
-            "id": index,
-            "source": source,
-            "kb_name": span.kb_name,
-            "page": item["page"],
-            "page_numbers": sorted({
-                int(page) + 1 for page in span.pages
-                if source.lower().endswith(".pdf") and str(page).isdigit()
-            }),
-            "context_title": item["context_title"],
-            "content": item["content"],
-        }]
+        if span.kb_id:
+            item["document_id"] = span.document_id
+            item["kb_id"] = span.kb_id
+            item["kb_name_snapshot"] = kb_names.get(span.kb_id, "")
+        item["evidence"] = [
+            {
+                "id": index,
+                "source": source,
+                "kb_id": span.kb_id,
+                "document_id": span.document_id,
+                "kb_name_snapshot": kb_names.get(span.kb_id, ""),
+                "page": item["page"],
+                "page_numbers": sorted(
+                    {
+                        int(page) + 1
+                        for page in span.pages
+                        if source.lower().endswith(".pdf") and str(page).isdigit()
+                    }
+                ),
+                "context_title": item["context_title"],
+                "content": item["content"],
+            }
+        ]
         sources.append(item)
     return sources
 
@@ -130,30 +145,32 @@ def _cited_source_ids(answer: str, source_catalog: list[ChatSource]) -> list[int
     return cited_ids
 
 
-def select_cited_sources(
-    answer: str, source_catalog: list[ChatSource]
-) -> list[ChatSource]:
-    """仅返回答案实际引用的来源，并按知识库和文件名合并展示。"""
+def select_cited_sources(answer: str, source_catalog: list[ChatSource]) -> list[ChatSource]:
+    """仅返回答案实际引用的来源，并按知识库和文档 ID 合并展示。"""
     # The prompt catalogue can contain useful but uncited context. Exposing only IDs that the
     # answer actually referenced keeps the UI from implying unsupported citations.
     source_by_id = {source["id"]: source for source in source_catalog}
     selected = [source_by_id[source_id] for source_id in _cited_source_ids(answer, source_catalog)]
-    # Group display cards by both knowledge base and filename; common and selected knowledge
-    # bases may legally contain files with the same name.
+    # Group display cards by knowledge base and document ID; documents with the same filename
+    # stay separate, whether in one knowledge base or across common and selected ones.
     grouped: dict[tuple[str, str, str], list[ChatSource]] = {}
+    snapshots: dict[str, str] = {}
     for source in selected:
-        source_name = str(source.get("source", "未知文档"))
-        source_kb_name = str(source.get("kb_name", ""))
+        source_kb_id = str(source.get("kb_id", ""))
+        snapshots[source_kb_id] = str(source.get("kb_name_snapshot", ""))
         # 不同网页可能同名，网页来源按地址分组。
         grouped.setdefault(
-            (source_kb_name, source_name, source.get("url", "")), []
+            (source_kb_id, str(source.get("document_id", "")), source.get("url", "")), []
         ).append(source)
 
     display_sources: list[ChatSource] = []
-    for (source_kb_name, source_name, url), entries in grouped.items():
+    for (source_kb_id, source_document_id, url), entries in grouped.items():
+        source_name = entries[0]["source"]
         pages = list(dict.fromkeys(entry.get("page", "") for entry in entries if entry.get("page")))
         titles = list(
-            dict.fromkeys(entry.get("context_title", "") for entry in entries if entry.get("context_title"))
+            dict.fromkeys(
+                entry.get("context_title", "") for entry in entries if entry.get("context_title")
+            )
         )
         first = entries[0]
         item: ChatSource = {
@@ -164,8 +181,10 @@ def select_cited_sources(
             "context_title": " / ".join(titles[:2]),
             "content": first.get("content", ""),
         }
-        if source_kb_name:
-            item["kb_name"] = source_kb_name
+        if source_kb_id:
+            item["document_id"] = source_document_id
+            item["kb_id"] = source_kb_id
+            item["kb_name_snapshot"] = snapshots.get(source_kb_id, "")
         if url:
             item["url"] = url
         evidence = [entry for source in entries for entry in source.get("evidence", [])]

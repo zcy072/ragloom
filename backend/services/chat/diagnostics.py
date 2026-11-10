@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from services.chat.contracts import RankingDiagnostic, RetrievalDiagnosticPayload
+from services.chat.contracts import ContextDiagnostic, RankingDiagnostic, RetrievalDiagnosticPayload
 
 if TYPE_CHECKING:
     from services.chat.trace import TraceDocument, TraceQuery
@@ -40,11 +40,24 @@ class RetrievalDiagnostics:
                 "counts": self.counts,
                 "elapsed_ms": self.elapsed_ms,
                 "ranking": self.ranking[:10],
-                "context_sources": [{"id": source["id"], "source": source["source"],
-                                     "kb_name": source.get("kb_name", ""), "page": source["page"],
-                                     "routes": self.context_routes.get(source["id"], [])}
-                                    for source in sources[:32]],
+                "context_sources": self._context_sources(sources),
             }
             return result if len(json.dumps(result).encode()) <= 32768 else {}
         except Exception:
             return {}
+
+    def _context_sources(self, sources: list) -> list[ContextDiagnostic]:
+        items: list[ContextDiagnostic] = []
+        for source in sources[:32]:
+            item: ContextDiagnostic = {
+                "id": source["id"],
+                "source": source["source"],
+                "kb_id": source.get("kb_id", ""),
+                "kb_name_snapshot": source.get("kb_name_snapshot", ""),
+                "page": source["page"],
+                "routes": self.context_routes.get(source["id"], []),
+            }
+            if source.get("document_id"):
+                item["document_id"] = source["document_id"]
+            items.append(item)
+        return items

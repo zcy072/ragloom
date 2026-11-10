@@ -3,9 +3,9 @@ import unittest
 
 import app_storage
 from services.core import config as application_config
-from services.identity import accounts, roles
+from services.identity import accounts, roles, sessions
 from services.identity.pagination import resolve_page_window
-from tests.support import IsolatedStorageTestCase
+from tests.support import IsolatedStorageTestCase, add_knowledge_bases
 
 
 class IdentityStoresTest(IsolatedStorageTestCase):
@@ -60,31 +60,50 @@ class IdentityStoresTest(IsolatedStorageTestCase):
         assert stored is not None
         self.assertEqual(stored["role"], "研发成员")
         self.assertEqual(stored["status"], "正常")
-        self.assertEqual(stored["knowledge_base_permissions"], [])
+        self.assertFalse(stored["all_knowledge_bases"])
+        self.assertEqual(stored["knowledge_base_ids"], [])
         self.assertEqual(stored["menu_permissions"], [])
+        old_hash = accounts.find_password_hash(app_storage.DB_FILE, user["id"])
+        assert old_hash is not None
+        token = sessions.create(
+            app_storage.DB_FILE,
+            account_id=user["id"],
+            verified_password_hash=old_hash,
+            ttl_seconds=3600,
+            max_age_seconds=3600,
+            max_sessions=10,
+        )
+        digest = sessions.token_hash(token)
+        assert digest is not None
+        new_hash = application_config.hash_password("new-password")
         self.assertTrue(
-            accounts.change_password(
+            accounts.replace_password(
                 app_storage.DB_FILE,
-                user["id"],
-                "old-password",
-                "new-password",
+                account_id=user["id"],
+                session_digest=digest,
+                expected_hash=old_hash,
+                new_hash=new_hash,
             )
         )
+        # 旧哈希已不匹配、会话也已撤销：第二次条件更新不写入。
         self.assertFalse(
-            accounts.change_password(
+            accounts.replace_password(
                 app_storage.DB_FILE,
-                user["id"],
-                "old-password",
-                "another-password",
+                account_id=user["id"],
+                session_digest=digest,
+                expected_hash=old_hash,
+                new_hash=application_config.hash_password("another-password"),
             )
         )
+        self.assertEqual(accounts.find_password_hash(app_storage.DB_FILE, user["id"]), new_hash)
         with self.assertRaisesRegex(ValueError, "仍有用户使用"):
             roles.delete_role(app_storage.DB_FILE, role["id"])
+        kb_id = add_knowledge_bases("研发部")[0]
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             conn.execute(
-                "INSERT INTO chat_runs (created_at, account_id, username, kb_name, session_id, status) "
-                "VALUES ('2026-01-01', ?, 'u', 'kb', 's', 'success')",
-                (user["id"],),
+                "INSERT INTO chat_runs (created_at, account_id, username, kb_id, session_id, status) "
+                "VALUES ('2026-01-01', ?, 'u', ?, 's', 'success')",
+                (user["id"], kb_id),
             )
         accounts.delete_user(app_storage.DB_FILE, user["id"])
         with sqlite3.connect(app_storage.DB_FILE) as conn:

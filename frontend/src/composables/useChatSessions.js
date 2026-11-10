@@ -43,7 +43,7 @@ export function useChatSessions({ messages, selectedKb }, dependencies = {}) {
       if (version !== loadVersion) return;
       messages.value = loaded;
       const sessionInfo = sessions.value.find(session => session.id === sessionId);
-      if (sessionInfo) selectedKb.value = sessionInfo.kb_name;
+      if (sessionInfo) selectedKb.value = sessionInfo.kb_id;
     } catch (error) {
       if (version === loadVersion) {
         messages.value = [];

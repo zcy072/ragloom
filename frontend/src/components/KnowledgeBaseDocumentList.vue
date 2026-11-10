@@ -41,11 +41,12 @@
   <div class="border border-gray-100 rounded-lg bg-white text-sm">
     <div v-if="documents.length === 0" class="p-8 text-center text-gray-400">暂无文档，请先上传</div>
     <div v-else class="divide-y divide-gray-100">
-      <div v-for="document in documents" :key="document.filename" class="px-4 py-3 flex flex-col items-stretch justify-between gap-3 hover:bg-gray-50 relative first:rounded-t-lg last:rounded-b-lg sm:flex-row sm:items-center sm:gap-4">
+      <div v-for="document in documents" :key="document.document_id" :data-document-id="document.document_id" class="px-4 py-3 flex flex-col items-stretch justify-between gap-3 hover:bg-gray-50 relative first:rounded-t-lg last:rounded-b-lg sm:flex-row sm:items-center sm:gap-4">
         <div class="flex items-center flex-1 min-w-0 sm:pr-4">
           <FileText class="w-4 h-4 text-gray-400 mr-3 flex-shrink-0" />
           <div class="min-w-0">
             <div class="truncate text-gray-700 cursor-pointer text-blue-600 hover:underline max-w-[260px]" @click="$emit('preview', document)" :title="document.filename">{{ document.filename }}</div>
+            <div v-if="duplicateFilenames.has(document.filename)" class="text-[10px] text-gray-400">{{ document.document_id.slice(0, 8) }}</div>
             <div v-if="document.document_type || document.tags?.length || document.effective_date || isSelectableParserDocument(document)" class="mt-1 flex min-w-0 flex-wrap items-center gap-1 text-[10px] text-gray-500">
               <span v-if="document.document_type" class="rounded bg-slate-100 px-1.5 py-0.5">{{ document.document_type }}</span>
               <span v-for="tag in document.tags || []" :key="tag" class="rounded bg-teal-50 px-1.5 py-0.5 text-teal-700">{{ tag }}</span>
@@ -54,21 +55,23 @@
             </div>
           </div>
           <span v-if="document.status === 'processing'" class="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-blue-50 text-blue-500 border border-blue-100 flex items-center whitespace-nowrap"><svg class="animate-spin -ml-0.5 mr-1 h-3 w-3 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>解析处理中</span>
-          <span v-if="document.status === 'rebuilding'" title="新版本发布前继续使用旧版本回答" class="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-blue-50 text-blue-500 border border-blue-100 whitespace-nowrap">重建中（旧版本可检索）</span>
+          <span v-if="document.status === 'rebuilding' || document.status === 'publishing'" title="新版本发布前继续使用旧版本回答" class="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-blue-50 text-blue-500 border border-blue-100 whitespace-nowrap">重建中（旧版本可检索）</span>
+          <span v-if="document.status === 'ready' && document.error_message" :title="document.error_message" class="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-amber-50 text-amber-600 border border-amber-100 whitespace-nowrap">重新索引失败（沿用旧版本）</span>
           <span v-if="document.status === 'error'" :title="document.error_message || '索引任务失败'" class="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-red-50 text-red-500 border border-red-100 whitespace-nowrap">解析失败</span>
         </div>
         <div class="flex w-full items-center justify-between gap-3 text-xs text-gray-400 relative sm:w-auto sm:flex-shrink-0 sm:justify-end">
           <span>{{ formatSize(document.size) }}</span>
           <span class="text-gray-500">{{ formatUploadedAt(document.uploaded_at) }}</span>
           <template v-if="!readonly">
+            <button @click="$emit('reindex', document.document_id)" :disabled="['processing', 'rebuilding', 'publishing'].includes(document.status)" class="text-blue-600 disabled:opacity-40" :title="document.status === 'error' ? '重试索引' : '重新索引'">{{ document.status === 'error' ? '重试' : '重新索引' }}</button>
             <button @click="$emit('edit-metadata', document)" class="inline-flex h-7 w-7 items-center justify-center rounded text-gray-400 hover:bg-blue-50 hover:text-blue-600" title="编辑文档元数据"><Pencil class="h-3.5 w-3.5" /></button>
             <button v-if="isSelectableParserDocument(document)" @click="$emit('edit-parser', document)" class="inline-flex h-7 w-7 items-center justify-center rounded text-gray-400 hover:bg-blue-50 hover:text-blue-600" title="更换解析方式"><RefreshCw class="h-3.5 w-3.5" /></button>
-            <div v-if="deleteConfirmId === document.filename" class="flex items-center space-x-1.5 bg-red-50 p-0.5 pr-1 rounded-md animate-fade-in-right">
+            <div v-if="deleteConfirmId === document.document_id" class="flex items-center space-x-1.5 bg-red-50 p-0.5 pr-1 rounded-md animate-fade-in-right">
               <span class="text-red-500 font-medium px-2">确认删除?</span>
-              <button @click="deleteConfirmId = null" class="px-2.5 py-1 hover:bg-white text-gray-500 rounded transition-colors" :disabled="deletingDocumentId === document.filename">取消</button>
-              <button @click="$emit('delete', document.filename)" :disabled="deletingDocumentId === document.filename" :class="['px-2.5 py-1 text-white rounded transition-colors shadow-sm', deletingDocumentId === document.filename ? 'bg-red-400 cursor-not-allowed' : 'bg-red-500 hover:bg-red-600']">{{ deletingDocumentId === document.filename ? '删除中...' : '删除' }}</button>
+              <button @click="deleteConfirmId = null" class="px-2.5 py-1 hover:bg-white text-gray-500 rounded transition-colors" :disabled="deletingDocumentId === document.document_id">取消</button>
+              <button @click="$emit('delete', document.document_id)" :disabled="deletingDocumentId === document.document_id" :class="['px-2.5 py-1 text-white rounded transition-colors shadow-sm', deletingDocumentId === document.document_id ? 'bg-red-400 cursor-not-allowed' : 'bg-red-500 hover:bg-red-600']">{{ deletingDocumentId === document.document_id ? '删除中...' : '删除' }}</button>
             </div>
-            <button v-else @click="deleteConfirmId = document.filename" class="flex-shrink-0 whitespace-nowrap text-red-400 hover:text-red-600 px-2 py-1 hover:bg-red-50 rounded transition-colors">删除</button>
+            <button v-else @click="deleteConfirmId = document.document_id" class="flex-shrink-0 whitespace-nowrap text-red-400 hover:text-red-600 px-2 py-1 hover:bg-red-50 rounded transition-colors">删除</button>
           </template>
         </div>
       </div>
@@ -77,10 +80,10 @@
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { ChevronDown, FileText, Pencil, Plus, RefreshCw } from 'lucide-vue-next';
 
-defineProps({
+const props = defineProps({
   readonly: { type: Boolean, default: false },
   documents: { type: Array, default: () => [] },
   isUploading: { type: Boolean, default: false },
@@ -91,7 +94,16 @@ defineProps({
   isSelectableParserDocument: { type: Function, required: true },
   parserLabel: { type: Function, required: true }
 });
-defineEmits(['upload', 'preview', 'edit-metadata', 'edit-parser', 'delete']);
+const duplicateFilenames = computed(() => {
+  const seen = new Set();
+  const repeated = new Set();
+  for (const document of props.documents) {
+    if (seen.has(document.filename)) repeated.add(document.filename);
+    seen.add(document.filename);
+  }
+  return repeated;
+});
+defineEmits(['upload', 'preview', 'edit-metadata', 'edit-parser', 'delete', 'reindex']);
 
 const uploadMetadata = defineModel('uploadMetadata', { type: Object, required: true });
 const uploadParserMode = defineModel('uploadParserMode', { type: String, required: true });

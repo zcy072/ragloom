@@ -1,8 +1,13 @@
 """单个索引任务的隔离工作区：源文件快照与任务私有的 MinerU 结果目录。
 
-解析阶段不持有知识库锁，期间同名文件可能被重新上传、删除或重建。
+解析阶段不持有知识库锁，期间该文档可能被重新索引、删除或重建。
 任务因此只读取自己的快照，并把 MinerU 结果、视觉缓存写入任务私有目录；
 通过归属校验后，才在持锁阶段把结果目录发布为文档的正式结果。
+
+工作区位于两个根目录下的 ``.index_jobs/<workspace_id>/``，不在任何知识库或文档目录内：
+删除文档或知识库时整目录清理不会波及在途任务，解析仍读取自己的快照，结束时由
+发布前的归属校验判定为 superseded，再由任务自己删除工作区。阶段 A 也因此不会在
+已删除的文档或知识库目录下重新建出任何文件。
 """
 
 import logging
@@ -86,28 +91,33 @@ class JobWorkspace:
 
 
 def _snapshot_file(source: str, target: str) -> None:
-    """优先硬链接；上传总是原子替换文件，所以快照不会被后续写入改动。"""
+    """优先硬链接；原文件不可变，快照使无锁解析不受原文档删除影响。"""
     try:
         os.link(source, target)
     except OSError:
         shutil.copy2(source, target)
 
 
+def _workspace_root() -> str:
+    """所有任务工作区的父目录；与原文件同在数据根目录下，硬链接快照不跨文件系统。"""
+    return os.path.join(get_settings().data_dir, WORKSPACE_DIRNAME)
+
+
 def create_workspace(
     job_id: str,
-    kb_dir: str,
-    filename: str,
+    formal_path: str,
     *,
     carry_saved_results: bool = False,
 ) -> JobWorkspace:
     """为任务创建源文件快照，并带入已有的视觉缓存以避免重复调用视觉模型。
 
+    ``job_id`` 在全部任务中唯一（任务 ID 或重建时每个文档各自生成的 ID）。
     ``carry_saved_results`` 用于重建：把已保存的整个 MinerU 结果目录一并带入，
     解析时直接复用，不再上传云端。调用方须持有该文档的文档锁，保证快照与数据库中
     该文档的当前版本一致。
     """
-    formal_path = os.path.join(kb_dir, filename)
-    job_dir = os.path.join(kb_dir, WORKSPACE_DIRNAME, job_id)
+    filename = os.path.basename(formal_path)
+    job_dir = os.path.join(_workspace_root(), job_id)
     workspace = JobWorkspace(
         job_id=job_id,
         source_path=os.path.join(job_dir, filename),
@@ -117,9 +127,7 @@ def create_workspace(
         os.makedirs(job_dir, exist_ok=True)
         _snapshot_file(formal_path, workspace.source_path)
         if carry_saved_results and workspace.formal_result_dir.is_dir():
-            shutil.copytree(
-                workspace.formal_result_dir, workspace.result_dir, dirs_exist_ok=True
-            )
+            shutil.copytree(workspace.formal_result_dir, workspace.result_dir, dirs_exist_ok=True)
         else:
             _carry_over_visual_caches(workspace)
     except BaseException:
@@ -141,16 +149,15 @@ def _carry_over_visual_caches(workspace: JobWorkspace) -> None:
 
 
 def sweep_stale_workspaces() -> None:
-    """启动时清除上次进程遗留的全部任务工作区；此时没有任何任务在运行。"""
+    """只在启动时清除两个根目录下遗留的 ``.index_jobs``，不跟随符号链接。
+
+    此时没有任务在运行，被中断任务的工作区不会再被使用，可以整体删除。
+    """
     settings = get_settings()
     for root in (settings.data_dir, settings.mineru_results_dir):
-        try:
-            entries = list(os.scandir(root))
-        except OSError:
-            continue
-        for entry in entries:
-            if not entry.is_dir(follow_symlinks=False):
-                continue
-            stale = os.path.join(entry.path, WORKSPACE_DIRNAME)
-            if os.path.isdir(stale):
-                shutil.rmtree(stale, ignore_errors=True)
+        stale = Path(root) / WORKSPACE_DIRNAME
+        if stale.is_dir() and not stale.is_symlink():
+            try:
+                shutil.rmtree(stale)
+            except OSError:
+                logger.warning("Startup workspace cleanup failed for %s", stale, exc_info=True)

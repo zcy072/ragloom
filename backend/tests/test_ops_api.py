@@ -5,15 +5,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import httpx
-
-import api
 import app_storage
 from services.chat import runs as chat_runs
 from services.core import config as application_config
 from services.core import log_tail
 from tests.in_memory_index import InMemoryChunkIndex
-from tests.support import IsolatedStorageTestCase, bearer_headers
+from tests.support import IsolatedStorageTestCase, add_knowledge_bases, api_client
 
 
 class LogTailTest(unittest.TestCase):
@@ -57,8 +54,8 @@ class OpsApiTest(IsolatedStorageTestCase):
         app_storage.bootstrap_defaults()
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             conn.execute(
-                "INSERT INTO roles (name, description, menu_permissions, knowledge_base_permissions, created_at) "
-                "VALUES ('普通', '', '[\"问答对话\"]', '[\"全公司\"]', ?)",
+                "INSERT INTO roles (name, description, menu_permissions, all_knowledge_bases, created_at) "
+                "VALUES ('普通', '', '[\"问答对话\"]', 1, ?)",
                 (application_config.db_now(),),
             )
             role_id = conn.execute("SELECT id FROM roles WHERE name = '普通'").fetchone()[0]
@@ -67,16 +64,15 @@ class OpsApiTest(IsolatedStorageTestCase):
                 "VALUES ('普通用户', '', '正常', ?, ?, ?, 'plain')",
                 (role_id, application_config.db_now(), application_config.hash_password("user-password")),
             )
-        recorder = chat_runs.ChatRunRecorder(1, "alice", "技术部", question="问题", status="answered")
+        kb_id = add_knowledge_bases("技术部")[0]
+        recorder = chat_runs.ChatRunRecorder(1, "alice", kb_id, question="问题", status="answered")
         chat_runs.record_run(recorder)
 
     def _get(self, username, password, paths):
         async def run():
-            transport = httpx.ASGITransport(app=api.app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-                login = await client.post("/api/login", json={"username": username, "password": password})
-                headers = bearer_headers(login)
-                return [await client.get(path, headers=headers) for path in paths]
+            async with api_client() as client:
+                await client.post("/api/login", json={"username": username, "password": password})
+                return [await client.get(path) for path in paths]
 
         return asyncio.run(run())
 
@@ -98,8 +94,7 @@ class OpsApiTest(IsolatedStorageTestCase):
 
     def test_health_probe_needs_no_login(self):
         async def run():
-            transport = httpx.ASGITransport(app=api.app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            async with api_client() as client:
                 return await client.get("/api/health")
 
         response = asyncio.run(run())
@@ -107,8 +102,7 @@ class OpsApiTest(IsolatedStorageTestCase):
 
     def _anonymous_get(self, path):
         async def run():
-            transport = httpx.ASGITransport(app=api.app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            async with api_client() as client:
                 return await client.get(path)
 
         return asyncio.run(run())
@@ -180,6 +174,69 @@ class OpsApiTest(IsolatedStorageTestCase):
         self.assertEqual(found.json()["path"], "backend.log")
         self.assertEqual(missing.json()["path"], "backend.log")
         self.assertEqual(found.json()["lines"], ["2026-10-28 10:00:01,000 ERROR m: b"])
+
+
+class OpsKnowledgeBaseScopeTest(IsolatedStorageTestCase):
+    """运行监控只展示调用者能读的 active 知识库。"""
+
+    def setUp(self):
+        super().setUp()
+        app_storage.initialize_database()
+        app_storage.bootstrap_defaults()
+        self.readable_id, self.hidden_id, self.deleting_id = add_knowledge_bases(
+            "技术部", "财务部", "待删除"
+        )
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.execute(
+                "INSERT INTO roles (name, description, menu_permissions, all_knowledge_bases, created_at) "
+                "VALUES ('监控', '', '[\"运行监控\"]', 0, ?)",
+                (application_config.db_now(),),
+            )
+            role_id = conn.execute("SELECT id FROM roles WHERE name = '监控'").fetchone()[0]
+            conn.executemany(
+                "INSERT INTO role_knowledge_bases (role_id, kb_id) VALUES (?, ?)",
+                [(role_id, self.readable_id), (role_id, self.deleting_id)],
+            )
+            conn.execute(
+                "INSERT INTO accounts (name, phone, status, role_id, created_at, password, username) "
+                "VALUES ('监控用户', '', '正常', ?, ?, ?, 'monitor')",
+                (role_id, application_config.db_now(), application_config.hash_password("monitor-password")),
+            )
+        for kb_id in (self.readable_id, self.hidden_id, self.deleting_id):
+            chat_runs.record_run(
+                chat_runs.ChatRunRecorder(1, "alice", kb_id, question=kb_id, status="answered")
+            )
+            app_storage.index_jobs.prepare_rebuild(kb_id)
+        app_storage.knowledge_bases.mark_deleting(self.deleting_id)
+
+    def _scoped(self, username, password):
+        async def run():
+            async with api_client() as client:
+                await client.post("/api/login", json={"username": username, "password": password})
+                paths = ("/api/ops/overview", "/api/ops/chat-runs", "/api/ops/index-jobs?status=queued")
+                return [await client.get(path) for path in paths]
+
+        overview, runs, jobs = asyncio.run(run())
+        runs = runs.json()
+        self.assertEqual(runs["total"], len(runs["items"]))
+        return (
+            overview.json()["total"],
+            {item["question_preview"] for item in runs["items"]},
+            {job["kb_id"] for job in jobs.json()},
+        )
+
+    def test_restricted_monitor_sees_only_readable_knowledge_bases(self):
+        total, runs, jobs = self._scoped("monitor", "monitor-password")
+        self.assertEqual(total, 2)
+        self.assertEqual(runs, {self.readable_id})
+        self.assertIn(self.readable_id, jobs)
+        self.assertNotIn(self.hidden_id, jobs)
+
+    def test_admin_sees_every_active_knowledge_base(self):
+        total, runs, jobs = self._scoped("admin", application_config.initial_admin_password())
+        self.assertEqual(total, 3)
+        self.assertLessEqual({self.readable_id, self.hidden_id}, jobs)
+        self.assertEqual(runs, {self.readable_id, self.hidden_id})
 
 
 if __name__ == "__main__":

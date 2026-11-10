@@ -23,7 +23,7 @@ test('late history responses cannot replace a new conversation', async () => {
 
 test('deleting the active session resets chat state and refreshes the list', async () => {
   const messages = ref([{ role: 'user', content: '旧消息' }]);
-  const selectedKb = ref('研发部');
+  const selectedKb = ref('kb-rd');
   const sessionStore = { activeSessionId: 'session-1' };
   const deleted = [];
   const composable = useChatSessions(
@@ -31,7 +31,7 @@ test('deleting the active session resets chat state and refreshes the list', asy
     {
       store: sessionStore,
       apiDelete: async url => deleted.push(url),
-      apiGet: async () => [{ id: 'session-2', kb_name: '财务部' }]
+      apiGet: async () => [{ id: 'session-2', kb_id: 'kb-fin', kb_name: '财务部' }]
     }
   );
 
@@ -41,13 +41,13 @@ test('deleting the active session resets chat state and refreshes the list', asy
   assert.equal(sessionStore.activeSessionId, null);
   assert.equal(composable.newSessionPending.value, true);
   assert.deepEqual(messages.value, []);
-  assert.deepEqual(composable.sessions.value, [{ id: 'session-2', kb_name: '财务部' }]);
+  assert.deepEqual(composable.sessions.value, [{ id: 'session-2', kb_id: 'kb-fin', kb_name: '财务部' }]);
   assert.equal(composable.deletingSessionId.value, null);
 });
 
 test('loading a session updates its knowledge base and clears new-session state', async () => {
   const messages = ref([]);
-  const selectedKb = ref('研发部');
+  const selectedKb = ref('kb-rd');
   const sessionStore = { activeSessionId: null };
   const composable = useChatSessions(
     { messages, selectedKb },
@@ -56,14 +56,14 @@ test('loading a session updates its knowledge base and clears new-session state'
       apiGet: async () => [{ role: 'assistant', content: '历史回答', sources: [] }]
     }
   );
-  composable.sessions.value = [{ id: 'session/2', kb_name: '财务部' }];
+  composable.sessions.value = [{ id: 'session/2', kb_id: 'kb-fin', kb_name: '财务部' }];
   composable.newSessionPending.value = true;
 
   await composable.loadSessionMessages('session/2');
 
   assert.equal(sessionStore.activeSessionId, 'session/2');
   assert.equal(composable.newSessionPending.value, false);
-  assert.equal(selectedKb.value, '财务部');
+  assert.equal(selectedKb.value, 'kb-fin');
   assert.equal(messages.value[0].content, '历史回答');
 });
 
@@ -71,16 +71,16 @@ const renameFixture = (overrides = {}) => {
   const calls = [];
   const errors = [];
   const composable = useChatSessions(
-    { messages: ref([]), selectedKb: ref('研发部') },
+    { messages: ref([]), selectedKb: ref('kb-rd') },
     {
       store: { activeSessionId: null },
       toast: { error: message => errors.push(message) },
       apiPut: async (url, body) => { calls.push([url, body]); },
-      apiGet: async () => [{ id: 'a/1', title: '新标题', kb_name: '研发部' }],
+      apiGet: async () => [{ id: 'a/1', title: '新标题', kb_id: 'kb-rd', kb_name: '研发部' }],
       ...overrides
     }
   );
-  composable.sessions.value = [{ id: 'a/1', title: '旧标题', kb_name: '研发部' }];
+  composable.sessions.value = [{ id: 'a/1', title: '旧标题', kb_id: 'kb-rd', kb_name: '研发部' }];
   return { composable, calls, errors };
 };
 
@@ -122,11 +122,11 @@ test('a failed session list load keeps the existing list and tells the user', as
     toast: { error: message => errors.push(message) },
     apiGet: async () => { throw new Error('服务暂时不可用'); }
   });
-  composable.sessions.value = [{ id: 's1', kb_name: '库' }];
+  composable.sessions.value = [{ id: 's1', kb_id: 'kb-1', kb_name: '库' }];
 
   await composable.loadSessions();
 
-  assert.deepEqual(composable.sessions.value, [{ id: 's1', kb_name: '库' }]);
+  assert.deepEqual(composable.sessions.value, [{ id: 's1', kb_id: 'kb-1', kb_name: '库' }]);
   assert.deepEqual(errors, ['服务暂时不可用']);
 });
 

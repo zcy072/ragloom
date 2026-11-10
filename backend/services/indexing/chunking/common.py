@@ -44,7 +44,7 @@ class _ParsedHTMLTable:
 
 def _split_source(split) -> str:
     """读取切片所属的源文件名。"""
-    return str(split.metadata.get("source", ""))
+    return str(split.metadata.get("document_id") or split.metadata.get("source", ""))
 
 
 def chunk_route(document: LCDocument) -> str:
@@ -74,7 +74,6 @@ def contextualized_chunk_text(document: LCDocument) -> str:
     return f"{title}\n{content}" if title and content else title or content
 
 
-
 _MARKDOWN_HEADING = re.compile(r"^\s*(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
 _HTML_TABLE = re.compile(r"<table\b[^>]*>.*?</table>", re.IGNORECASE | re.DOTALL)
 _HTML_TABLE_ROW = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
@@ -96,12 +95,8 @@ _REFERENCE_MARKER = re.compile(r"\^\{\[[^\]\n]{1,80}\]\}")
 _REFERENCE_TRAILING_PUNCTUATION = re.compile(
     r"(\^\{\[[^\]\n]{1,80}\]\})[ \t]*(?:\n[ \t]*)+([。！？；，、,.!?])"
 )
-_REFERENCE_LEADING_LINE = re.compile(
-    r"[ \t]*\n[ \t]*(\^\{\[[^\]\n]{1,80}\]\})"
-)
-_NON_SEMANTIC_CHARS = re.compile(
-    r"[\s#*_~`。；，、,.!?！？:：()（）\[\]{}\\^%\-]+"
-)
+_REFERENCE_LEADING_LINE = re.compile(r"[ \t]*\n[ \t]*(\^\{\[[^\]\n]{1,80}\]\})")
+_NON_SEMANTIC_CHARS = re.compile(r"[\s#*_~`。；，、,.!?！？:：()（）\[\]{}\\^%\-]+")
 _PAGE_CONTINUATION_MARKER = re.compile(
     r"^续(?:附录|表|图)\s*[0-9A-Za-z一二三四五六七八九十.-]*$",
     re.IGNORECASE,

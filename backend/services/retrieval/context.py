@@ -16,7 +16,6 @@ from services.core.config import (
     RETRIEVAL_CONTEXT_MAX_SPANS,
     RETRIEVAL_CONTEXT_NEIGHBOR_CHUNKS,
 )
-from services.core.container import get_application_container
 from services.indexing.chunking import (
     CHUNK_ROUTE_STRUCTURED,
     CHUNK_ROUTE_VISUAL,
@@ -42,7 +41,8 @@ class ContextSpan:
     chunk_start: int | None = None
     chunk_end: int | None = None
     contextual_titles: tuple[str, ...] = ()
-    kb_name: str = ""
+    kb_id: str = ""
+    document_id: str = ""
     chunk_routes: tuple[str, ...] = ()
     # 网页搜索结果的地址；知识库片段为空。
     url: str = ""
@@ -64,29 +64,27 @@ def source_name(document: LCDocument) -> str:
     return str(document.metadata.get("source", "未知文档"))
 
 
-def document_kb_name(document: LCDocument, fallback_kb_name: str) -> str:
+def document_id(document: LCDocument) -> str:
+    """来源身份只读取显式 ID；文件名不参与跨文档定位。"""
+    return str(document.metadata.get("document_id") or "")
+
+
+def document_kb_id(document: LCDocument, fallback_kb_id: str) -> str:
     """读取文档所属知识库；缺失时使用调用方提供的默认知识库。"""
-    value = str(document.metadata.get("kb_name") or fallback_kb_name).strip()
-    return value or fallback_kb_name
-
-
-def _kb_id(kb_name: str) -> str | None:
-    """把知识库名称解析为稳定的 kb_id；知识库不存在时返回 None。"""
-    return get_application_container().knowledge_bases.kb_id_for(kb_name)
+    value = str(document.metadata.get("kb_id") or fallback_kb_id).strip()
+    return value or fallback_kb_id
 
 
 def _load_parent_chunks(
-    kb_name: str,
+    kb_id: str,
+    source_document_id: str,
     parent_ids: set[str],
 ) -> dict[str, dict[str, str]]:
     """从父段落表批量加载指定 parent_id 对应的完整段落。"""
     if not parent_ids:
         return {}
-    kb_id = _kb_id(kb_name)
-    if not kb_id:
-        return {}
     try:
-        rows = parent_store.load(kb_id, parent_ids)
+        rows = parent_store.load(kb_id, source_document_id, parent_ids)
     except sqlite3.Error as exc:
         logger.warning("Parent passage lookup failed: %s", exc)
         return {}
@@ -102,60 +100,64 @@ def _load_parent_chunks(
 
 
 def restore_parent_documents(
-    kb_name: str,
+    kb_id: str,
     documents: list[LCDocument],
 ) -> list[LCDocument]:
     """每个命中的父段落只恢复一次，无需把全文重复存入每个子切片向量。"""
-    parent_ids_by_kb: dict[str, set[str]] = collections.defaultdict(set)
+    parent_ids_by_kb: dict[tuple[str, str], set[str]] = collections.defaultdict(set)
     for document in documents:
         parent_id = document.metadata.get("parent_id")
         if parent_id:
-            parent_ids_by_kb[document_kb_name(document, kb_name)].add(str(parent_id))
+            parent_ids_by_kb[(document_kb_id(document, kb_id), document_id(document))].add(
+                str(parent_id)
+            )
 
     parent_chunks_by_kb = {
-        parent_kb_name: _load_parent_chunks(parent_kb_name, parent_ids)
-        for parent_kb_name, parent_ids in parent_ids_by_kb.items()
+        key: _load_parent_chunks(key[0], key[1], parent_ids)
+        for key, parent_ids in parent_ids_by_kb.items()
     }
     restored: list[LCDocument] = []
-    seen_parents: set[tuple[str, str]] = set()
+    seen_parents: set[tuple[str, str, str]] = set()
     for document in documents:
         parent_id = document.metadata.get("parent_id")
         if not parent_id:
             restored.append(document)
             continue
 
-        parent_kb_name = document_kb_name(document, kb_name)
-        parent_key = (parent_kb_name, str(parent_id))
+        parent_kb_id = document_kb_id(document, kb_id)
+        parent_key = (parent_kb_id, document_id(document), str(parent_id))
         if parent_key in seen_parents:
             continue
         seen_parents.add(parent_key)
 
-        parent = parent_chunks_by_kb.get(parent_kb_name, {}).get(str(parent_id))
+        parent = parent_chunks_by_kb.get((parent_kb_id, document_id(document)), {}).get(
+            str(parent_id)
+        )
         if parent:
             document.page_content = parent["content"]
             if parent["page"]:
                 document.metadata["page"] = parent["page"]
             if parent["contextual_title"]:
                 document.metadata["contextual_title"] = parent["contextual_title"]
-        document.metadata["kb_name"] = parent_kb_name
+        document.metadata["kb_id"] = parent_kb_id
         document.metadata[PARENT_CONTEXT_RESOLVED] = True
         restored.append(document)
     return restored
 
 
-
 def _document_key(document: LCDocument) -> tuple[str, str, str, int | None, str]:
     """为来自任意索引后端的检索文档生成稳定去重键。"""
     return (
-        document_kb_name(document, ""),
-        source_name(document),
+        document_kb_id(document, ""),
+        document_id(document),
         chunk_route(document),
         _chunk_index(document),
         hashlib.sha256(document.page_content.encode("utf-8")).hexdigest(),
     )
 
 
-NeighborKey = tuple[str, str, str]
+# (知识库, 文件, 路线, 发布代)：切换期间新旧两代同时可见，邻块只取命中块所在的一代。
+NeighborKey = tuple[str, str, str, str]
 
 
 def _neighbor_window(index: int, neighbor_chunks: int) -> tuple[int, int]:
@@ -179,10 +181,10 @@ def _needs_neighbors(document: LCDocument) -> bool:
 
 def _fetch_context_neighbors(
     documents: list[LCDocument],
-    fallback_kb_name: str,
+    fallback_kb_id: str,
     neighbor_chunks: int,
 ) -> dict[NeighborKey, list[LCDocument]]:
-    """批量取所有命中的相邻子块，按 (知识库, 文件, 路线) 返回已取到的子块。
+    """批量取所有命中的相邻子块，按 (知识库, 文件, 路线, 发布代) 返回已取到的子块。
 
     同一文件同一路线的窗口先合并成不重叠的区间，每个区间查一次索引，所有区间并发执行；
     相距很远的命中不合并成一个大区间，避免取回中间无关的子块。
@@ -191,18 +193,16 @@ def _fetch_context_neighbors(
     for document in documents:
         if _needs_neighbors(document):
             key = (
-                document_kb_name(document, fallback_kb_name),
-                source_name(document),
+                document_kb_id(document, fallback_kb_id),
+                document_id(document),
                 chunk_route(document),
+                str(document.metadata.get("generation", "")),
             )
             windows[key].append(_neighbor_window(_chunk_index(document) or 0, neighbor_chunks))
 
-    kb_ids = {kb_name: _kb_id(kb_name) for kb_name, _, _ in windows}
     queries: list[tuple[NeighborKey, str, int, int]] = []
     for key, ranges in windows.items():
-        kb_id = kb_ids[key[0]]
-        if not kb_id:
-            continue
+        kb_id = key[0]
         merged: list[list[int]] = []
         for lower, upper in sorted(ranges):
             if merged and lower <= merged[-1][1] + 1:
@@ -214,14 +214,16 @@ def _fetch_context_neighbors(
     index = get_chunk_index()
     results = run_searches(
         [
-            functools.partial(index.neighbors, kb_id, source, route, lower, upper)
-            for (_, source, route), kb_id, lower, upper in queries
+            functools.partial(
+                index.neighbors, kb_id, source, route, lower, upper, generation or None
+            )
+            for (_, source, route, generation), kb_id, lower, upper in queries
         ]
     )
     fetched: dict[NeighborKey, list[LCDocument]] = collections.defaultdict(list)
     for (key, _, _, _), neighbors in zip(queries, results):
         for document in neighbors:
-            document.metadata["kb_name"] = key[0]
+            document.metadata["kb_id"] = key[0]
         fetched[key].extend(neighbors)
     return fetched
 
@@ -231,7 +233,7 @@ def _span_from_documents(
     documents: list[LCDocument],
     rank: int,
     *,
-    kb_name: str = "",
+    kb_id: str = "",
     chunk_start: int | None = None,
     chunk_end: int | None = None,
 ) -> ContextSpan:
@@ -240,10 +242,10 @@ def _span_from_documents(
     seen_contents: set[str] = set()
     pages: list[str] = []
     contextual_titles: list[str] = []
-    resolved_kb_name = kb_name
+    resolved_kb_id = kb_id
     for document in documents:
-        if not resolved_kb_name:
-            resolved_kb_name = document_kb_name(document, "")
+        if not resolved_kb_id:
+            resolved_kb_id = document_kb_id(document, "")
         content = document.page_content.strip()
         if content and content not in seen_contents:
             unique_contents.append(content)
@@ -266,7 +268,8 @@ def _span_from_documents(
         chunk_start=chunk_start,
         chunk_end=chunk_end,
         contextual_titles=tuple(contextual_titles),
-        kb_name=resolved_kb_name,
+        kb_id=resolved_kb_id,
+        document_id=document_id(documents[0]),
         chunk_routes=tuple(dict.fromkeys(chunk_route(document) for document in documents)),
     )
 
@@ -274,16 +277,18 @@ def _span_from_documents(
 def _classify_context_hit(
     rank: int,
     document: LCDocument,
-    fallback_kb_name: str,
+    fallback_kb_id: str,
     neighbor_chunks: int,
     fetched_neighbors: dict[NeighborKey, list[LCDocument]],
 ) -> tuple[str, tuple[str, ...], dict]:
     """将单个排序命中分类为独立证据段或带位置区间。"""
     source = source_name(document)
-    kb_name = document_kb_name(document, fallback_kb_name)
+    kb_id = document_kb_id(document, fallback_kb_id)
+    source_document_id = document_id(document)
     route = chunk_route(document)
     parent_id = document.metadata.get("parent_id")
     index = _chunk_index(document)
+    generation = str(document.metadata.get("generation", ""))
 
     if parent_id:
         # Restored parent passages are already complete; neighbor expansion would duplicate them.
@@ -292,7 +297,8 @@ def _classify_context_hit(
             metadata={
                 "source": source,
                 "page": document.metadata.get("page", ""),
-                "kb_name": kb_name,
+                "kb_id": kb_id,
+                "document_id": source_document_id,
                 **(
                     {"contextual_title": document.metadata["contextual_title"]}
                     if document.metadata.get("contextual_title")
@@ -302,10 +308,11 @@ def _classify_context_hit(
         )
         return (
             "standalone",
-            (kb_name, source, f"parent:{parent_id}"),
+            (kb_id, source_document_id, f"parent:{parent_id}"),
             {
                 "rank": rank,
-                "kb_name": kb_name,
+                "kb_id": kb_id,
+                "document_id": source_document_id,
                 "source": source,
                 "documents": [parent_document],
             },
@@ -319,17 +326,17 @@ def _classify_context_hit(
             lower, upper = _neighbor_window(index, neighbor_chunks)
             neighbors = [
                 item
-                for item in fetched_neighbors.get((kb_name, source, route), [])
+                for item in fetched_neighbors.get(
+                    (kb_id, source_document_id, route, generation), []
+                )
                 if lower <= (_chunk_index(item) or 0) <= upper
             ] or [document]
         indexes = [
-            value
-            for value in (_chunk_index(item) for item in neighbors)
-            if value is not None
+            value for value in (_chunk_index(item) for item in neighbors) if value is not None
         ]
         return (
             "positioned",
-            (kb_name, source, route),
+            (kb_id, source_document_id, route, generation),
             {
                 "rank": rank,
                 "start": min(indexes) if indexes else index,
@@ -341,10 +348,11 @@ def _classify_context_hit(
 
     return (
         "standalone",
-        (kb_name, source, route, _document_key(document)[-1]),
+        (kb_id, source_document_id, route, _document_key(document)[-1]),
         {
             "rank": rank,
-            "kb_name": kb_name,
+            "kb_id": kb_id,
+            "document_id": source_document_id,
             "source": source,
             "documents": [document],
         },
@@ -352,12 +360,12 @@ def _classify_context_hit(
 
 
 def _merge_context_intervals(
-    positioned: dict[tuple[str, str, str], list[dict]],
+    positioned: dict[NeighborKey, list[dict]],
     standalone: list[dict],
 ) -> list[dict]:
-    """合并重叠的位置窗口，并与独立证据段组合。"""
+    """合并重叠的位置窗口，并与独立证据段组合；不同发布代的窗口不合并。"""
     intervals: list[dict] = []
-    for (kb_name, source, _chunk_route_name), source_intervals in positioned.items():
+    for (kb_id, source_document_id, _route, _generation), source_intervals in positioned.items():
         source_intervals.sort(key=lambda item: (item["start"], item["end"], item["rank"]))
         merged: list[dict] = []
         for interval in source_intervals:
@@ -379,7 +387,12 @@ def _merge_context_intervals(
             else:
                 merged.append(interval)
         intervals.extend(
-            {"kb_name": kb_name, "source": source, **interval}
+            {
+                "kb_id": kb_id,
+                "document_id": source_document_id,
+                "source": source_name(interval["documents"][0]),
+                **interval,
+            }
             for interval in merged
         )
     intervals.extend(standalone)
@@ -392,7 +405,7 @@ CONTEXT_TRUNCATION_MARKER = "\n[片段因上下文长度限制而截断]"
 
 def _limit_context_spans(
     intervals: list[dict],
-    fallback_kb_name: str,
+    fallback_kb_id: str,
     max_spans: int,
     max_chars: int,
 ) -> list[ContextSpan]:
@@ -406,7 +419,7 @@ def _limit_context_spans(
             interval["source"],
             interval["documents"],
             interval["rank"],
-            kb_name=interval.get("kb_name", fallback_kb_name),
+            kb_id=interval.get("kb_id", fallback_kb_id),
             chunk_start=interval.get("start"),
             chunk_end=interval.get("end"),
         )
@@ -430,7 +443,7 @@ def _limit_context_spans(
 
 
 def build_context_spans(
-    kb_name: str,
+    kb_id: str,
     documents: list[LCDocument],
     *,
     neighbor_chunks: int = RETRIEVAL_CONTEXT_NEIGHBOR_CHUNKS,
@@ -443,32 +456,31 @@ def build_context_spans(
     自身边界，不拉入无关的相邻章节或图片。
     """
     if any(
-        document.metadata.get("parent_id")
-        and not document.metadata.get(PARENT_CONTEXT_RESOLVED)
+        document.metadata.get("parent_id") and not document.metadata.get(PARENT_CONTEXT_RESOLVED)
         for document in documents
     ):
         # 固定路线子切片先恢复为完整父段落，再考虑相邻扩展。
-        documents = restore_parent_documents(kb_name, documents)
+        documents = restore_parent_documents(kb_id, documents)
 
     # 有位置的命中可扩展并合并区间；父段落、视觉和无位置证据保持独立，防止拼接无关内容。
-    positioned: dict[tuple[str, str, str], list[dict]] = collections.defaultdict(list)
+    positioned: dict[NeighborKey, list[dict]] = collections.defaultdict(list)
     standalone: list[dict] = []
     seen_standalone: set[tuple[str, ...]] = set()
 
-    fetched_neighbors = _fetch_context_neighbors(documents, kb_name, neighbor_chunks)
+    fetched_neighbors = _fetch_context_neighbors(documents, kb_id, neighbor_chunks)
     for rank, document in enumerate(documents):
         kind, key, interval = _classify_context_hit(
-            rank, document, kb_name, neighbor_chunks, fetched_neighbors
+            rank, document, kb_id, neighbor_chunks, fetched_neighbors
         )
         if kind == "positioned":
-            positioned[(key[0], key[1], key[2])].append(interval)
+            positioned[(key[0], key[1], key[2], key[3])].append(interval)
         elif key not in seen_standalone:
             standalone.append(interval)
             seen_standalone.add(key)
 
     # Merge source-local windows before applying the global prompt budget.
     intervals = _merge_context_intervals(positioned, standalone)
-    return _limit_context_spans(intervals, kb_name, max_spans, max_chars)
+    return _limit_context_spans(intervals, kb_id, max_spans, max_chars)
 
 
 def context_span_page_label(span: ContextSpan) -> str:

@@ -43,7 +43,7 @@
             </td>
             <td class="px-6 py-4">{{ r.description || '-' }}</td>
             <td class="px-6 py-4">
-              <span class="text-gray-500 text-xs">{{ (r.knowledge_base_permissions && r.knowledge_base_permissions.length > 0) ? r.knowledge_base_permissions.join(', ') : '无' }}</span>
+              <span class="text-gray-500 text-xs">{{ roleKnowledgeBaseLabel(r) }}</span>
             </td>
             <td class="px-6 py-4 text-[13px] text-right pr-6 space-x-3">
               <button v-if="r.name !== '超级管理员'" class="text-green-500 hover:underline" @click="openEditModal(r)">配置权限</button>
@@ -139,22 +139,23 @@
             <p class="text-sm font-medium text-gray-700 mb-3">允许访问的知识库</p>
             <div class="grid grid-cols-2 gap-3 text-sm text-gray-600">
               <label class="flex items-center space-x-2">
-                <input 
-                  type="checkbox" 
-                  :checked="editingRole?.knowledge_base_permissions?.includes('全公司') || false"
-                  @change="toggleKnowledgeBasePermission('全公司')"
-                  class="rounded text-blue-500" 
-                /> 
-                <span class="font-medium text-red-500">全公司 (所有)</span>
+                <input
+                  type="checkbox"
+                  :checked="editingRole?.all_knowledge_bases || false"
+                  @change="toggleAllKnowledgeBases"
+                  class="rounded text-blue-500"
+                />
+                <span class="font-medium text-red-500">全部知识库</span>
               </label>
-              <label v-for="kbName in kbs" :key="kbName" class="flex items-center space-x-2">
-                <input 
-                  type="checkbox" 
-                  :checked="editingRole?.knowledge_base_permissions?.includes(kbName) || false"
-                  @change="toggleKnowledgeBasePermission(kbName)"
-                  class="rounded text-blue-500" 
-                /> 
-                <span>{{ kbName }}</span>
+              <label v-for="kb in kbs" :key="kb.kb_id" class="flex items-center space-x-2">
+                <input
+                  type="checkbox"
+                  :checked="editingRole?.knowledge_base_ids?.includes(kb.kb_id) || false"
+                  :disabled="editingRole?.all_knowledge_bases"
+                  @change="toggleKnowledgeBasePermission(kb.kb_id)"
+                  class="rounded text-blue-500"
+                />
+                <span>{{ kb.name }}</span>
               </label>
             </div>
           </div>
@@ -221,11 +222,11 @@ const fetchRoles = () => roleList.fetchPage(searchTerm.value);
 const scheduleSearch = () => roleList.scheduleSearch(searchTerm.value);
 const changePage = page => roleList.changePage(page, searchTerm.value);
 const changePageSize = size => roleList.changePageSize(size, searchTerm.value);
-/** 读取全部知识库名称，供角色授权时选择。 */
+/** 读取全部知识库的 ID 和名称，供角色授权时选择。 */
 const fetchKbs = async () => {
   try {
     const data = await apiGet('/api/kbs');
-    kbs.value = data.map(k => k.name);
+    kbs.value = data.filter(k => k.state !== 'deleting').map(k => ({ kb_id: k.kb_id, name: k.name }));
   } catch (e) {
     console.error("Failed to fetch kbs", e);
   }
@@ -302,7 +303,8 @@ const handleSaveRole = async () => {
   try {
     await apiPut(`/api/roles/${editingRole.value.id}`, {
         menu_permissions: editingRole.value.menu_permissions || [],
-        knowledge_base_permissions: editingRole.value.knowledge_base_permissions || []
+        all_knowledge_bases: editingRole.value.all_knowledge_bases || false,
+        knowledge_base_ids: editingRole.value.knowledge_base_ids || []
     });
     showModal.value = false;
     await fetchRoles();
@@ -322,19 +324,22 @@ const toggleMenuPerm = (menu) => {
     editingRole.value.menu_permissions = [...perms, menu];
   }
 };
-/** 切换知识库权限，并保证“全公司”和单库授权互斥。 */
-const toggleKnowledgeBasePermission = (kbName) => {
-  const perms = editingRole.value.knowledge_base_permissions || [];
-  if (kbName === '全公司') {
-    editingRole.value.knowledge_base_permissions = perms.includes(kbName) ? [] : [kbName];
-    return;
-  }
-
-  const scopedPerms = perms.filter(permission => permission !== '全公司');
-  if (scopedPerms.includes(kbName)) {
-    editingRole.value.knowledge_base_permissions = scopedPerms.filter(permission => permission !== kbName);
-  } else {
-    editingRole.value.knowledge_base_permissions = [...scopedPerms, kbName];
-  }
+/** 切换“全部知识库”；开启时清空单库授权，两者互斥。 */
+const toggleAllKnowledgeBases = () => {
+  editingRole.value.all_knowledge_bases = !editingRole.value.all_knowledge_bases;
+  editingRole.value.knowledge_base_ids = [];
+};
+/** 切换单个知识库的授权，按知识库 ID 记录。 */
+const toggleKnowledgeBasePermission = (kbId) => {
+  const ids = editingRole.value.knowledge_base_ids || [];
+  editingRole.value.knowledge_base_ids = ids.includes(kbId)
+    ? ids.filter(id => id !== kbId)
+    : [...ids, kbId];
+};
+/** 角色列表里展示的知识库范围；ID 对应的当前名称取自知识库列表。 */
+const roleKnowledgeBaseLabel = (role) => {
+  if (role.all_knowledge_bases) return '全部知识库';
+  const names = (role.knowledge_base_ids || []).map(id => kbs.value.find(kb => kb.kb_id === id)?.name).filter(Boolean);
+  return names.length ? names.join(', ') : '无';
 };
 </script>

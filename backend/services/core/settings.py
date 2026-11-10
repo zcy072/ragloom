@@ -44,8 +44,10 @@ class ApplicationSettings:
     milvus_collection_prefix: str
     embedding_dimension: int
     initial_admin_password: str
-    auth_secret_key: str
-    auth_token_ttl_seconds: int
+    auth_session_ttl_seconds: int
+    auth_session_max_age_seconds: int
+    auth_max_sessions_per_account: int
+    auth_cookie_secure: bool
     auth_login_max_failures: int
     auth_login_window_seconds: int
     auth_client_max_failures: int
@@ -55,7 +57,6 @@ class ApplicationSettings:
     auth_trust_x_real_ip: bool
     siliconflow_api_key: str
     model_api_key_encryption_key: str
-    model_api_key_previous_encryption_keys: str
     index_job_history_retention_days: int
     index_job_history_max_per_kb: int
     retriever_cache_max_size: int
@@ -63,6 +64,7 @@ class ApplicationSettings:
     chat_retrieval_planning: bool
     chat_query_variant: bool
     chat_agentic_retrieval: bool
+    chat_aux_model_provider: str
     web_search_daily_limit: int
     web_search_user_per_minute: int
     chat_user_max_concurrent: int
@@ -88,7 +90,6 @@ class ApplicationSettings:
     rerank_api_key: str
     rerank_timeout_seconds: int
     index_worker_threads: int
-    ocr_max_concurrency: int
     mineru_max_concurrency: int
     embedding_max_concurrency: int
     vision_global_max_concurrency: int
@@ -132,8 +133,12 @@ class ApplicationSettings:
             milvus_collection_prefix=os.getenv("MILVUS_COLLECTION_PREFIX", "ragloom_").strip(),
             embedding_dimension=_integer("EMBEDDING_DIMENSION", 1024, 1),
             initial_admin_password=os.getenv("INITIAL_ADMIN_PASSWORD", ""),
-            auth_secret_key=os.getenv("AUTH_SECRET_KEY", "").strip(),
-            auth_token_ttl_seconds=_integer("AUTH_TOKEN_TTL_SECONDS", 28800, 1),
+            # 空闲时限：有请求就向后滑动；绝对上限从登录起算，到期必须重新登录。
+            auth_session_ttl_seconds=_integer("AUTH_SESSION_TTL_SECONDS", 28800, 60),
+            auth_session_max_age_seconds=_integer("AUTH_SESSION_MAX_AGE_SECONDS", 604800, 60),
+            auth_max_sessions_per_account=_integer("AUTH_MAX_SESSIONS_PER_ACCOUNT", 10, 1),
+            # 本机 HTTP 调试保持 false；任何非本机访问的部署都应走 HTTPS 并设为 true。
+            auth_cookie_secure=_flag("AUTH_COOKIE_SECURE", False),
             # 次数或窗口设为 0 即关闭对应限制。
             auth_login_max_failures=_integer("AUTH_LOGIN_MAX_FAILURES", 5, 0),
             auth_login_window_seconds=_integer("AUTH_LOGIN_WINDOW_SECONDS", 900, 0),
@@ -144,9 +149,6 @@ class ApplicationSettings:
             auth_trust_x_real_ip=_flag("AUTH_TRUST_X_REAL_IP", False),
             siliconflow_api_key=os.getenv("SILICONFLOW_API_KEY", ""),
             model_api_key_encryption_key=os.getenv("MODEL_API_KEY_ENCRYPTION_KEY", "").strip(),
-            model_api_key_previous_encryption_keys=os.getenv(
-                "MODEL_API_KEY_PREVIOUS_ENCRYPTION_KEYS", ""
-            ),
             index_job_history_retention_days=_integer("INDEX_JOB_HISTORY_RETENTION_DAYS", 90, 1),
             index_job_history_max_per_kb=_integer("INDEX_JOB_HISTORY_MAX_PER_KB", 200, 20),
             retriever_cache_max_size=_integer("RETRIEVER_CACHE_MAX_SIZE", 8, 1),
@@ -154,6 +156,8 @@ class ApplicationSettings:
             chat_retrieval_planning=_flag("CHAT_RETRIEVAL_PLANNING", False),
             chat_query_variant=_flag("CHAT_QUERY_VARIANT", False),
             chat_agentic_retrieval=_flag("CHAT_AGENTIC_RETRIEVAL", False),
+            # 改写、规划、补充查询和摘要改用的服务商名称（模型配置页里的名称）；空为跟随回答模型。
+            chat_aux_model_provider=os.getenv("CHAT_AUX_MODEL_PROVIDER", "").strip(),
             # 联网搜索按次计费；设为 0 即不限。
             web_search_daily_limit=_integer("WEB_SEARCH_DAILY_LIMIT", 500, 0),
             web_search_user_per_minute=_integer("WEB_SEARCH_USER_PER_MINUTE", 5, 0),
@@ -185,7 +189,6 @@ class ApplicationSettings:
             rerank_api_key=os.getenv("RERANK_API_KEY", "").strip(),
             rerank_timeout_seconds=_integer("RERANK_TIMEOUT_SECONDS", 15, 1, 120),
             index_worker_threads=_integer("INDEX_WORKER_THREADS", 3, 1, 8),
-            ocr_max_concurrency=_integer("OCR_MAX_CONCURRENCY", 1, 1, 4),
             mineru_max_concurrency=_integer("MINERU_MAX_CONCURRENCY", 3, 1, 8),
             embedding_max_concurrency=_integer("EMBEDDING_MAX_CONCURRENCY", 2, 1, 8),
             vision_global_max_concurrency=_integer("VISION_GLOBAL_MAX_CONCURRENCY", 6, 1, 32),

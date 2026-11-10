@@ -7,7 +7,6 @@ import threading
 from PIL import Image
 
 from services.core.concurrency import resource_slot
-from services.core.settings import get_settings
 
 _ocr_engine = None
 _ocr_init_lock = threading.Lock()
@@ -24,10 +23,16 @@ def get_ocr_engine():
 
                     logging.getLogger("ppocr").setLevel(logging.ERROR)
                     _ocr_engine = PaddleOCR(
-                        use_angle_cls=False,
-                        lang="ch",
-                        ocr_version="PP-OCRv4",
+                        use_textline_orientation=False,
+                        # PP-OCRv6 small 单模型覆盖中英文；CPU 上比 v4 mobile 更准也更快，
+                        # medium/v5 server 精度提升有限却慢 3 倍以上。
+                        text_detection_model_name="PP-OCRv6_small_det",
+                        text_recognition_model_name="PP-OCRv6_small_rec",
                         enable_mkldnn=False,
+                        # 输入是截图和 PDF 渲染页，不是拍照文档，文档矫正反而会扭曲文字；
+                        # 页面方向分类保留，扫描件里横放或倒放的页不纠正会识别成乱码。
+                        use_doc_unwarping=False,
+                        use_doc_orientation_classify=True,
                     )
                 except ImportError:
                     _ocr_engine = False
@@ -58,9 +63,10 @@ def ocr_image(image: Image.Image, ocr, *, max_dimension: int = 1280) -> str:
     image = image.convert("RGB")
     if max(image.size) > max_dimension:
         image.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
-    # PaddleOCR 引擎是否线程安全未经验证，默认同一时刻只允许一次推理。
-    with resource_slot("ocr", get_settings().ocr_max_concurrency):
-        result = ocr.ocr(np.array(image))
+    # 全进程共享一个 PaddleOCR 预测器，它不保证线程安全，同一时刻只允许一次推理。
+    # 要提高并发得每个名额一个引擎，内存随之翻倍，所以不开放配置。
+    with resource_slot("ocr", 1):
+        result = ocr.predict(np.array(image))
     return _extract_ocr_text(result)
 
 

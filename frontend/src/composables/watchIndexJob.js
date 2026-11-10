@@ -9,7 +9,7 @@ const TERMINAL_STATUSES = new Set(['completed', 'superseded', ...FAILED_STATUSES
  * 轮询知识库的索引任务，直到指定任务进入终态。
  * 返回最终的任务对象；超时或查询失败时返回 null，调用方不应把它当作失败。
  */
-export async function waitForIndexJob(kbName, jobId, {
+export async function waitForIndexJob(kbId, jobId, {
   get = apiGet,
   delays = DEFAULT_DELAYS_MS,
   sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -18,7 +18,7 @@ export async function waitForIndexJob(kbName, jobId, {
     await sleep(delay);
     let jobs;
     try {
-      jobs = await get(`/api/kbs/${encodeURIComponent(kbName)}/index_jobs`);
+      jobs = await get(`/api/kbs/${encodeURIComponent(kbId)}/index_jobs`);
     } catch (_) {
       return null;
     }

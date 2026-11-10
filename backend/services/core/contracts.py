@@ -38,10 +38,23 @@ class PublicModelProvider(TypedDict):
     is_active: bool
 
 
+class KnowledgeBase(NamedTuple):
+    """One knowledge-base record; `kb_id` is the only identity, `name` is display text."""
+
+    kb_id: str
+    name: str
+    system_key: str | None
+    state: str
+    created_at: str
+
+
 class KnowledgeBaseSummary(TypedDict):
     """Knowledge-base list item exposed to API adapters."""
 
+    kb_id: str
     name: str
+    system_key: str | None
+    state: str
     date: str
     docs: int
 
@@ -49,6 +62,7 @@ class KnowledgeBaseSummary(TypedDict):
 class DashboardDocumentRow(NamedTuple):
     """Document data consumed by dashboard aggregation."""
 
+    kb_id: str
     kb_name: str
     filename: str | None
     size: int | None
@@ -76,7 +90,7 @@ RetrievalFilters = dict[str, object]
 class NormalizedRetrievalFilters(TypedDict):
     """Validated document filters consumed by SQLite and retrieval backends."""
 
-    sources: tuple[str, ...]
+    document_ids: tuple[str, ...]
     document_types: tuple[str, ...]
     tags: tuple[str, ...]
     effective_date_from: str

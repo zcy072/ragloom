@@ -13,7 +13,7 @@ export function sessionMarkdown(messages, title, knowledgeBase) {
     sections.push('### 本轮引用来源');
     sources.flatMap(source => source.evidence?.length ? source.evidence : [source]).forEach(source => {
       const label = Number.isInteger(source.id) && source.id > 0 ? source.id : '';
-      const location = [source.kb_name, source.source, source.page, source.context_title].filter(Boolean).map(escapeLabel).join(' / ');
+      const location = [source.kb_name_snapshot, source.source, source.page, source.context_title].filter(Boolean).map(escapeLabel).join(' / ');
       sections.push(`- [来源 ${label}] ${location}${source.url ? ` <${String(source.url).replace(/[<>\s]/g, encodeURIComponent)}>` : ''}`);
       if (source.content) sections.push(`> ${String(source.content).split(/\r?\n/).join('\n> ')}`);
     });

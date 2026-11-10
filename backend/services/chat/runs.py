@@ -9,10 +9,12 @@ import logging
 import math
 import sqlite3
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Literal, TypedDict
 
+from services.chat import lifecycle
 from services.chat import trace as chat_trace
 from services.core import config as application_config
 from services.core import sqlite_connections as application_db
@@ -21,11 +23,14 @@ from services.core.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
-RunStatus = Literal[
-    "answered", "no_evidence", "direct", "interrupted", "cancelled", "error"
-]
+RunStatus = Literal["answered", "no_evidence", "direct", "interrupted", "cancelled", "error"]
 RUN_STATUSES: tuple[RunStatus, ...] = (
-    "answered", "no_evidence", "direct", "interrupted", "cancelled", "error",
+    "answered",
+    "no_evidence",
+    "direct",
+    "interrupted",
+    "cancelled",
+    "error",
 )
 QUESTION_PREVIEW_CHARS = 200
 # 概览统计的行数上限：分位数要在 Python 中计算，窗口过大时只取最近的记录。
@@ -41,6 +46,7 @@ class ChatRunRecord(TypedDict):
     id: int
     created_at: str
     username: str
+    kb_id: str
     kb_name: str
     session_id: str
     question_preview: str
@@ -98,7 +104,7 @@ class ChatRunRecorder:
 
     account_id: int
     username: str
-    kb_name: str
+    kb_id: str
     session_id: str = ""
     user_message_id: int | None = None
     question: str = ""
@@ -175,24 +181,19 @@ def _resolved_status(recorder: ChatRunRecorder) -> RunStatus:
     return recorder.status or "cancelled"
 
 
-def record_run(
-    recorder: ChatRunRecorder, *, container: ApplicationContainer | None = None
-) -> int:
+def record_run(recorder: ChatRunRecorder, *, container: ApplicationContainer | None = None) -> int:
     """把一次问答的累积事实写成一行记录，返回记录 ID。"""
     now = time.perf_counter()
-    extra = {
-        key: value
-        for key, value in recorder.elapsed_ms.items()
-        if key not in _STAGE_COLUMNS
-    }
-    stages = {
-        column: recorder.elapsed_ms.get(key) for key, column in _STAGE_COLUMNS.items()
-    }
+    extra = {key: value for key, value in recorder.elapsed_ms.items() if key not in _STAGE_COLUMNS}
+    stages = {column: recorder.elapsed_ms.get(key) for key, column in _STAGE_COLUMNS.items()}
     with application_db.connect(database_file(container)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if not lifecycle.active_kb(conn, recorder.kb_id):
+            return 0
         cursor = conn.execute(
             """
             INSERT INTO chat_runs (
-                created_at, account_id, username, kb_name, session_id, user_message_id,
+                created_at, account_id, username, kb_id, session_id, user_message_id,
                 question_preview, model_provider, status, rerank_status, rewritten,
                 retrieval_skipped, context_spans, cited_sources, answer_chars,
                 retrieval_ms, rerank_ms, context_ms, first_token_ms, generation_ms,
@@ -203,7 +204,7 @@ def record_run(
                 application_config.db_now(),
                 recorder.account_id,
                 recorder.username,
-                recorder.kb_name,
+                recorder.kb_id,
                 recorder.session_id,
                 recorder.user_message_id,
                 " ".join(recorder.question.split())[:QUESTION_PREVIEW_CHARS],
@@ -249,27 +250,39 @@ def _cutoff(days: int) -> str:
 
 
 def overview(
-    days: int, *, container: ApplicationContainer | None = None
+    days: int,
+    *,
+    kb_ids: Sequence[str] | None = None,
+    container: ApplicationContainer | None = None,
 ) -> RunsOverview:
-    """统计最近 `days` 天的问答状态分布、耗时分位数和按天趋势。"""
+    """统计最近 `days` 天的问答状态分布、耗时分位数和按天趋势。
+
+    `kb_ids` 为 None 表示不限知识库，否则只统计其中的知识库。
+    """
     days = max(1, min(days, 90))
+    where = "WHERE created_at >= ?"
+    params: list[object] = [_cutoff(days)]
+    if kb_ids is not None:
+        where += f" AND kb_id IN ({','.join('?' for _ in kb_ids) or 'NULL'})"
+        params.extend(kb_ids)
     with application_db.connect(database_file(container)) as conn:
         total = int(
-            conn.execute(
-                "SELECT COUNT(*) FROM chat_runs WHERE created_at >= ?", (_cutoff(days),)
-            ).fetchone()[0]
+            conn.execute(f"SELECT COUNT(*) FROM chat_runs {where}", params).fetchone()[0]
         )
         rows = conn.execute(
-            """
+            f"""
             SELECT created_at, status, total_ms, retrieval_ms, rerank_ms, first_token_ms
-            FROM chat_runs WHERE created_at >= ?
+            FROM chat_runs {where}
             ORDER BY id DESC LIMIT ?
             """,
-            (_cutoff(days), OVERVIEW_ROW_LIMIT),
+            (*params, OVERVIEW_ROW_LIMIT),
         ).fetchall()
     status_counts = {status: 0 for status in RUN_STATUSES}
     samples: dict[str, list[float]] = {
-        "total": [], "retrieval": [], "rerank": [], "first_token": [],
+        "total": [],
+        "retrieval": [],
+        "rerank": [],
+        "first_token": [],
     }
     by_day: dict[str, list[tuple[str, float]]] = {}
     for created_at, status, total_ms, retrieval_ms, rerank_ms, first_token_ms in rows:
@@ -280,7 +293,9 @@ def overview(
             continue
         samples["total"].append(float(total_ms))
         for name, value in (
-            ("retrieval", retrieval_ms), ("rerank", rerank_ms), ("first_token", first_token_ms),
+            ("retrieval", retrieval_ms),
+            ("rerank", rerank_ms),
+            ("first_token", first_token_ms),
         ):
             if value is not None:
                 samples[name].append(float(value))
@@ -290,9 +305,7 @@ def overview(
             "date": day,
             "runs": len(items),
             "errors": sum(1 for status, _ in items if status == "error"),
-            "p95_total_ms": _percentile(
-                [ms for status, ms in items if status != "error"], 0.95
-            ),
+            "p95_total_ms": _percentile([ms for status, ms in items if status != "error"], 0.95),
         }
         for day, items in sorted(by_day.items())
     ]
@@ -317,6 +330,7 @@ def _record_from_row(row: sqlite3.Row) -> ChatRunRecord:
         "id": int(row["id"]),
         "created_at": str(row["created_at"]),
         "username": str(row["username"]),
+        "kb_id": str(row["kb_id"]),
         "kb_name": str(row["kb_name"]),
         "session_id": str(row["session_id"]),
         "question_preview": str(row["question_preview"]),
@@ -341,35 +355,47 @@ def _record_from_row(row: sqlite3.Row) -> ChatRunRecord:
     }
 
 
-_RUNS_WITH_TRACE = "FROM chat_runs r LEFT JOIN chat_traces t ON t.run_id = r.id"
+_RUNS_WITH_TRACE = (
+    "FROM chat_runs r LEFT JOIN chat_traces t ON t.run_id = r.id "
+    "JOIN knowledge_bases k ON k.kb_id = r.kb_id"
+)
 
 
 def list_runs(
     *,
     status: str | None = None,
-    kb_name: str | None = None,
+    kb_id: str | None = None,
+    kb_ids: Sequence[str] | None = None,
     min_total_ms: float | None = None,
     feedback: int | None = None,
     limit: int = 20,
     offset: int = 0,
     container: ApplicationContainer | None = None,
 ) -> tuple[int, list[ChatRunRecord]]:
-    """按时间倒序分页返回记录，并给出过滤后的总数；每条记录带上对应的追踪 ID 和用户评价。"""
-    clauses: list[str] = []
+    """按时间倒序分页返回记录，并给出过滤后的总数；每条记录带上对应的追踪 ID 和用户评价。
+
+    只返回 active 知识库的记录；`kb_ids` 为 None 表示不限知识库，否则只看其中的知识库。
+    """
+    if kb_ids is not None and not kb_ids:
+        return 0, []
+    clauses: list[str] = ["k.state = 'active'"]
     params: list[object] = []
+    if kb_ids is not None:
+        clauses.append(f"r.kb_id IN ({','.join('?' for _ in kb_ids)})")
+        params.extend(kb_ids)
     if status:
         clauses.append("r.status = ?")
         params.append(status)
-    if kb_name:
-        clauses.append("r.kb_name = ?")
-        params.append(kb_name)
+    if kb_id:
+        clauses.append("r.kb_id = ?")
+        params.append(kb_id)
     if min_total_ms is not None:
         clauses.append("r.total_ms >= ?")
         params.append(min_total_ms)
     if feedback is not None:
         clauses.append("COALESCE(t.feedback, 0) = ?")
         params.append(feedback)
-    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    where = f"WHERE {' AND '.join(clauses)}"
     limit = max(1, min(limit, LIST_LIMIT_MAX))
     with application_db.connect(database_file(container)) as conn:
         conn.row_factory = sqlite3.Row
@@ -377,7 +403,7 @@ def list_runs(
             conn.execute(f"SELECT COUNT(*) {_RUNS_WITH_TRACE} {where}", params).fetchone()[0]
         )
         rows = conn.execute(
-            f"SELECT r.*, t.id AS trace_id, t.feedback AS feedback {_RUNS_WITH_TRACE} {where} "
+            f"SELECT r.*, k.name AS kb_name, t.id AS trace_id, t.feedback AS feedback {_RUNS_WITH_TRACE} {where} "
             "ORDER BY r.id DESC LIMIT ? OFFSET ?",
             (*params, limit, max(0, offset)),
         ).fetchall()
@@ -393,8 +419,6 @@ def prune(
     """删除超过保留期的运行记录和追踪记录，返回删除的运行记录条数；启动维护时直接传入数据库路径。"""
     days = max(1, retention_days or get_settings().chat_run_retention_days)
     with application_db.connect(db_file or database_file(container)) as conn:
-        cursor = conn.execute(
-            "DELETE FROM chat_runs WHERE created_at < ?", (_cutoff(days),)
-        )
+        cursor = conn.execute("DELETE FROM chat_runs WHERE created_at < ?", (_cutoff(days),))
         chat_trace.prune(conn, _cutoff(days))
     return cursor.rowcount

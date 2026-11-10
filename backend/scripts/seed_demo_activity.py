@@ -30,17 +30,44 @@ from services.core import config as application_config  # noqa: E402
 PREFIX = "demo_"
 DEMO_PASSWORD = "demo-password"
 PEOPLE = [
-    ("zhangwei", "张伟"), ("liuyang", "刘洋"), ("wangfang", "王芳"), ("chenjing", "陈静"),
-    ("lixiang", "李想"), ("zhaolei", "赵磊"), ("sunli", "孙丽"), ("zhouqiang", "周强"),
-    ("wuhao", "吴昊"), ("zhengyu", "郑宇"), ("hemin", "何敏"), ("guolin", "郭琳"),
+    ("zhangwei", "张伟"),
+    ("liuyang", "刘洋"),
+    ("wangfang", "王芳"),
+    ("chenjing", "陈静"),
+    ("lixiang", "李想"),
+    ("zhaolei", "赵磊"),
+    ("sunli", "孙丽"),
+    ("zhouqiang", "周强"),
+    ("wuhao", "吴昊"),
+    ("zhengyu", "郑宇"),
+    ("hemin", "何敏"),
+    ("guolin", "郭琳"),
 ]
 QUESTIONS = [
-    "年假可以分几次休", "报销需要哪些材料", "试用期多久", "加班费怎么算", "出差住宿标准是多少",
-    "新员工入职要准备什么", "病假需要什么证明", "公积金比例是多少", "离职交接流程", "办公用品怎么申领",
-    "会议室怎么预约", "VPN 怎么申请", "代码评审规范", "发布流程有哪些步骤", "线上故障怎么上报",
+    "年假可以分几次休",
+    "报销需要哪些材料",
+    "试用期多久",
+    "加班费怎么算",
+    "出差住宿标准是多少",
+    "新员工入职要准备什么",
+    "病假需要什么证明",
+    "公积金比例是多少",
+    "离职交接流程",
+    "办公用品怎么申领",
+    "会议室怎么预约",
+    "VPN 怎么申请",
+    "代码评审规范",
+    "发布流程有哪些步骤",
+    "线上故障怎么上报",
 ]
 ANSWER = "根据制度文件，{question}的规定如下：请参考引用的条款，具体以最新版本为准。"
-STATUS_WEIGHTS = [("answered", 80), ("no_evidence", 10), ("direct", 4), ("cancelled", 3), ("error", 3)]
+STATUS_WEIGHTS = [
+    ("answered", 80),
+    ("no_evidence", 10),
+    ("direct", 4),
+    ("cancelled", 3),
+    ("error", 3),
+]
 
 
 def _iso(moment: datetime) -> str:
@@ -49,9 +76,12 @@ def _iso(moment: datetime) -> str:
 
 def _reset(conn: sqlite3.Connection) -> None:
     pattern = f"{PREFIX}%"
-    ids = [row[0] for row in conn.execute("SELECT id FROM accounts WHERE username LIKE ?", (pattern,))]
+    ids = [
+        row[0] for row in conn.execute("SELECT id FROM accounts WHERE username LIKE ?", (pattern,))
+    ]
     sessions = [
-        row[0] for row in conn.execute("SELECT id FROM chat_sessions WHERE username LIKE ?", (pattern,))
+        row[0]
+        for row in conn.execute("SELECT id FROM chat_sessions WHERE username LIKE ?", (pattern,))
     ]
     for session_id in sessions:
         conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
@@ -64,19 +94,29 @@ def _reset(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM roles WHERE name LIKE ?", ("演示-%",))
 
 
-def _demo_roles(conn: sqlite3.Connection, kb_names: list[str]) -> list[int]:
-    """每个知识库一个只读角色，再加一个可读全部知识库的角色。"""
+def _demo_roles(
+    conn: sqlite3.Connection, kbs: list[tuple[str, str]]
+) -> dict[int, list[tuple[str, str]]]:
+    """每个知识库一个只读角色，再加一个可读全部知识库的角色；返回角色 ID 到可读 (kb_id, 名称) 的映射。"""
     now = application_config.db_now()
-    specs = [(f"演示-{kb}", [kb]) for kb in kb_names] + [("演示-全部知识库", list(kb_names))]
-    role_ids = []
-    for name, kbs in specs:
+    specs = [(f"演示-{name}", False, [(kb_id, name)]) for kb_id, name in kbs]
+    specs.append(("演示-全部知识库", True, list(kbs)))
+    roles: dict[int, list[tuple[str, str]]] = {}
+    for role_name, all_kbs, readable in specs:
         cursor = conn.execute(
-            "INSERT INTO roles (name, description, menu_permissions, knowledge_base_permissions, "
+            "INSERT INTO roles (name, description, menu_permissions, all_knowledge_bases, "
             "created_at) VALUES (?, '演示数据', ?, ?, ?)",
-            (name, json.dumps(["问答对话"], ensure_ascii=False), json.dumps(kbs, ensure_ascii=False), now),
+            (role_name, json.dumps(["问答对话"], ensure_ascii=False), int(all_kbs), now),
         )
-        role_ids.append(int(cursor.lastrowid))
-    return role_ids
+        role_id = int(cursor.lastrowid)
+        if not all_kbs:
+            for kb_id, _name in readable:
+                conn.execute(
+                    "INSERT INTO role_knowledge_bases (role_id, kb_id) VALUES (?, ?)",
+                    (role_id, kb_id),
+                )
+        roles[role_id] = readable
+    return roles
 
 
 def _seed_user(conn, rng, *, account_id, username, kbs, days, activity, now):
@@ -93,7 +133,12 @@ def _seed_user(conn, rng, *, account_id, username, kbs, days, activity, now):
             conn.execute(
                 "INSERT INTO login_events (created_at, account_id, username, success, reason, client) "
                 "VALUES (?, ?, ?, 0, 'invalid_credentials', ?)",
-                (_iso(login_at - timedelta(minutes=1)), account_id, username, f"10.0.{account_id % 9}.{account_id}"),
+                (
+                    _iso(login_at - timedelta(minutes=1)),
+                    account_id,
+                    username,
+                    f"10.0.{account_id % 9}.{account_id}",
+                ),
             )
         conn.execute(
             "INSERT INTO login_events (created_at, account_id, username, success, reason, client) "
@@ -101,20 +146,28 @@ def _seed_user(conn, rng, *, account_id, username, kbs, days, activity, now):
             (_iso(login_at), account_id, username, f"10.0.{account_id % 9}.{account_id}"),
         )
         for _ in range(rng.choice([1, 1, 1, 2])):
-            _seed_session(conn, rng, account_id=account_id, username=username,
-                          kb=rng.choice(kbs), start=login_at + timedelta(minutes=rng.randrange(5, 240)), now=now)
+            _seed_session(
+                conn,
+                rng,
+                account_id=account_id,
+                username=username,
+                kb=rng.choice(kbs),
+                start=login_at + timedelta(minutes=rng.randrange(5, 240)),
+                now=now,
+            )
 
 
 def _seed_session(conn, rng, *, account_id, username, kb, start, now):
+    kb_id, kb_name = kb
     if start > now:
         return
     session_id = uuid.uuid4().hex
     questions = rng.sample(QUESTIONS, rng.choice([1, 2, 2, 3, 4]))
     end = start + timedelta(minutes=2 * len(questions))
     conn.execute(
-        "INSERT INTO chat_sessions (id, account_id, username, kb_name, title, created_at, updated_at) "
+        "INSERT INTO chat_sessions (id, account_id, username, kb_id, title, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (session_id, account_id, username, kb, questions[0], _iso(start), _iso(min(end, now))),
+        (session_id, account_id, username, kb_id, questions[0], _iso(start), _iso(min(end, now))),
     )
     for index, question in enumerate(questions):
         asked = start + timedelta(minutes=2 * index)
@@ -125,27 +178,78 @@ def _seed_session(conn, rng, *, account_id, username, kb, start, now):
         ).lastrowid
         total_ms = rng.uniform(1200, 6000)
         run_id = conn.execute(
-            "INSERT INTO chat_runs (created_at, account_id, username, kb_name, session_id, user_message_id, "
+            "INSERT INTO chat_runs (created_at, account_id, username, kb_id, session_id, user_message_id, "
             "question_preview, model_provider, status, total_ms, first_token_ms, retrieval_ms, error_summary) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, 'demo', ?, ?, ?, ?, ?)",
-            (_iso(asked), account_id, username, kb, session_id, user_message, question, status,
-             total_ms, total_ms * 0.3, total_ms * 0.05,
-             "RuntimeError: upstream timeout" if status == "error" else ""),
+            (
+                _iso(asked),
+                account_id,
+                username,
+                kb_id,
+                session_id,
+                user_message,
+                question,
+                status,
+                total_ms,
+                total_ms * 0.3,
+                total_ms * 0.05,
+                "RuntimeError: upstream timeout" if status == "error" else "",
+            ),
         ).lastrowid
         if status in ("error", "cancelled"):
             continue
-        sources = [{"source": f"{kb}制度汇编.pdf"}] if status == "answered" else []
+        document = conn.execute(
+            "SELECT document_id, filename FROM documents WHERE kb_id = ? AND status = 'ready' "
+            "ORDER BY uploaded_at, document_id LIMIT 1",
+            (kb_id,),
+        ).fetchone()
+        sources = (
+            [
+                {
+                    "id": 1,
+                    "citation_ids": [1],
+                    "kb_id": kb_id,
+                    "kb_name_snapshot": kb_name,
+                    "document_id": document[0],
+                    "source": document[1],
+                    "content": "演示活动引用",
+                    "page": "",
+                    "context_title": "",
+                }
+            ]
+            if status == "answered" and document
+            else []
+        )
         answer_message = conn.execute(
             "INSERT INTO chat_messages (session_id, role, content, sources, created_at) VALUES (?, 'assistant', ?, ?, ?)",
-            (session_id, ANSWER.format(question=question) if sources else "知识库中没有找到相关内容。",
-             json.dumps(sources, ensure_ascii=False), _iso(asked + timedelta(seconds=total_ms / 1000))),
+            (
+                session_id,
+                ANSWER.format(question=question) if sources else "知识库中没有找到相关内容。",
+                json.dumps(sources, ensure_ascii=False),
+                _iso(asked + timedelta(seconds=total_ms / 1000)),
+            ),
         ).lastrowid
         roll = rng.random()
-        feedback = 1 if roll < 0.18 else -1 if roll < 0.24 or (status == "no_evidence" and roll < 0.5) else 0
+        feedback = (
+            1
+            if roll < 0.18
+            else -1
+            if roll < 0.24 or (status == "no_evidence" and roll < 0.5)
+            else 0
+        )
         conn.execute(
-            "INSERT INTO chat_traces (id, created_at, account_id, kb_name, session_id, run_id, "
+            "INSERT INTO chat_traces (id, created_at, account_id, kb_id, session_id, run_id, "
             "assistant_message_id, feedback, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}')",
-            (uuid.uuid4().hex, _iso(asked), account_id, kb, session_id, run_id, answer_message, feedback),
+            (
+                uuid.uuid4().hex,
+                _iso(asked),
+                account_id,
+                kb_id,
+                session_id,
+                run_id,
+                answer_message,
+                feedback,
+            ),
         )
 
 
@@ -162,33 +266,49 @@ def main() -> int:
     with sqlite3.connect(app_storage.DB_FILE) as conn:
         if args.reset:
             _reset(conn)
-        elif conn.execute("SELECT 1 FROM accounts WHERE username LIKE ?", (f"{PREFIX}%",)).fetchone():
+        elif conn.execute(
+            "SELECT 1 FROM accounts WHERE username LIKE ?", (f"{PREFIX}%",)
+        ).fetchone():
             print("已有演示账号；加 --reset 重新生成。", file=sys.stderr)
             return 1
-        kb_names = [row[0] for row in conn.execute("SELECT name FROM knowledge_bases ORDER BY created_at, name")]
-        if not kb_names:
+        all_kbs = [
+            (str(row[0]), str(row[1]))
+            for row in conn.execute(
+                "SELECT kb_id, name FROM knowledge_bases WHERE state = 'active' ORDER BY created_at, name"
+            )
+        ]
+        if not all_kbs:
             print("没有知识库，先启动一次后端完成初始化。", file=sys.stderr)
             return 1
-        role_ids = _demo_roles(conn, kb_names)
+        roles = _demo_roles(conn, all_kbs)
+        role_ids = list(roles)
         password = application_config.hash_password(DEMO_PASSWORD)
         for index, (slug, name) in enumerate(PEOPLE):
             # 最后两个账号停留在待审核，用来展示审核中的人数。
             status = "审核中" if index >= len(PEOPLE) - 2 else "正常"
             role_id = rng.choice(role_ids)
             registered = now - timedelta(days=rng.randrange(1, args.days + 15))
-            account_id = int(conn.execute(
-                "INSERT INTO accounts (username, name, phone, password, status, role_id, created_at) "
-                "VALUES (?, ?, '', ?, ?, ?, ?)",
-                (f"{PREFIX}{slug}", name, password, status, role_id, _iso(registered)),
-            ).lastrowid)
+            account_id = int(
+                conn.execute(
+                    "INSERT INTO accounts (username, name, phone, password, status, role_id, created_at) "
+                    "VALUES (?, ?, '', ?, ?, ?, ?)",
+                    (f"{PREFIX}{slug}", name, password, status, role_id, _iso(registered)),
+                ).lastrowid
+            )
             if status != "正常":
                 continue
-            kbs = json.loads(conn.execute(
-                "SELECT knowledge_base_permissions FROM roles WHERE id = ?", (role_id,)
-            ).fetchone()[0])
+            kbs = roles[role_id]
             active_days = min(args.days, (now - registered).days + 1)
-            _seed_user(conn, rng, account_id=account_id, username=f"{PREFIX}{slug}", kbs=kbs,
-                       days=active_days, activity=rng.choice([0.15, 0.3, 0.5, 0.7, 0.9]), now=now)
+            _seed_user(
+                conn,
+                rng,
+                account_id=account_id,
+                username=f"{PREFIX}{slug}",
+                kbs=kbs,
+                days=active_days,
+                activity=rng.choice([0.15, 0.3, 0.5, 0.7, 0.9]),
+                now=now,
+            )
     print(f"已生成 {len(PEOPLE)} 个演示账号（密码 {DEMO_PASSWORD}），覆盖最近 {args.days} 天。")
     return 0
 

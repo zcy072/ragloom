@@ -2,6 +2,7 @@ import asyncio
 import json
 import sqlite3
 import unittest
+import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -26,11 +27,11 @@ class ChatRunRecordingTest(IsolatedStorageTestCase):
         super().setUp()
         app_storage.initialize_database()
         self.owner = chat_service.SessionOwner(1, "alice")
-        add_knowledge_bases("技术部")
-        app_storage.knowledge_base_settings.set_query_rewrite_enabled("技术部", False)
+        self.tech_id = add_knowledge_bases("技术部")[0]
+        app_storage.knowledge_base_settings.set_query_rewrite_enabled(self.tech_id, False)
 
     def _run_chat(self, model, spans, question="这是一个很长的问题 " * 30):
-        request = chat_service.ChatRequest(question=question, kb_name="技术部")
+        request = chat_service.ChatRequest(question=question, kb_id=self.tech_id)
 
         async def consume():
             stream = await chat_service.chat(request, self.owner)
@@ -62,7 +63,7 @@ class ChatRunRecordingTest(IsolatedStorageTestCase):
         (row,) = self._rows()
         self.assertEqual(row["status"], "answered")
         self.assertEqual(row["username"], "alice")
-        self.assertEqual(row["kb_name"], "技术部")
+        self.assertEqual(row["kb_id"], self.tech_id)
         self.assertLessEqual(len(row["question_preview"]), 200)
         self.assertEqual(row["cited_sources"], 1)
         self.assertGreater(row["answer_chars"], 0)
@@ -87,8 +88,61 @@ class ChatRunRecordingTest(IsolatedStorageTestCase):
         self._run_chat(Model(), [_span()])
         (row,) = self._rows()
         self.assertEqual(row["status"], "error")
-        self.assertTrue(row["error_summary"].startswith("RuntimeError: upstream said"))
-        self.assertLessEqual(len(row["error_summary"]), 200)
+        # 只记录异常类型，上游返回的原文一个字也不进入记录。
+        self.assertEqual(row["error_summary"], "RuntimeError")
+        self.assertNotIn("upstream said", row["error_summary"])
+
+    def test_upstream_exception_text_never_leaves_the_model_boundary(self):
+        canary = "canary-" + uuid.uuid4().hex
+
+        class UpstreamError(Exception):
+            status_code = 401
+            request_id = "req_123"
+
+        class Model:
+            async def astream(self, _messages):
+                raise UpstreamError(f"Incorrect API key sk-{canary} provided")
+                yield
+
+        events = []
+        request = chat_service.ChatRequest(question="问题", kb_id=self.tech_id)
+
+        async def consume():
+            stream = await chat_service.chat(request, self.owner)
+            async for event in stream.events:
+                events.append(event)
+
+        with self.assertLogs(level="DEBUG") as logs, patch.object(
+            chat_service, "select_model_config", return_value=MODEL_CONFIG
+        ), patch.object(
+            chat_service, "prepare_chat_image", new=AsyncMock(return_value=("", "", ""))
+        ), patch.object(
+            chat_query, "retrieve_rerank_candidates", new=AsyncMock(return_value=[])
+        ), patch.object(chat_service, "rerank", new=AsyncMock(return_value=[])), patch.object(
+            chat_service.context_builder, "build_context_spans", return_value=[_span()]
+        ), patch.object(chat_service, "create_answer_llm", return_value=Model()):
+            asyncio.run(consume())
+
+        (row,) = self._rows()
+        self.assertEqual(row["status"], "error")
+        self.assertEqual(
+            row["error_summary"], "UpstreamError (HTTP 401, request_id=req_123)"
+        )
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            stored = "\n".join(
+                str(value)
+                for table in ("chat_runs", "chat_traces", "chat_messages")
+                for record in conn.execute(f"SELECT * FROM {table}")
+                for value in record
+            )
+        self.assertTrue(events)
+        for label, text in (
+            ("sse", "\n".join(str(event) for event in events)),
+            ("database", stored),
+            ("logs", "\n".join(logs.output)),
+        ):
+            with self.subTest(label=label):
+                self.assertNotIn(canary, text)
 
     def test_cancellation_is_recorded_as_cancelled(self):
         class Model:
@@ -102,7 +156,7 @@ class ChatRunRecordingTest(IsolatedStorageTestCase):
         self.assertEqual(row["status"], "cancelled")
 
     def test_pre_stream_failure_is_recorded_as_error(self):
-        request = chat_service.ChatRequest(question="会失败", kb_name="技术部")
+        request = chat_service.ChatRequest(question="会失败", kb_id=self.tech_id)
         with patch.object(
             chat_service, "select_model_config", return_value=MODEL_CONFIG
         ), patch.object(
@@ -116,11 +170,11 @@ class ChatRunRecordingTest(IsolatedStorageTestCase):
                 asyncio.run(chat_service.chat(request, self.owner))
         (row,) = self._rows()
         self.assertEqual(row["status"], "error")
-        self.assertIn("index down", row["error_summary"])
+        self.assertEqual(row["error_summary"], "RuntimeError")
 
     def test_validation_failures_before_the_stream_are_recorded(self):
-        missing_kb = chat_service.ChatRequest(question="问题", kb_name="不存在的库")
-        no_key = chat_service.ChatRequest(question="问题", kb_name="技术部")
+        missing_kb = chat_service.ChatRequest(question="问题", kb_id="00000000-0000-4000-8000-000000000000")
+        no_key = chat_service.ChatRequest(question="问题", kb_id=self.tech_id)
 
         with patch.object(
             chat_service, "select_model_config", return_value=MODEL_CONFIG
@@ -130,20 +184,22 @@ class ChatRunRecordingTest(IsolatedStorageTestCase):
         with patch.object(
             chat_service, "select_model_config", return_value={**MODEL_CONFIG, "api_key": ""}
         ):
-            with self.assertRaises(chat_service.PreconditionFailedError):
+            with self.assertRaises(chat_service.ServiceUnavailableError) as raised:
                 asyncio.run(chat_service.chat(no_key, self.owner))
+        self.assertEqual(raised.exception.code, "model_not_configured")
 
         rows = self._rows()
-        self.assertEqual([row["status"] for row in rows], ["error", "error"])
+        # 不存在的知识库没有可引用的 kb_id，外键使这条记录无法写入；其余失败照常记录。
+        self.assertEqual([row["status"] for row in rows], ["error"])
         self.assertEqual({row["session_id"] for row in rows}, {""})
-        self.assertEqual([row["kb_name"] for row in rows], ["不存在的库", "技术部"])
+        self.assertEqual([row["kb_id"] for row in rows], [self.tech_id])
 
     def test_recording_failure_does_not_change_the_answer(self):
         class Model:
             async def astream(self, _messages):
                 yield SimpleNamespace(content="正常回答")
 
-        request = chat_service.ChatRequest(question="问题", kb_name="技术部")
+        request = chat_service.ChatRequest(question="问题", kb_id=self.tech_id)
         events: list[str] = []
 
         async def consume():
@@ -173,9 +229,12 @@ class ChatRunQueryTest(IsolatedStorageTestCase):
     def setUp(self):
         super().setUp()
         app_storage.initialize_database()
+        self.kb_ids = dict(zip(("技术部", "财务部"), add_knowledge_bases("技术部", "财务部")))
 
     def _insert(self, status="answered", total_ms=100.0, kb="技术部", created_at=None):
-        recorder = chat_runs.ChatRunRecorder(1, "alice", kb, question="问", status=status)
+        recorder = chat_runs.ChatRunRecorder(
+            1, "alice", self.kb_ids[kb], question="问", status=status
+        )
         recorder.session_id = "s"
         with patch.object(chat_runs.time, "perf_counter", return_value=recorder.started + total_ms / 1000):
             chat_runs.record_run(recorder)

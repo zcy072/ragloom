@@ -11,12 +11,15 @@ from dataclasses import dataclass
 
 from services.core import model_api_keys
 from services.core import sqlite_connections as application_db
-from services.core.config import ALL_KNOWLEDGE_BASES_PERMISSION, hash_password
+from services.core.config import hash_password, validate_new_password
+from services.core.knowledge_bases import COMMON_SYSTEM_KEY
+from services.core.model_providers import ModelProviderStore
 from services.core.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
 INITIAL_ADMIN_PASSWORD_FILENAME = "initial_admin_password.txt"
+COMMON_KNOWLEDGE_BASE_NAME = "通用知识库"
 OPENAI_DEFAULT_MODEL = "gpt-6-sol"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-flash"
 
@@ -37,36 +40,56 @@ def _sync_system_role_permissions(
     conn: sqlite3.Connection,
     role_menu_options: Sequence[str],
 ) -> None:
-    """确保超级管理员角色包含新增加的后台菜单和全公司知识库权限。"""
+    """确保超级管理员角色包含新增加的后台菜单，并保持全库访问权限。"""
     row = conn.execute(
-        "SELECT menu_permissions, knowledge_base_permissions FROM roles WHERE name = ?",
-        ("超级管理员",),
+        "SELECT menu_permissions FROM roles WHERE name = ?", ("超级管理员",)
     ).fetchone()
     if not row:
         return
     try:
         menu_permissions = json.loads(row[0] or "[]")
-        knowledge_base_permissions = json.loads(row[1] or "[]")
     except json.JSONDecodeError:
-        menu_permissions, knowledge_base_permissions = [], []
+        menu_permissions = []
     if not isinstance(menu_permissions, list):
         menu_permissions = []
-    if not isinstance(knowledge_base_permissions, list):
-        knowledge_base_permissions = []
     conn.execute(
-        "UPDATE roles SET menu_permissions = ?, knowledge_base_permissions = ? WHERE name = ?",
+        "UPDATE roles SET menu_permissions = ?, all_knowledge_bases = 1 WHERE name = ?",
         (
             json.dumps(
                 list(dict.fromkeys([*menu_permissions, *role_menu_options])),
                 ensure_ascii=False,
             ),
-            json.dumps(
-                list(dict.fromkeys(
-                    [*knowledge_base_permissions, ALL_KNOWLEDGE_BASES_PERMISSION]
-                )),
-                ensure_ascii=False,
-            ),
             "超级管理员",
+        ),
+    )
+
+
+def _ensure_common_knowledge_base(
+    conn: sqlite3.Connection, now: Callable[[], str], defaults: "ApplicationDefaults"
+) -> None:
+    """按 system_key 保证通用知识库存在；默认名称被普通库占用时明确失败。"""
+    if conn.execute(
+        "SELECT 1 FROM knowledge_bases WHERE system_key = ?", (COMMON_SYSTEM_KEY,)
+    ).fetchone():
+        return
+    if conn.execute(
+        "SELECT 1 FROM knowledge_bases WHERE name = ?", (COMMON_KNOWLEDGE_BASE_NAME,)
+    ).fetchone():
+        raise RuntimeError(
+            f"默认名称“{COMMON_KNOWLEDGE_BASE_NAME}”已被普通知识库占用，"
+            "无法创建通用知识库；请先重命名该知识库后再启动"
+        )
+    conn.execute(
+        "INSERT INTO knowledge_bases "
+        "(kb_id, name, system_key, state, created_at, chunk_size, chunk_overlap) "
+        "VALUES (?, ?, ?, 'active', ?, ?, ?)",
+        (
+            str(uuid.uuid4()),
+            COMMON_KNOWLEDGE_BASE_NAME,
+            COMMON_SYSTEM_KEY,
+            now(),
+            defaults.default_chunk_size,
+            defaults.default_chunk_overlap,
         ),
     )
 
@@ -76,6 +99,8 @@ def _generated_admin_password(db_file: str) -> str:
     password = secrets.token_urlsafe(12)
     path = os.path.join(os.path.dirname(db_file), INITIAL_ADMIN_PASSWORD_FILENAME)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # O_CREAT 的权限只作用于新文件；已存在的旧文件也要收紧。
+    os.fchmod(descriptor, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         handle.write(password + "\n")
     logger.warning(
@@ -95,14 +120,13 @@ def bootstrap_defaults(
         conn.execute(
             """
             INSERT OR IGNORE INTO roles
-            (name, description, menu_permissions, knowledge_base_permissions, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            (name, description, menu_permissions, all_knowledge_bases, created_at)
+            VALUES (?, ?, ?, 1, ?)
             """,
             (
                 "超级管理员",
                 "系统默认角色，拥有全部后台菜单和全部知识库权限。",
                 json.dumps(list(defaults.role_menu_options), ensure_ascii=False),
-                json.dumps([ALL_KNOWLEDGE_BASES_PERMISSION], ensure_ascii=False),
                 now(),
             ),
         )
@@ -113,6 +137,9 @@ def bootstrap_defaults(
         if administrator_role and conn.execute(
             "SELECT COUNT(*) FROM accounts"
         ).fetchone()[0] == 0:
+            # 只在真正创建管理员时校验配置的初始密码；已有账号库不因残留配置拒绝启动。
+            if defaults.initial_admin_password:
+                validate_new_password(defaults.initial_admin_password)
             conn.execute(
                 "INSERT INTO accounts "
                 "(username, name, phone, password, status, role_id, created_at) "
@@ -128,21 +155,7 @@ def bootstrap_defaults(
                     now(),
                 ),
             )
-        if conn.execute(
-            "SELECT COUNT(*) FROM knowledge_bases"
-        ).fetchone()[0] == 0:
-            conn.execute(
-                "INSERT INTO knowledge_bases "
-                "(name, kb_id, created_at, chunk_size, chunk_overlap) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (
-                    "通用知识库",
-                    str(uuid.uuid4()),
-                    now(),
-                    defaults.default_chunk_size,
-                    defaults.default_chunk_overlap,
-                ),
-            )
+        _ensure_common_knowledge_base(conn, now, defaults)
         if conn.execute("SELECT COUNT(*) FROM models_config").fetchone()[0] == 0:
             default_models = [
                 ("OpenAI", "", "https://api.openai.com/v1", OPENAI_DEFAULT_MODEL),
@@ -172,26 +185,17 @@ def bootstrap_defaults(
                     defaults.siliconflow_model,
                 ),
             ]
-            encrypted_models = [
-                (
-                    model[0],
-                    (
-                        model[1]
-                        if model[1] in model_api_keys.NON_SECRET_PLACEHOLDERS
-                        else model_api_keys.encrypt_api_key(model[1])
-                    ),
-                    *model[2:],
-                )
-                for model in default_models
-            ]
+            # 本地服务的无秘密占位符也统一加密，解密端因此不需要任何明文例外。
+            # SILICONFLOW_API_KEY 只在这里导入一次；之后数据库是唯一来源。
             conn.executemany(
                 """
                 INSERT INTO models_config
                 (provider_name, api_key, base_url, default_model, is_active)
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, 0)
                 """,
                 [
-                    (*model, 1 if model[0] == "硅基流动 (SiliconFlow)" else 0)
-                    for model in encrypted_models
+                    (model[0], model_api_keys.encrypt_api_key(model[1]), *model[2:])
+                    for model in default_models
                 ],
             )
+            ModelProviderStore.repair_active_provider(conn, "硅基流动 (SiliconFlow)")

@@ -4,8 +4,8 @@ import { sessionMarkdown, exportFilename } from '../../src/chatExport.js';
 
 test('export preserves raw Markdown and scopes repeated citations to each answer', () => {
   const content = '**中文**\n\n```js\nconst x = 1;\n```\n\n| A | B |\n| --- | --- |\n| 1 | 2 |';
-  const messages = ['甲库', '乙库'].map(kb_name => ({
-    role: 'assistant', content, sources: [{ id: 1, citation_ids: [1], kb_name, source: '手册.pdf', page: '第 2 页', content: '证据' }]
+  const messages = ['甲库', '乙库'].map(kb_name_snapshot => ({
+    role: 'assistant', content, sources: [{ id: 1, citation_ids: [1], kb_name_snapshot, source: '手册.pdf', page: '第 2 页', content: '证据' }]
   }));
   const output = sessionMarkdown(messages, '标题', '甲库');
   assert.equal(output.split(content).length - 1, 2);

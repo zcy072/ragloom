@@ -12,7 +12,7 @@ export function useKnowledgeBases() {
   const fetchKnowledgeBases = async () => {
     try {
       const data = await apiGet('/api/kbs');
-      knowledgeBases.value = filterKnowledgeBases(data, store.user);
+      knowledgeBases.value = filterKnowledgeBases(data, store.user, { includeDeleting: true });
     } catch (error) {
       console.error('Failed to fetch knowledge bases', error);
     }
@@ -32,15 +32,16 @@ export function useKnowledgeBases() {
   };
   /** 删除知识库，并用标识防止同一项目被重复提交。 */
   const deleteKnowledgeBase = async (knowledgeBase) => {
-    if (deletingKnowledgeBaseId.value === knowledgeBase.name) return false;
-    deletingKnowledgeBaseId.value = knowledgeBase.name;
+    if (deletingKnowledgeBaseId.value === knowledgeBase.kb_id) return false;
+    deletingKnowledgeBaseId.value = knowledgeBase.kb_id;
     try {
-      await apiDelete(`/api/kbs/${encodeURIComponent(knowledgeBase.name)}`);
+      await apiDelete(`/api/kbs/${encodeURIComponent(knowledgeBase.kb_id)}`);
       await fetchKnowledgeBases();
       toast.success('删除成功');
       return true;
-    } catch {
-      toast.error('删除失败');
+    } catch (error) {
+      await fetchKnowledgeBases();
+      toast.error(`删除未完成，可重试：${error.message}`);
       return false;
     } finally {
       deletingKnowledgeBaseId.value = null;
@@ -51,7 +52,7 @@ export function useKnowledgeBases() {
     const name = nextName?.trim();
     if (!name || name === knowledgeBase.name) return true;
     try {
-      await apiPut(`/api/kbs/${encodeURIComponent(knowledgeBase.name)}`, { name });
+      await apiPut(`/api/kbs/${encodeURIComponent(knowledgeBase.kb_id)}`, { name });
       await fetchKnowledgeBases();
       toast.success('重命名成功');
       return true;

@@ -17,6 +17,7 @@ from services.core.config import (
     RETRIEVAL_RERANK_MIN_SCORE,
 )
 from services.core.container import ApplicationContainer, get_application_container
+from services.core.safe_errors import safe_error_summary
 from services.core.settings import get_settings
 from services.indexing import chunking
 
@@ -56,8 +57,9 @@ async def _get_rerank_client() -> httpx.AsyncClient:
 def _rerank_endpoint(container: ApplicationContainer) -> tuple[str, str, dict[str, str]]:
     """返回重排序接口地址、模型名和请求头。
 
-    默认使用 SiliconFlow 和模型管理中保存的密钥。设置 RERANK_BASE_URL 指向其他服务
-    （例如本地 bge-reranker）时只使用 RERANK_API_KEY，SiliconFlow 密钥不会发往其他地址。
+    默认使用 SiliconFlow 和模型配置中保存的密钥（数据库是唯一来源，未配置或无法解密时
+    抛出安全错误，不发请求）。设置 RERANK_BASE_URL 指向其他服务（例如本地 bge-reranker）
+    时只使用 RERANK_API_KEY，SiliconFlow 密钥不会发往其他地址。
     """
     settings = get_settings()
     model = settings.rerank_model or DEFAULT_RERANK_MODEL
@@ -82,8 +84,8 @@ def _parent_candidate_key(document) -> tuple[str, str, str] | None:
     if not parent_id:
         return None
     return (
-        str(metadata.get("kb_name", "")),
-        str(metadata.get("source", "")),
+        str(metadata.get("kb_id", "")),
+        str(metadata.get("document_id", "")),
         parent_id,
     )
 
@@ -101,8 +103,8 @@ def select_rerank_candidates(documents: list) -> list:
                 return selected
             metadata = document.metadata or {}
             route_key = (
-                str(metadata.get("kb_name", "")),
-                str(metadata.get("source", "")),
+                str(metadata.get("kb_id", "")),
+                str(metadata.get("document_id", "")),
                 str(metadata.get("chunk_route", chunking.CHUNK_ROUTE_FIXED)),
             )
             parent_key = _parent_candidate_key(document)
@@ -118,9 +120,7 @@ def select_rerank_candidates(documents: list) -> list:
             if parent_key is not None:
                 parent_counts[parent_key] += 1
         pending = deferred
-    selected.extend(
-        pending[: RETRIEVAL_RERANK_MAX_CANDIDATES - len(selected)]
-    )
+    selected.extend(pending[: RETRIEVAL_RERANK_MAX_CANDIDATES - len(selected)])
     return selected
 
 
@@ -163,7 +163,8 @@ async def rerank(
             return candidates[:RERANK_TOP_N]
         # Preserve exact identifiers such as model numbers that a semantic reranker may blur.
         exact_phrases = [
-            value for value in re.findall(r"[A-Za-z0-9-]+", question)
+            value
+            for value in re.findall(r"[A-Za-z0-9-]+", question)
             if len(value) >= 4 and re.search(r"[A-Za-z]", value) and re.search(r"[0-9]", value)
         ]
         ranked = []
@@ -175,45 +176,65 @@ async def rerank(
             if type(index) is not int or not 0 <= index < len(candidates) or index in seen:
                 continue
             score = result.get("relevance_score")
-            if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score) or not 0 <= score <= 1:
+            if (
+                isinstance(score, bool)
+                or not isinstance(score, (int, float))
+                or not math.isfinite(score)
+                or not 0 <= score <= 1
+            ):
                 continue
             seen.add(index)
             document = candidates[index].model_copy(deep=True)
-            matches = [phrase for phrase in exact_phrases if re.search(
-                r"(?<![A-Za-z0-9-])" + re.escape(phrase) + r"(?![A-Za-z0-9-])",
-                document.page_content, re.IGNORECASE,
-            )]
+            matches = [
+                phrase
+                for phrase in exact_phrases
+                if re.search(
+                    r"(?<![A-Za-z0-9-])" + re.escape(phrase) + r"(?![A-Za-z0-9-])",
+                    document.page_content,
+                    re.IGNORECASE,
+                )
+            ]
             document.metadata["relevance_score"] = score
             document.metadata["exact_identifiers"] = matches
             document.metadata["ranking_rule"] = "model_score_then_identifier_tie_break"
             ranked.append(document)
-        ranked = sorted(ranked, key=lambda doc: (
-            doc.metadata["relevance_score"], bool(doc.metadata["exact_identifiers"])
-        ), reverse=True)[:RERANK_TOP_N]
+        ranked = sorted(
+            ranked,
+            key=lambda doc: (
+                doc.metadata["relevance_score"],
+                bool(doc.metadata["exact_identifiers"]),
+            ),
+            reverse=True,
+        )[:RERANK_TOP_N]
         if not ranked:
             logger.warning("Reranking results were all invalid")
             return candidates[:RERANK_TOP_N]
         # 重排成功后才按分数过滤；全部低于下限时返回空列表，由调用方按"未找到依据"处理。
         relevant = [
-            doc for doc in ranked
-            if doc.metadata["relevance_score"] >= RETRIEVAL_RERANK_MIN_SCORE
+            doc for doc in ranked if doc.metadata["relevance_score"] >= RETRIEVAL_RERANK_MIN_SCORE
         ]
         if diagnostics is not None:
             diagnostics.rerank_status = "success"
             diagnostics.counts["rerank_returned"] = len(ranked)
             diagnostics.counts["rerank_below_threshold"] = len(ranked) - len(relevant)
             diagnostics.ranking = [
-                {"position": index, "model_score": doc.metadata["relevance_score"],
-                 "exact_identifiers": doc.metadata["exact_identifiers"],
-                 "rule": doc.metadata["ranking_rule"]}
+                {
+                    "position": index,
+                    "model_score": doc.metadata["relevance_score"],
+                    "exact_identifiers": doc.metadata["exact_identifiers"],
+                    "rule": doc.metadata["ranking_rule"],
+                }
                 for index, doc in enumerate(ranked, 1)
             ]
             diagnostics.rerank_results = [
-                {**document_summary(doc, index), "score": doc.metadata["relevance_score"],
-                 "kept": doc.metadata["relevance_score"] >= RETRIEVAL_RERANK_MIN_SCORE}
+                {
+                    **document_summary(doc, index),
+                    "score": doc.metadata["relevance_score"],
+                    "kept": doc.metadata["relevance_score"] >= RETRIEVAL_RERANK_MIN_SCORE,
+                }
                 for index, doc in enumerate(ranked, 1)
             ]
         return relevant
     except Exception as exc:
-        logger.warning("Reranking failed: %s", exc)
+        logger.warning("Reranking failed: %s", safe_error_summary(exc))
         return candidates[:RERANK_TOP_N]

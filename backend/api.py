@@ -5,8 +5,11 @@ import contextlib
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -34,7 +37,6 @@ from services.core.errors import (
     InvalidStateError,
     OperationFailedError,
     PayloadTooLargeError,
-    PreconditionFailedError,
     RateLimitedError,
     ResourceNotFoundError,
     ServiceUnavailableError,
@@ -43,7 +45,9 @@ from services.core.errors import (
 from services.core.logging_setup import configure_logging
 from services.core.request_context import bind_request_id, new_request_id, reset_request_id
 from services.core.settings import get_settings
+from services.identity.auth import NO_STORE_HEADERS, require_api_write_header
 from services.indexing import worker as index_worker
+from services.knowledge_bases import use_cases as kb_use_cases
 from services.retrieval import retriever
 from services.retrieval.chunk_index import get_chunk_index
 
@@ -68,11 +72,18 @@ async def lifespan(_app: FastAPI):
     """初始化进程级共享服务，并在应用退出时按相反顺序释放资源。"""
     # 日志在启动时而不是导入时配置：测试会导入本模块，不能往部署环境的日志文件里写。
     configure_logging(get_settings())
+    if not get_settings().auth_cookie_secure:
+        logger.warning(
+            "AUTH_COOKIE_SECURE is false: session cookies are also sent over plain HTTP. "
+            "Set it to true for any deployment reached over HTTPS."
+        )
     # Startup order matters: storage must be valid before workers or cache warmup read it.
     # The rerank client is process-scoped, while queued jobs remain durable in SQLite.
     app_storage.initialize_app_storage()
     # Milvus is an external service: wait for it before workers or warmup touch the index.
     get_chunk_index().ensure_collection()
+    # 上次未完成的知识库删除要在 worker 启动前收尾，避免新任务写入正在删除的库。
+    await asyncio.to_thread(kb_use_cases.resume_pending_deletions)
     chat_ranking.start_rerank_client()
     index_worker.start()
     retriever.start_retriever_cache_warmup()
@@ -123,7 +134,12 @@ class RequestIdMiddleware:
             reset_request_id(token)
 
 
-app = FastAPI(title="RAGLoom API", lifespan=lifespan)
+# 写请求头校验作为全局依赖，先于任何路由逻辑执行，登录、注册和退出也在覆盖范围内。
+app = FastAPI(
+    title="RAGLoom API",
+    lifespan=lifespan,
+    dependencies=[Depends(require_api_write_header)],
+)
 app.add_middleware(RequestIdMiddleware)
 
 
@@ -134,7 +150,6 @@ _STATUS_BY_ERROR_TYPE = {
     ResourceNotFoundError: 404,
     AccessDeniedError: 403,
     ConflictError: 409,
-    PreconditionFailedError: 412,
     UnsupportedMediaError: 415,
     PayloadTooLargeError: 413,
     RateLimitedError: 429,
@@ -144,24 +159,73 @@ _STATUS_BY_ERROR_TYPE = {
 }
 
 
+_AUTH_PATHS = frozenset({"/api/login", "/api/register", "/api/change_password", "/api/logout"})
+_MODEL_PATH_PREFIX = "/api/models"
+# 安全校验错误只回传这些数值约束，其余 ctx 可能夹带输入片段或正则等内部细节。
+_SAFE_VALIDATION_CONTEXT_KEYS = ("min_length", "max_length")
+
+
+def _is_auth_path(path: str) -> bool:
+    return path in _AUTH_PATHS
+
+
+def _carries_secrets(path: str) -> bool:
+    """请求体可能含密码或模型密钥的路由。"""
+    return (
+        _is_auth_path(path)
+        or path == _MODEL_PATH_PREFIX
+        or path.startswith(_MODEL_PATH_PREFIX + "/")
+    )
+
+
+def _safe_validation_error(error: dict) -> dict:
+    """只保留位置、类型、消息和数值长度约束；不回显 input 或任意 ctx。"""
+    item = {"loc": list(error.get("loc", ())), "type": error.get("type"), "msg": error.get("msg")}
+    context = error.get("ctx") or {}
+    safe_context = {
+        key: context[key]
+        for key in _SAFE_VALIDATION_CONTEXT_KEYS
+        if isinstance(context.get(key), int) and not isinstance(context.get(key), bool)
+    }
+    if safe_context:
+        item["ctx"] = safe_context
+    return item
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_response(request: Request, exc: RequestValidationError) -> Response:
+    """认证与模型路由的 422 只给出安全字段，避免把密码或密钥回显到响应；其余路由沿用默认输出。"""
+    path = request.url.path
+    if not _carries_secrets(path):
+        return await request_validation_exception_handler(request, exc)
+    return JSONResponse(
+        status_code=422,
+        content=jsonable_encoder(
+            {"detail": [_safe_validation_error(error) for error in exc.errors()]}
+        ),
+        headers=NO_STORE_HEADERS if _is_auth_path(path) else None,
+    )
+
+
 @app.exception_handler(ApplicationError)
 async def application_error_response(
-    _request: Request, exc: ApplicationError
+    request: Request, exc: ApplicationError
 ) -> JSONResponse:
     """Translate framework-independent application errors at the HTTP boundary."""
     status_code = next(
         (status for error_type, status in _STATUS_BY_ERROR_TYPE.items() if isinstance(exc, error_type)),
         500,
     )
-    headers = (
-        {"Retry-After": str(exc.retry_after_seconds)}
-        if isinstance(exc, RateLimitedError)
-        else None
-    )
+    headers: dict[str, str] = {}
+    if isinstance(exc, RateLimitedError):
+        headers["Retry-After"] = str(exc.retry_after_seconds)
+    # 认证接口的失败响应和任何 401 都不允许缓存。
+    if status_code == 401 or _is_auth_path(request.url.path):
+        headers.update(NO_STORE_HEADERS)
     return JSONResponse(
         status_code=status_code,
         content={"detail": exc.public_message, "code": exc.code},
-        headers=headers,
+        headers=headers or None,
     )
 
 

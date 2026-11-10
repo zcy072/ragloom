@@ -12,6 +12,7 @@ from services.core import config as application_config
 from services.core.container import ApplicationContainer
 from services.core.contracts import ModelConfig
 from services.core.llm_config import create_summary_llm
+from services.core.safe_errors import safe_error_summary
 
 logger = logging.getLogger(__name__)
 
@@ -145,5 +146,7 @@ async def refresh_conversation_summary(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        logger.warning("Conversation summary refresh failed for %s: %s", session_id, exc)
+        logger.warning(
+            "Conversation summary refresh failed for %s: %s", session_id, safe_error_summary(exc)
+        )
         return False

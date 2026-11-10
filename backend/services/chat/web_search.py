@@ -19,6 +19,7 @@ from langchain_core.documents import Document as LCDocument
 
 from services.core import model_api_keys
 from services.core.container import ApplicationContainer, get_application_container
+from services.core.safe_errors import safe_error_summary
 from services.core.settings import get_settings
 from services.retrieval.context import ContextSpan
 
@@ -186,7 +187,7 @@ class DeepSeekSearchProvider:
 def configured_provider(
     container: ApplicationContainer | None = None,
 ) -> WebSearchProvider | None:
-    """复用模型配置中 DeepSeek 的密钥；未配置时返回 None。"""
+    """复用模型配置中 DeepSeek 的密钥；未配置时返回 None，密文无法解密时抛出安全错误。"""
     encrypted_key = (container or get_application_container()).model_providers.api_key(
         DEEPSEEK_PROVIDER_NAME
     )
@@ -257,7 +258,7 @@ class WebSearchOutcome:
 
 
 def to_documents(results: list[WebResult]) -> list[LCDocument]:
-    """转为检索文档；`kb_name` 为空，`url` 标记它来自网页。"""
+    """转为检索文档；`kb_id` 为空，`url` 标记它来自网页。"""
     return [
         LCDocument(
             page_content=result.content,
@@ -266,7 +267,7 @@ def to_documents(results: list[WebResult]) -> list[LCDocument]:
                 "url": result.url,
                 "site_name": result.site_name,
                 "date": result.date,
-                "kb_name": "",
+                "kb_id": "",
                 "chunk_route": WEB_CHUNK_ROUTE,
             },
         )
@@ -290,7 +291,7 @@ async def search_web(
     try:
         provider = provider or await asyncio.to_thread(configured_provider, container)
     except Exception as exc:
-        logger.warning("Web search key unavailable: %s", exc)
+        logger.warning("Web search key unavailable: %s", safe_error_summary(exc))
         return outcome([], "读取 DeepSeek 密钥失败")
     if provider is None:
         return outcome([], "未配置 DeepSeek 密钥")
@@ -304,7 +305,7 @@ async def search_web(
         return outcome([], exc.reason)
     except Exception as exc:
         budget.refund(account_id)
-        logger.warning("Web search failed: %s", exc, exc_info=True)
+        logger.warning("Web search failed: %s", safe_error_summary(exc))
         return outcome([], f"搜索失败：{type(exc).__name__}")
     return outcome(to_documents(results))
 

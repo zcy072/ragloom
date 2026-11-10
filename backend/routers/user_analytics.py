@@ -24,7 +24,9 @@ _DAYS = Query(default=30, ge=1, le=user_activity.DAYS_MAX)
 
 
 def _visible(principal: auth_service.Principal) -> tuple[str, ...] | None:
-    return analytics_use_cases.visible_knowledge_bases(principal.knowledge_base_permissions)
+    return analytics_use_cases.visible_knowledge_bases(
+        principal.all_knowledge_bases, principal.knowledge_base_ids
+    )
 
 
 @router.get("/overview", response_model=schemas.AnalyticsOverviewResponse)
@@ -73,8 +75,8 @@ def analytics_user_detail(
     )
 
 
-@router.get(
-    "/users/{user_id}/sessions/{session_id}",
+@router.post(
+    "/users/{user_id}/sessions/{session_id}/view",
     response_model=schemas.AnalyticsConversationResponse,
 )
 def analytics_user_conversation(
@@ -82,7 +84,10 @@ def analytics_user_conversation(
     session_id: str,
     principal: auth_service.Principal = Depends(_ANALYTICS),
 ) -> UserConversation:
-    """返回用户的完整会话；需要“查看用户对话”权限，每次读取都写入审计记录。"""
+    """返回用户的完整会话；需要“查看用户对话”权限，每次读取都写入审计记录。
+
+    读取会写审计记录，所以用 POST：跨站链接触发不了，且受全局写请求头检查保护。
+    """
     if analytics_use_cases.VIEW_CONVERSATION_PERMISSION not in principal.menu_permissions:
         raise HTTPException(403, "缺少“查看用户对话”权限")
     return analytics_use_cases.view_conversation(
@@ -90,7 +95,8 @@ def analytics_user_conversation(
         actor_account_id=principal.account_id,
         actor_username=principal.username,
         actor_menu_permissions=principal.menu_permissions,
-        actor_knowledge_base_permissions=principal.knowledge_base_permissions,
+        actor_all_knowledge_bases=principal.all_knowledge_bases,
+        actor_knowledge_base_ids=principal.knowledge_base_ids,
         user_id=user_id,
         session_id=session_id,
     )

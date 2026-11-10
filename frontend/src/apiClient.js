@@ -1,4 +1,3 @@
-import { clearAuthSession, getAccessToken } from './authSession.js';
 export class ApiError extends Error {
   /** 保存后端返回的状态码和响应体，便于页面按错误类型给出提示。 */
   constructor(message, status, data) {
@@ -8,17 +7,45 @@ export class ApiError extends Error {
     this.data = data;
   }
 }
-/** 发起带登录令牌的请求，并在令牌失效时统一清理前端登录状态。 */
+/** 后端要求所有写请求携带的固定标记头；跨站表单无法设置它。 */
+export const WRITE_REQUEST_HEADER = 'X-RAGLoom-Request';
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+// 身份失效后只重载一次；晚到的旧请求 401 不会形成重载风暴。
+let authReloadStarted = false;
+/** 因身份失效或切换而整页重载，同一页面生命周期内至多一次。 */
+export const reloadForAuthChange = () => {
+  if (authReloadStarted) return;
+  authReloadStarted = true;
+  globalThis.location.reload();
+};
+/** 只允许当前站点的 /api 路径，避免把带 Cookie 的请求逻辑用于任意地址。 */
+const sameOriginApiUrl = (url) => {
+  const origin = globalThis.location?.origin;
+  let parsed;
+  try {
+    parsed = new URL(String(url), origin);
+  } catch {
+    parsed = null;
+  }
+  if (!parsed || parsed.origin !== origin || !(parsed.pathname === '/api' || parsed.pathname.startsWith('/api/'))) {
+    throw new TypeError(`只允许请求本站 /api 接口：${url}`);
+  }
+  return parsed;
+};
+/**
+ * 发起携带会话 Cookie 的请求：写请求附加固定标记头，受保护请求返回 401 时整页重载一次。
+ * authReload: false 用于登录和启动身份检查，它们的 401 是正常的“未登录”结果。
+ */
 export const authorizedFetch = async (url, options = {}) => {
-  const headers = new Headers(options.headers || {});
-  const token = getAccessToken();
-  if (token) headers.set('Authorization', `Bearer ${token}`);
-  const response = await fetch(url, { ...options, headers });
-  // 只处理“发出请求时用的令牌”失效。若存储里的令牌已被其他标签页替换或清除，
-  // 这次旧请求的 401 不能清掉新会话；界面同步由 storage 事件负责。
-  if (response.status === 401 && token && getAccessToken() === token) {
-    clearAuthSession();
-    window.dispatchEvent(new CustomEvent('auth-expired'));
+  const { authReload = true, ...fetchOptions } = options;
+  const parsed = sameOriginApiUrl(url);
+  const method = String(fetchOptions.method || 'GET').toUpperCase();
+  const headers = new Headers(fetchOptions.headers || {});
+  if (!SAFE_METHODS.has(method)) headers.set(WRITE_REQUEST_HEADER, '1');
+  const response = await fetch(url, { ...fetchOptions, headers, credentials: 'same-origin' });
+  // 不重放原请求、不清 Cookie：重载后由 /me 决定去向。
+  if (response.status === 401 && authReload && parsed.pathname !== '/api/login') {
+    reloadForAuthChange();
   }
   return response;
 };
@@ -33,7 +60,9 @@ const FIELD_LABELS = {
   description: '描述',
   question: '问题',
   title: '标题',
-  tags: '标签'
+  tags: '标签',
+  api_key: 'API Key',
+  base_url: 'Base URL'
 };
 /** 把一条 pydantic 校验错误转成中文；不认识的类型保留原文。 */
 const validationItemText = (item) => {

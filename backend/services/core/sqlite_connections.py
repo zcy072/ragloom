@@ -23,6 +23,8 @@ def _managed_connection(
     """提供 SQLite 提交、回滚和确定性关闭的共享实现。"""
     conn = sqlite3.connect(db_file, timeout=timeout)
     try:
+        # 外键开关是连接级设置，且在事务内无效，必须在进入事务前对每个连接执行。
+        conn.execute("PRAGMA foreign_keys = ON")
         with conn:
             yield conn
     finally:

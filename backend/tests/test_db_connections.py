@@ -16,7 +16,7 @@ class DatabaseConnectionTest(unittest.TestCase):
         connect.assert_called_once_with(
             "app.db", timeout=application_db.LOCK_TIMEOUT_SECONDS
         )
-        connection.execute.assert_not_called()
+        connection.execute.assert_called_once_with("PRAGMA foreign_keys = ON")
         connection.close.assert_called_once_with()
 
     def test_connection_closes_after_an_exception(self):

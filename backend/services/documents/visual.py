@@ -14,6 +14,7 @@ from services.core import llm_config as model_config
 from services.core.concurrency import resource_slot
 from services.core.container import get_application_container
 from services.core.request_context import carry_request_id
+from services.core.safe_errors import safe_error_summary
 from services.core.settings import get_settings
 from services.documents import visual_ocr, visual_vision
 from services.documents.parser_modes import (
@@ -49,10 +50,8 @@ def _vision_model_config() -> dict[str, str]:
     model_providers = get_application_container().model_providers
     provider = settings.vision_provider
     if provider:
-        configured = model_config.get_model_config(provider, model_providers)
-        if configured is None:
-            raise RuntimeError(f"视觉模型提供商未配置完整：{provider}")
-        config = dict(configured)
+        # 未配置或密钥不可读时抛出安全错误，由调用方回退 OCR。
+        config = dict(model_config.get_model_config(provider, model_providers))
     else:
         config = dict(model_config.get_active_model_config(model_providers))
     overrides = {
@@ -203,11 +202,11 @@ def load_standalone_image_document(
                     except OSError as exc:
                         logger.warning("Standalone image visual cache write failed for %s: %s", filename, exc)
                 elif model_error is not None:
-                    logger.warning("Standalone image visual model unavailable for %s; using OCR fallback: %s", filename, model_error)
+                    logger.warning("Standalone image visual model unavailable for %s; using OCR fallback: %s", filename, safe_error_summary(model_error))
             if analysis is not None:
                 analysis_method = "vision+ocr"
         except Exception as exc:
-            logger.warning("Standalone image vision analysis unavailable for %s; using OCR fallback: %s", filename, exc)
+            logger.warning("Standalone image vision analysis unavailable for %s; using OCR fallback: %s", filename, safe_error_summary(exc))
 
     try:
         ocr_text = _extract_ocr_text(image_bytes)
@@ -284,7 +283,9 @@ def load_mineru_visual_documents(
         config = _vision_model_config() if vision_enabled else {}
     except Exception as exc:
         logger.warning(
-            "MinerU visual model configuration unavailable for %s: %s", filename, exc
+            "MinerU visual model configuration unavailable for %s: %s",
+            filename,
+            safe_error_summary(exc),
         )
         config = {}
         vision_enabled = False
@@ -349,7 +350,7 @@ def load_mineru_visual_documents(
             logger.warning(
                 "MinerU visual model unavailable for some %s visuals; using OCR fallback: %s",
                 filename,
-                model_error,
+                safe_error_summary(model_error),
             )
 
     documents: list[Document] = []

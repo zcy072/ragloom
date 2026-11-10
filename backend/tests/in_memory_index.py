@@ -5,7 +5,7 @@ import re
 import threading
 import uuid
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 
 from langchain_core.documents import Document as LCDocument
 
@@ -14,7 +14,7 @@ from services.indexing.chunking import (
     chunk_route,
     contextualized_chunk_text,
 )
-from services.retrieval.chunk_index import record_id
+from services.retrieval.chunk_index import PublishRolledBackError, record_id
 
 _WORD = re.compile(r"[A-Za-z0-9]+")
 _CJK = re.compile(r"[一-鿿]")
@@ -42,13 +42,13 @@ class InMemoryChunkIndex:
         self._rows: list[dict] = []
         self.fail_next_publish: Exception | None = None
 
-    def _match(self, row, kb_id, route, sources) -> bool:
+    def _match(self, row, kb_id, route, document_ids) -> bool:
         """判断一行是否满足知识库、路线和文件范围。"""
         if row["kb_id"] != kb_id:
             return False
         if route and row["chunk_route"] != route:
             return False
-        return sources is None or row["source"] in set(sources)
+        return document_ids is None or row["document_id"] in set(document_ids)
 
     @staticmethod
     def _document(row: dict) -> LCDocument:
@@ -56,15 +56,24 @@ class InMemoryChunkIndex:
         metadata = {
             key: row[key]
             for key in (
-                "source", "page", "chunk_index", "chunk_route", "parent_id",
-                "contextual_title", "visual_kind", "visual_image", "visual_analysis",
+                "source",
+                "document_id",
+                "page",
+                "chunk_index",
+                "chunk_route",
+                "parent_id",
+                "contextual_title",
+                "visual_kind",
+                "visual_image",
+                "visual_analysis",
+                "generation",
             )
             if row.get(key) not in (None, "")
         }
         return LCDocument(page_content=row["content"], metadata=metadata)
 
-    def publish_source(self, kb_id, source, splits, vectors) -> None:
-        """先追加新代，再删除旧代；注入的失败会回滚新代并抛出。"""
+    def publish_document(self, kb_id, document_id, splits, vectors) -> None:
+        """先追加新代，再删除旧代；注入的失败发生在写入前，抛出 PublishRolledBackError。"""
         splits = assign_chunk_indexes(splits)
         if len(vectors) != len(splits):
             raise ValueError(f"向量数量与分块数量不一致：{len(vectors)} != {len(splits)}")
@@ -74,9 +83,10 @@ class InMemoryChunkIndex:
             meta = split.metadata
             new_rows.append(
                 {
-                    "id": record_id(kb_id, source, position, split, generation),
+                    "id": record_id(kb_id, document_id, position, split, generation),
                     "kb_id": kb_id,
-                    "source": source,
+                    "document_id": document_id,
+                    "source": meta.get("source", ""),
                     "generation": generation,
                     "dense": list(vector),
                     "search_text": contextualized_chunk_text(split),
@@ -94,24 +104,25 @@ class InMemoryChunkIndex:
         with self._lock:
             if self.fail_next_publish is not None:
                 error, self.fail_next_publish = self.fail_next_publish, None
-                raise error
+                raise PublishRolledBackError(str(error)) from error
             self._rows.extend(new_rows)
             self._rows = [
                 row
                 for row in self._rows
                 if not (
                     row["kb_id"] == kb_id
-                    and row["source"] == source
+                    and row["document_id"] == document_id
                     and row["generation"] != generation
                 )
             ]
 
-    def delete_source(self, kb_id, source) -> None:
+    def delete_document(self, kb_id, document_id) -> None:
         """删除一个文件的全部子块。"""
         with self._lock:
             self._rows = [
-                row for row in self._rows
-                if not (row["kb_id"] == kb_id and row["source"] == source)
+                row
+                for row in self._rows
+                if not (row["kb_id"] == kb_id and row["document_id"] == document_id)
             ]
 
     def delete_kb(self, kb_id) -> None:
@@ -119,13 +130,14 @@ class InMemoryChunkIndex:
         with self._lock:
             self._rows = [row for row in self._rows if row["kb_id"] != kb_id]
 
-    def delete_stale_sources(self, kb_id, active_sources) -> int:
+    def delete_stale_documents(self, kb_id, active_document_ids) -> int:
         """删除不在活跃集合里的文件子块。"""
         with self._lock:
             before = len(self._rows)
             self._rows = [
-                row for row in self._rows
-                if row["kb_id"] != kb_id or row["source"] in active_sources
+                row
+                for row in self._rows
+                if row["kb_id"] != kb_id or row["document_id"] in active_document_ids
             ]
             return before - len(self._rows)
 
@@ -135,16 +147,6 @@ class InMemoryChunkIndex:
     def check_ready(self, timeout: float) -> str:
         """内存实现始终就绪。"""
         return "in-memory"
-
-    def reset_if_empty(self, has_documents: Callable[[], bool]) -> bool:
-        """没有任何文档时清空全部行。"""
-        if has_documents():
-            return False
-        with self._lock:
-            if has_documents():  # 与真实索引一致：拿到锁后再确认一次
-                return False
-            self._rows = []
-        return True
 
     def _dense_ranked(self, rows, query_vector) -> list[dict]:
         """按余弦相似度降序排列。"""
@@ -167,30 +169,32 @@ class InMemoryChunkIndex:
                     continue
                 containing = sum(1 for other in docs if term in other)
                 idf = math.log(1 + (len(docs) - containing + 0.5) / (containing + 0.5))
-                score += idf * frequency * 2.2 / (frequency + 1.2 * (0.25 + 0.75 * length / average))
+                score += (
+                    idf * frequency * 2.2 / (frequency + 1.2 * (0.25 + 0.75 * length / average))
+                )
             if score > 0:
                 scored.append((score, row))
         scored.sort(key=lambda item: -item[0])
         return [row for _, row in scored]
 
-    def _candidates(self, kb_id, route, sources) -> list[dict]:
+    def _candidates(self, kb_id, route, document_ids) -> list[dict]:
         """在锁内复制满足过滤条件的行。"""
         with self._lock:
-            return [row for row in self._rows if self._match(row, kb_id, route, sources)]
+            return [row for row in self._rows if self._match(row, kb_id, route, document_ids)]
 
-    def search_dense(self, kb_id, query_vector, route, sources, k) -> list[LCDocument]:
+    def search_dense(self, kb_id, query_vector, route, document_ids, k) -> list[LCDocument]:
         """只做稠密检索。"""
-        rows = self._dense_ranked(self._candidates(kb_id, route, sources), query_vector)
+        rows = self._dense_ranked(self._candidates(kb_id, route, document_ids), query_vector)
         return [self._document(row) for row in rows[:k]]
 
-    def search_lexical(self, kb_id, query, route, sources, k) -> list[LCDocument]:
+    def search_lexical(self, kb_id, query, route, document_ids, k) -> list[LCDocument]:
         """只做 BM25 检索。"""
-        rows = self._bm25_ranked(self._candidates(kb_id, route, sources), query)
+        rows = self._bm25_ranked(self._candidates(kb_id, route, document_ids), query)
         return [self._document(row) for row in rows[:k]]
 
-    def search_hybrid(self, kb_id, query, query_vector, route, sources, k) -> list[LCDocument]:
+    def search_hybrid(self, kb_id, query, query_vector, route, document_ids, k) -> list[LCDocument]:
         """稠密与 BM25 两路结果做 RRF 融合。"""
-        rows = self._candidates(kb_id, route, sources)
+        rows = self._candidates(kb_id, route, document_ids)
         scores: dict[str, float] = {}
         by_id = {row["id"]: row for row in rows}
         for ranked in (
@@ -202,15 +206,16 @@ class InMemoryChunkIndex:
         ordered = sorted(scores, key=lambda row_id: -scores[row_id])[:k]
         return [self._document(by_id[row_id]) for row_id in ordered]
 
-    def available_routes(self, kb_id, sources) -> set[str]:
+    def available_routes(self, kb_id, document_ids) -> set[str]:
         """返回这些文件下存在的路线。"""
-        return {row["chunk_route"] for row in self._candidates(kb_id, None, sources)}
+        return {row["chunk_route"] for row in self._candidates(kb_id, None, document_ids)}
 
-    def neighbors(self, kb_id, source, route, lo, hi) -> list[LCDocument]:
-        """按 chunk_index 闭区间取相邻子块。"""
+    def neighbors(self, kb_id, document_id, route, lo, hi, generation=None) -> list[LCDocument]:
+        """按 chunk_index 闭区间取相邻子块；传入 generation 时只取这一代。"""
         rows = [
-            row for row in self._candidates(kb_id, route, [source])
-            if lo <= row["chunk_index"] <= hi
+            row
+            for row in self._candidates(kb_id, route, [document_id])
+            if lo <= row["chunk_index"] <= hi and (not generation or row["generation"] == generation)
         ]
         rows.sort(key=lambda row: row["chunk_index"])
         return [self._document(row) for row in rows]

@@ -2,14 +2,12 @@ import sqlite3
 import unittest
 from unittest.mock import patch
 
-import httpx
-
 import api
 from services.chat import sessions as chat_sessions
 from services.core import config as application_config
 from services.core import model_api_keys, model_use_cases
 from services.retrieval.chunk_index import get_chunk_index
-from tests.support import IsolatedStorageAsyncTestCase, bearer_headers
+from tests.support import IsolatedStorageAsyncTestCase, api_client, kb_id_by_name
 
 
 class ApiContractTest(IsolatedStorageAsyncTestCase):
@@ -18,10 +16,7 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
         api.app_storage.initialize_database()
         api.app_storage.bootstrap_defaults()
 
-        self.client = httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=api.app),
-            base_url="http://test",
-        )
+        self.client = api_client()
         login = await self.client.post(
             "/api/login",
             json={
@@ -30,7 +25,6 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
             },
         )
         self.assertEqual(login.status_code, 200)
-        self.headers = bearer_headers(login)
 
     async def asyncTearDown(self):
         await self.client.aclose()
@@ -45,7 +39,7 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
         )
         self.assertEqual(
             create_knowledge_base["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/SuccessResponse",
+            "#/components/schemas/KnowledgeBaseMutationResponse",
         )
         self.assertFalse(
             openapi["components"]["schemas"]["KnowledgeBaseNameRequest"][
@@ -76,7 +70,6 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
     async def test_invalid_and_unknown_request_fields_are_rejected(self):
         duplicate = await self.client.post(
             "/api/kbs",
-            headers=self.headers,
             json={"name": "通用知识库"},
         )
         self.assertEqual(duplicate.status_code, 400)
@@ -86,17 +79,15 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
 
         response = await self.client.post(
             "/api/kbs",
-            headers=self.headers,
             json={"name": "契约测试", "unexpected": True},
         )
         self.assertEqual(response.status_code, 422)
 
         response = await self.client.post(
             "/api/chat",
-            headers=self.headers,
             json={
                 "question": "测试",
-                "kb_name": "通用知识库",
+                "kb_id": kb_id_by_name("通用知识库"),
                 "username": "伪造账号",
             },
         )
@@ -104,7 +95,7 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
 
     async def test_application_errors_keep_detail_and_expose_a_stable_code(self):
         response = await self.client.get(
-            "/api/chat/sessions/missing-session", headers=self.headers
+            "/api/chat/sessions/missing-session"
         )
 
         self.assertEqual(response.status_code, 404)
@@ -116,63 +107,64 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
             },
         )
 
+        common_id = kb_id_by_name("通用知识库")
         response = await self.client.put(
-            "/api/kbs/通用知识库/chunk_config",
-            headers=self.headers,
+            f"/api/kbs/{common_id}/chunk_config",
             json={"chunk_size": 200, "chunk_overlap": 200},
         )
         self.assertEqual(response.status_code, 422)
 
-        api.app_storage.knowledge_bases.create("研发部", 800, 150)
+        dept_id = api.app_storage.knowledge_bases.create("研发部", 800, 150).kb_id
         with patch.object(
             get_chunk_index(),
             "delete_kb",
             side_effect=RuntimeError("index unavailable"),
         ):
             response = await self.client.delete(
-                "/api/kbs/研发部", headers=self.headers
+                f"/api/kbs/{dept_id}"
             )
         self.assertEqual(response.status_code, 503)
         self.assertEqual(
-            response.json()["code"], "knowledge_base_index_cleanup_failed"
+            response.json()["code"], "knowledge_base_cleanup_failed"
         )
-        self.assertTrue(
-            api.app_storage.knowledge_bases.exists("研发部")
-        )
+        # 清理失败时保留 deleting 状态：对用户不可见，但可重试或在启动时继续。
+        self.assertFalse(api.app_storage.knowledge_bases.exists(dept_id))
+        self.assertIn(dept_id, api.app_storage.knowledge_bases.deleting_ids())
 
-        deleted = await self.client.delete("/api/kbs/通用知识库", headers=self.headers)
+        deleted = await self.client.delete(f"/api/kbs/{common_id}")
+        self.assertEqual(deleted.status_code, 400)
+        self.assertEqual(deleted.json()["code"], "common_knowledge_base_protected")
+
+        # 通用库可以改显示名称，身份由 system_key 保持。
         renamed = await self.client.put(
-            "/api/kbs/通用知识库", headers=self.headers, json={"name": "公共资料"}
+            f"/api/kbs/{common_id}", json={"name": "公共资料"}
         )
-        for response in (deleted, renamed):
-            self.assertEqual(response.status_code, 400)
-            self.assertEqual(response.json()["code"], "common_knowledge_base_protected")
-        self.assertTrue(api.app_storage.knowledge_bases.exists("通用知识库"))
+        self.assertEqual(renamed.status_code, 200)
+        self.assertEqual(renamed.json()["kb_id"], common_id)
+        self.assertEqual(api.app_storage.knowledge_bases.common_kb_id(), common_id)
+        self.assertTrue(api.app_storage.knowledge_bases.exists(common_id))
 
         response = await self.client.put(
-            "/api/kbs/通用知识库/retrieval_config",
-            headers=self.headers,
+            f"/api/kbs/{common_id}/retrieval_config",
             json={"query_rewrite_enabled": 1},
         )
         self.assertEqual(response.status_code, 422)
 
         response = await self.client.put(
             "/api/documents/通用知识库/missing.txt/metadata",
-            headers=self.headers,
             json={"effective_date": "22-07-2026"},
         )
         self.assertEqual(response.status_code, 422)
 
         response = await self.client.put(
             "/api/documents/通用知识库/missing.txt/metadata",
-            headers=self.headers,
             json={"tags": [f"标签{i}" for i in range(13)]},
         )
         self.assertEqual(response.status_code, 422)
 
     async def test_model_configuration_errors_expose_stable_codes(self):
         missing = await self.client.put(
-            "/api/models/missing-provider/active", headers=self.headers
+            "/api/models/missing-provider/active"
         )
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(
@@ -180,7 +172,7 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
         )
 
         unconfigured = await self.client.put(
-            "/api/models/OpenAI/active", headers=self.headers
+            "/api/models/OpenAI/active"
         )
         self.assertEqual(unconfigured.status_code, 422)
         self.assertEqual(
@@ -194,7 +186,6 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
         ):
             unavailable = await self.client.post(
                 "/api/models",
-                headers=self.headers,
                 json={
                     "provider": "测试模型",
                     "api_key": "test-key",
@@ -216,16 +207,15 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
 
         own_role = await self.client.put(
             "/api/roles/1",
-            headers=self.headers,
             json={
                 "menu_permissions": ["仪表盘统计"],
-                "knowledge_base_permissions": ["全公司"],
+                "all_knowledge_bases": True,
             },
         )
         self.assertEqual(own_role.status_code, 403)
         self.assertEqual(own_role.json()["code"], "cannot_edit_own_role")
 
-        protected_role = await self.client.delete("/api/roles/1", headers=self.headers)
+        protected_role = await self.client.delete("/api/roles/1")
         self.assertEqual(protected_role.status_code, 409)
         self.assertEqual(
             protected_role.json()["code"], "role_deletion_conflict"
@@ -234,60 +224,60 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
     async def test_role_contract_uses_canonical_field_names(self):
         deprecated = await self.client.post(
             "/api/roles",
-            headers=self.headers,
             json={"name": "旧字段角色", "desc": "不再接受"},
         )
         self.assertEqual(deprecated.status_code, 422)
 
         response = await self.client.post(
             "/api/roles",
-            headers=self.headers,
             json={"name": "审阅者", "description": "只读审阅角色"},
         )
         self.assertEqual(response.status_code, 200)
 
-        roles = (await self.client.get("/api/roles", headers=self.headers)).json()["items"]
+        roles = (await self.client.get("/api/roles")).json()["items"]
         role = next(item for item in roles if item["name"] == "审阅者")
         self.assertEqual(role["description"], "只读审阅角色")
 
         response = await self.client.put(
             f"/api/roles/{role['id']}",
-            headers=self.headers,
             json={
                 "menu_permissions": ["知识库"],
-                "knowledge_base_permissions": ["通用知识库"],
+                "all_knowledge_bases": False,
+                "knowledge_base_ids": [kb_id_by_name("通用知识库")],
             },
         )
         self.assertEqual(response.status_code, 200)
 
-        roles = (await self.client.get("/api/roles", headers=self.headers)).json()["items"]
+        roles = (await self.client.get("/api/roles")).json()["items"]
         role = next(item for item in roles if item["name"] == "审阅者")
-        self.assertEqual(role["knowledge_base_permissions"], ["通用知识库"])
+        self.assertFalse(role["all_knowledge_bases"])
+        self.assertEqual(role["knowledge_base_ids"], [kb_id_by_name("通用知识库")])
 
-        models = (await self.client.get("/api/models", headers=self.headers)).json()
+        models = (await self.client.get("/api/models")).json()
         self.assertTrue(models)
         self.assertIs(type(models[0]["is_active"]), bool)
 
+        common = kb_id_by_name("通用知识库")
         typed_get_endpoints = (
             "/api/dashboard/stats",
             "/api/kbs",
-            "/api/kbs/通用知识库/document_filters",
-            "/api/kbs/通用知识库/index_jobs",
-            "/api/kbs/通用知识库/chunk_config",
-            "/api/kbs/通用知识库/retrieval_config",
-            "/api/documents/通用知识库",
+            f"/api/kbs/{common}/document_filters",
+            f"/api/kbs/{common}/index_jobs",
+            f"/api/kbs/{common}/chunk_config",
+            f"/api/kbs/{common}/retrieval_config",
+            f"/api/documents/{common}",
             "/api/document_parsers",
             "/api/document_formats",
             "/api/users",
         )
         for endpoint in typed_get_endpoints:
             with self.subTest(endpoint=endpoint):
-                response = await self.client.get(endpoint, headers=self.headers)
+                response = await self.client.get(endpoint)
                 self.assertEqual(response.status_code, 200, response.text)
 
     async def test_identity_list_endpoints_expose_validated_page_metadata(self):
         users = await self.client.get(
-            "/api/users?page=99&page_size=10&query=admin", headers=self.headers
+            "/api/users?page=99&page_size=10&query=admin"
         )
         self.assertEqual(users.status_code, 200)
         self.assertEqual(users.json()["page"], 1)
@@ -296,7 +286,7 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
         self.assertEqual(users.json()["items"][0]["username"], "admin")
 
         roles = await self.client.get(
-            "/api/roles?page=99&page_size=10&query=超级", headers=self.headers
+            "/api/roles?page=99&page_size=10&query=超级"
         )
         self.assertEqual(roles.status_code, 200)
         self.assertEqual(roles.json()["page"], 1)
@@ -304,7 +294,7 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
         self.assertEqual(roles.json()["items"][0]["name"], "超级管理员")
 
         invalid_page_size = await self.client.get(
-            "/api/users?page_size=9", headers=self.headers
+            "/api/users?page_size=9"
         )
         self.assertEqual(invalid_page_size.status_code, 422)
 
@@ -317,32 +307,29 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
             conn.executemany(
                 "INSERT INTO chat_sessions VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [
-                    ("mine", admin_id, "admin", "通用知识库", "旧标题", "2026-01-01", "2026-01-01"),
-                    ("theirs", admin_id + 1000, "other", "通用知识库", "别人的", "2026-01-01", "2026-01-01"),
+                    ("mine", admin_id, "admin", kb_id_by_name("通用知识库"), "旧标题", "2026-01-01", "2026-01-01"),
+                    ("theirs", admin_id + 1000, "other", kb_id_by_name("通用知识库"), "别人的", "2026-01-01", "2026-01-01"),
                 ],
             )
 
         renamed = await self.client.put(
             "/api/chat/sessions/mine/title",
-            headers=self.headers,
             json={"title": "  新标题  "},
         )
         self.assertEqual(renamed.status_code, 200)
-        listed = await self.client.get("/api/chat/sessions", headers=self.headers)
+        listed = await self.client.get("/api/chat/sessions")
         self.assertEqual([item["title"] for item in listed.json()], ["新标题"])
 
         for invalid in ("", "   ", "长" * 51):
             with self.subTest(title=invalid):
                 response = await self.client.put(
                     "/api/chat/sessions/mine/title",
-                    headers=self.headers,
                     json={"title": invalid},
                 )
                 self.assertEqual(response.status_code, 422)
         unknown_field = await self.client.put(
             "/api/chat/sessions/mine/title",
-            headers=self.headers,
-            json={"title": "标题", "kb_name": "其他库"},
+            json={"title": "标题", "kb_id": "其他库"},
         )
         self.assertEqual(unknown_field.status_code, 422)
 
@@ -350,7 +337,6 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
             with self.subTest(session_id=session_id):
                 response = await self.client.put(
                     f"/api/chat/sessions/{session_id}/title",
-                    headers=self.headers,
                     json={"title": "抢改"},
                 )
                 self.assertEqual(response.status_code, 404)
@@ -369,15 +355,15 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
             ).fetchone()[0]
             conn.execute(
                 "INSERT INTO chat_sessions VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("s1", admin_id, "admin", "通用知识库", "通用知识库 会话", "2026-01-01", "2026-01-01"),
+                ("s1", admin_id, "admin", kb_id_by_name("通用知识库"), "通用知识库 会话", "2026-01-01", "2026-01-01"),
             )
         # 会话还没有消息时改名，随后保存的第一条消息不能把手动标题覆盖回自动标题。
         await self.client.put(
-            "/api/chat/sessions/s1/title", headers=self.headers, json={"title": "我的标题"}
+            "/api/chat/sessions/s1/title", json={"title": "我的标题"}
         )
         chat_sessions.save_user_message("s1", "第一个问题")
 
-        listed = await self.client.get("/api/chat/sessions", headers=self.headers)
+        listed = await self.client.get("/api/chat/sessions")
         self.assertEqual(listed.json()[0]["title"], "我的标题")
 
 

@@ -37,12 +37,6 @@ class AccessDeniedError(ApplicationError):
     default_code = "access_denied"
 
 
-class PreconditionFailedError(ApplicationError):
-    """A required application configuration or state is missing."""
-
-    default_code = "precondition_failed"
-
-
 class UnsupportedMediaError(ApplicationError):
     """The supplied media type is not supported by the application."""
 

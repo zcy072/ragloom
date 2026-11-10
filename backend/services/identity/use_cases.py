@@ -70,31 +70,54 @@ def register_account(
 
 
 def change_account_password(
-    *, db_file: str, account_id: int, old_password: str, new_password: str
+    *,
+    db_file: str,
+    account_id: int,
+    session_digest: str,
+    old_password: str,
+    new_password: str,
 ) -> None:
-    """Replace an account password only when its current password matches."""
+    """校验原密码后替换密码，并在同一事务撤销该账号全部会话。
+
+    bcrypt 校验与哈希在写事务外完成；事务内凭证已变化（并发改密、停用或当前会话失效）
+    时返回 409，不覆盖其他请求写入的新密码。
+    """
     try:
-        changed = accounts.change_password(db_file, account_id, old_password, new_password)
+        application_config.validate_new_password(new_password)
     except ValueError as exc:
         raise InvalidRequestError(str(exc), code="invalid_new_password") from exc
-    if not changed:
+    current_hash = accounts.find_password_hash(db_file, account_id)
+    if current_hash is None or not application_config.verify_password(
+        old_password, current_hash
+    ):
         raise InvalidStateError("原密码不正确", code="invalid_current_password")
+    if not accounts.replace_password(
+        db_file,
+        account_id=account_id,
+        session_digest=session_digest,
+        expected_hash=current_hash,
+        new_hash=application_config.hash_password(new_password),
+    ):
+        raise ConflictError("账号凭证已变化，请重新登录后再试", code="credentials_changed")
 
 
 def _can_grant_permissions(
     *,
     actor_menu_permissions: Sequence[str],
-    actor_knowledge_base_permissions: Sequence[str],
+    actor_all_knowledge_bases: bool,
+    actor_knowledge_base_ids: Sequence[str],
     menu_permissions: Sequence[str],
-    knowledge_base_permissions: Sequence[str],
+    all_knowledge_bases: bool,
+    knowledge_base_ids: Sequence[str],
 ) -> bool:
     """Return whether an actor may delegate the requested permission sets."""
     exceeds_menu_permissions = set(menu_permissions) - set(actor_menu_permissions)
-    exceeds_knowledge_permissions = (
-        application_config.ALL_KNOWLEDGE_BASES_PERMISSION not in actor_knowledge_base_permissions
-    ) and bool(
-        set(knowledge_base_permissions) - set(actor_knowledge_base_permissions)
-    )
+    if actor_all_knowledge_bases:
+        exceeds_knowledge_permissions = False
+    else:
+        exceeds_knowledge_permissions = all_knowledge_bases or bool(
+            set(knowledge_base_ids) - set(actor_knowledge_base_ids)
+        )
     return not exceeds_menu_permissions and not exceeds_knowledge_permissions
 
 
@@ -107,19 +130,22 @@ def require_manageable_target(
     *,
     db_file: str,
     actor_menu_permissions: Sequence[str],
-    actor_knowledge_base_permissions: Sequence[str],
+    actor_all_knowledge_bases: bool,
+    actor_knowledge_base_ids: Sequence[str],
     user_id: int,
 ) -> None:
     """Reject managing an account whose permissions exceed the actor's own."""
     target = accounts.find_account_permissions(db_file, user_id)
     if target is None:
         raise ResourceNotFoundError("用户不存在", code="user_not_found")
-    menu_permissions, knowledge_base_permissions = target
+    menu_permissions, all_knowledge_bases, knowledge_base_ids = target
     if not _can_grant_permissions(
         actor_menu_permissions=actor_menu_permissions,
-        actor_knowledge_base_permissions=actor_knowledge_base_permissions,
+        actor_all_knowledge_bases=actor_all_knowledge_bases,
+        actor_knowledge_base_ids=actor_knowledge_base_ids,
         menu_permissions=menu_permissions,
-        knowledge_base_permissions=knowledge_base_permissions,
+        all_knowledge_bases=all_knowledge_bases,
+        knowledge_base_ids=knowledge_base_ids,
     ):
         raise AccessDeniedError(
             "不能管理权限超出当前账号的用户", code="target_permissions_exceed_actor"
@@ -131,7 +157,8 @@ def delete_user(
     db_file: str,
     actor_account_id: int,
     actor_menu_permissions: Sequence[str],
-    actor_knowledge_base_permissions: Sequence[str],
+    actor_all_knowledge_bases: bool,
+    actor_knowledge_base_ids: Sequence[str],
     user_id: int,
 ) -> None:
     """Delete another account and its chat history."""
@@ -140,7 +167,8 @@ def delete_user(
     require_manageable_target(
         db_file=db_file,
         actor_menu_permissions=actor_menu_permissions,
-        actor_knowledge_base_permissions=actor_knowledge_base_permissions,
+        actor_all_knowledge_bases=actor_all_knowledge_bases,
+        actor_knowledge_base_ids=actor_knowledge_base_ids,
         user_id=user_id,
     )
     try:
@@ -154,7 +182,8 @@ def assign_user_role(
     db_file: str,
     actor_account_id: int,
     actor_menu_permissions: Sequence[str],
-    actor_knowledge_base_permissions: Sequence[str],
+    actor_all_knowledge_bases: bool,
+    actor_knowledge_base_ids: Sequence[str],
     user_id: int,
     role_id: int,
 ) -> None:
@@ -164,7 +193,8 @@ def assign_user_role(
     require_manageable_target(
         db_file=db_file,
         actor_menu_permissions=actor_menu_permissions,
-        actor_knowledge_base_permissions=actor_knowledge_base_permissions,
+        actor_all_knowledge_bases=actor_all_knowledge_bases,
+        actor_knowledge_base_ids=actor_knowledge_base_ids,
         user_id=user_id,
     )
     target_role = roles.get_role(db_file, role_id)
@@ -172,9 +202,11 @@ def assign_user_role(
         raise ResourceNotFoundError("角色不存在", code="role_not_found")
     if not _can_grant_permissions(
         actor_menu_permissions=actor_menu_permissions,
-        actor_knowledge_base_permissions=actor_knowledge_base_permissions,
+        actor_all_knowledge_bases=actor_all_knowledge_bases,
+        actor_knowledge_base_ids=actor_knowledge_base_ids,
         menu_permissions=target_role["menu_permissions"],
-        knowledge_base_permissions=target_role["knowledge_base_permissions"],
+        all_knowledge_bases=target_role["all_knowledge_bases"],
+        knowledge_base_ids=target_role["knowledge_base_ids"],
     ):
         raise AccessDeniedError("不能授予当前账号不具备的权限", code="permission_delegation_denied")
     try:
@@ -188,7 +220,8 @@ def update_user_status(
     db_file: str,
     actor_account_id: int,
     actor_menu_permissions: Sequence[str],
-    actor_knowledge_base_permissions: Sequence[str],
+    actor_all_knowledge_bases: bool,
+    actor_knowledge_base_ids: Sequence[str],
     user_id: int,
     status: str,
 ) -> None:
@@ -198,7 +231,8 @@ def update_user_status(
     require_manageable_target(
         db_file=db_file,
         actor_menu_permissions=actor_menu_permissions,
-        actor_knowledge_base_permissions=actor_knowledge_base_permissions,
+        actor_all_knowledge_bases=actor_all_knowledge_bases,
+        actor_knowledge_base_ids=actor_knowledge_base_ids,
         user_id=user_id,
     )
     try:
@@ -231,19 +265,23 @@ def update_role_permissions(
     db_file: str,
     actor_role_id: int | None,
     actor_menu_permissions: Sequence[str],
-    actor_knowledge_base_permissions: Sequence[str],
+    actor_all_knowledge_bases: bool,
+    actor_knowledge_base_ids: Sequence[str],
     role_id: int,
     menu_permissions: Sequence[str],
-    knowledge_base_permissions: Sequence[str],
+    all_knowledge_bases: bool,
+    knowledge_base_ids: Sequence[str],
 ) -> None:
     """Replace a role's permissions when the actor may safely delegate them."""
     if role_id == actor_role_id:
         raise AccessDeniedError("不能修改当前账号正在使用的角色", code="cannot_edit_own_role")
     if not _can_grant_permissions(
         actor_menu_permissions=actor_menu_permissions,
-        actor_knowledge_base_permissions=actor_knowledge_base_permissions,
+        actor_all_knowledge_bases=actor_all_knowledge_bases,
+        actor_knowledge_base_ids=actor_knowledge_base_ids,
         menu_permissions=menu_permissions,
-        knowledge_base_permissions=knowledge_base_permissions,
+        all_knowledge_bases=all_knowledge_bases,
+        knowledge_base_ids=knowledge_base_ids,
     ):
         raise AccessDeniedError("不能授予当前账号不具备的权限", code="permission_delegation_denied")
     target = roles.get_role(db_file, role_id)
@@ -253,16 +291,18 @@ def update_role_permissions(
         raise AccessDeniedError("超级管理员角色的权限不能修改", code="protected_role")
     if not _can_grant_permissions(
         actor_menu_permissions=actor_menu_permissions,
-        actor_knowledge_base_permissions=actor_knowledge_base_permissions,
+        actor_all_knowledge_bases=actor_all_knowledge_bases,
+        actor_knowledge_base_ids=actor_knowledge_base_ids,
         menu_permissions=target["menu_permissions"],
-        knowledge_base_permissions=target["knowledge_base_permissions"],
+        all_knowledge_bases=target["all_knowledge_bases"],
+        knowledge_base_ids=target["knowledge_base_ids"],
     ):
         raise AccessDeniedError(
             "不能修改权限超出当前账号的角色", code="target_permissions_exceed_actor"
         )
     try:
         roles.update_role_permissions(
-            db_file, role_id, menu_permissions, knowledge_base_permissions
+            db_file, role_id, menu_permissions, all_knowledge_bases, knowledge_base_ids
         )
     except ValueError as exc:
         raise InvalidRequestError(str(exc), code="invalid_role_permissions") from exc

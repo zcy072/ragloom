@@ -4,15 +4,14 @@ from langchain_core.documents import Document
 
 from services.indexing import chunking
 from tests.in_memory_index import InMemoryChunkIndex
+from tests.support import fixture_document_id
 
 
 class MinerUStructuredChunkingTest(unittest.TestCase):
     def split_mineru(self, document, *, chunk_size=800):
         """通过生产入口执行 MinerU 结构化切分。"""
         document.metadata["structured_profile"] = "mineru"
-        return chunking.split_structured_markdown_documents(
-            [document], chunk_size=chunk_size
-        )
+        return chunking.split_structured_markdown_documents([document], chunk_size=chunk_size)
 
     def test_groups_adjacent_leaf_sections_and_excludes_bibliography(self):
         document = Document(
@@ -56,8 +55,7 @@ class MinerUStructuredChunkingTest(unittest.TestCase):
         self.assertIn("8.3 随访管理", follow_up.metadata["contextual_title"])
         self.assertTrue(
             all(
-                split.metadata["chunk_route"] == chunking.CHUNK_ROUTE_STRUCTURED
-                for split in splits
+                split.metadata["chunk_route"] == chunking.CHUNK_ROUTE_STRUCTURED for split in splits
             )
         )
         self.assertTrue(all("示例文献" not in split.page_content for split in splits))
@@ -252,11 +250,14 @@ English cover metadata.
             page_content="结构路线中的随访管理规则",
             metadata={"source": "指南.pdf", "chunk_route": chunking.CHUNK_ROUTE_STRUCTURED},
         )
-        index.publish_source(kb_id, "指南.pdf", [fixed, structured], [[1.0, 0.0], [0.0, 1.0]])
-
-        fixed_hits = index.search_lexical(
-            kb_id, "高血压管理", chunking.CHUNK_ROUTE_FIXED, None, 5
+        index.publish_document(
+            kb_id,
+            fixture_document_id(kb_id, "指南.pdf"),
+            [fixed, structured],
+            [[1.0, 0.0], [0.0, 1.0]],
         )
+
+        fixed_hits = index.search_lexical(kb_id, "高血压管理", chunking.CHUNK_ROUTE_FIXED, None, 5)
         structured_hits = index.search_lexical(
             kb_id, "随访管理", chunking.CHUNK_ROUTE_STRUCTURED, None, 5
         )

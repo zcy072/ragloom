@@ -136,7 +136,7 @@ class CachedQueryEmbeddings:
 class _RouteCache:
     """缓存“知识库 + 文件集合 → 已有路线”，省去每次构建检索器时的路线探测查询。
 
-    键用知识库名，与检索器缓存同步失效：发布、删除和重建都会调用 drop_cached_retriever。
+    键用 kb_id，与检索器缓存同步失效：发布、删除和重建都会调用 drop_cached_retriever。
     每个知识库有一个代号，失效时加一；探测期间代号变了，结果就不写入缓存。
     """
 
@@ -151,57 +151,82 @@ class _RouteCache:
         self._lock = threading.Lock()
 
     def routes(
-        self, kb_name: str, sources: tuple[str, ...], probe: Callable[[], set[str]]
+        self, kb_id: str, document_ids: tuple[str, ...], probe: Callable[[], set[str]]
     ) -> set[str]:
         """返回缓存的路线；未命中时调用 probe，非空结果在代号未变时写入缓存。"""
-        key = (kb_name, tuple(sorted(sources)))
+        key = (kb_id, tuple(sorted(document_ids)))
         with self._lock:
             cached = self._items.get(key)
             if cached is not None:
                 self._items.move_to_end(key)
                 return set(cached)
-            generation = self._generations[kb_name]
+            generation = self._generations[kb_id]
         routes = probe()
         with self._lock:
-            if routes and self._generations[kb_name] == generation:
+            if routes and self._generations[kb_id] == generation:
                 self._items[key] = frozenset(routes)
                 while len(self._items) > self._MAX_SIZE:
                     self._items.popitem(last=False)
         return routes
 
-    def drop(self, kb_name: str) -> None:
+    def drop(self, kb_id: str) -> None:
         """失效一个知识库的全部路线缓存。"""
         with self._lock:
-            self._generations[kb_name] += 1
-            for key in [key for key in self._items if key[0] == kb_name]:
+            self._generations[kb_id] += 1
+            for key in [key for key in self._items if key[0] == kb_id]:
                 del self._items[key]
 
     def clear(self) -> None:
         """失效所有知识库的路线缓存。"""
         with self._lock:
-            for kb_name in {key[0] for key in self._items} | set(self._generations):
-                self._generations[kb_name] += 1
+            for kb_id in {key[0] for key in self._items} | set(self._generations):
+                self._generations[kb_id] += 1
             self._items.clear()
 
 
 _route_cache = _RouteCache()
 
 
-def get_cached_retriever(kb_name: str, *, include_common: bool = False):
+_retriever_cache_version = 0
+_retriever_cache_version_lock = threading.Lock()
+
+
+def retriever_cache_version() -> int:
+    """返回检索图缓存的失效计数；构建检索图前读取，写入缓存时交回比对。"""
+    with _retriever_cache_version_lock:
+        return _retriever_cache_version
+
+
+def _invalidate_retriever_cache() -> None:
+    global _retriever_cache_version
+    with _retriever_cache_version_lock:
+        _retriever_cache_version += 1
+
+
+def get_cached_retriever(kb_id: str, *, include_common: bool = False):
     """获取无过滤条件的 LRU 检索图；命中后提升其最近使用顺序。
 
     是否补充通用知识库取决于提问者的权限，两种检索图分开缓存。
     """
-    return _retriever_cache.get((kb_name, include_common))
+    return _retriever_cache.get((kb_id, include_common))
 
 
-def cache_retriever(kb_name: str, retriever, *, include_common: bool = False) -> None:
-    """只缓存可复用的全知识库检索图，超限时淘汰最久未使用项。"""
-    _retriever_cache.put((kb_name, include_common), retriever)
+def cache_retriever(
+    kb_id: str, retriever, *, include_common: bool = False, version: int
+) -> None:
+    """只缓存可复用的全知识库检索图，超限时淘汰最久未使用项。
+
+    version 是构建前读取的 retriever_cache_version()。构建期间有文档发布时缓存已失效，
+    这个检索图的路线计划可能早于发布，不写入缓存，下次请求重新构建。
+    """
+    with _retriever_cache_version_lock:
+        if version == _retriever_cache_version:
+            _retriever_cache.put((kb_id, include_common), retriever)
 
 
 def clear_retriever_cache() -> None:
     """清空所有知识库的检索器缓存和路线缓存。"""
+    _invalidate_retriever_cache()
     _retriever_cache.clear()
     _route_cache.clear()
 
@@ -214,30 +239,30 @@ def warm_retriever_cache(container: ApplicationContainer | None = None) -> int:
             row[0]
             for row in conn.execute(
                 """
-                SELECT kb_name FROM documents
-                GROUP BY kb_name
+                SELECT d.kb_id FROM documents d
+                JOIN knowledge_bases k ON k.kb_id = d.kb_id AND k.state = 'active'
+                GROUP BY d.kb_id
                 HAVING COUNT(*) > 0
                    AND SUM(CASE WHEN status = 'ready' THEN 0 ELSE 1 END) = 0
-                ORDER BY kb_name
+                ORDER BY d.kb_id
                 """
             ).fetchall()
         ]
 
     # 大多数角色都能读取通用知识库，只预热补充通用知识库的检索图。
     warmed = 0
-    for kb_name in knowledge_bases:
-        if get_cached_retriever(kb_name, include_common=True) is not None:
+    for kb_id in knowledge_bases:
+        if get_cached_retriever(kb_id, include_common=True) is not None:
             continue
-        sources_before = dependencies.documents.ready_sources(kb_name)
+        version = retriever_cache_version()
         try:
-            retriever = build_retriever(kb_name, include_common=True, container=dependencies)
+            retriever = build_retriever(kb_id, include_common=True, container=dependencies)
         except Exception as exc:
-            logger.debug("Retriever warmup skipped for %s: %s", kb_name, exc)
+            logger.debug("Retriever warmup skipped for %s: %s", kb_id, exc)
             continue
-        # 组装检索图期间若文档发生变化，就不缓存这个已经过时的图。
-        if retriever and sources_before == dependencies.documents.ready_sources(kb_name):
-            cache_retriever(kb_name, retriever, include_common=True)
-            warmed += 1
+        if retriever:
+            cache_retriever(kb_id, retriever, include_common=True, version=version)
+            warmed += get_cached_retriever(kb_id, include_common=True) is retriever
     logger.info("Retriever cache warmup completed: %s knowledge bases", warmed)
     return warmed
 
@@ -256,24 +281,18 @@ def start_retriever_cache_warmup(
     return thread
 
 
-def drop_cached_retriever(kb_name: str) -> None:
+def drop_cached_retriever(kb_id: str) -> None:
     """移除一个知识库的缓存检索图，使下次查询按最新索引重建。
 
     部门库的检索图在构建时固定了通用知识库的路线计划，所以通用知识库变化时要清空全部缓存。
     """
-    _route_cache.drop(kb_name)
-    if kb_name == source_state.COMMON_KNOWLEDGE_BASE:
+    _invalidate_retriever_cache()
+    _route_cache.drop(kb_id)
+    if kb_id == source_state.common_kb_id():
         _retriever_cache.clear()
     else:
-        _retriever_cache.drop((kb_name, False))
-        _retriever_cache.drop((kb_name, True))
-
-
-def rename_cached_retriever(old_name: str, new_name: str) -> None:
-    """知识库改名后失效新旧名称的缓存检索图。"""
-    # 检索器内嵌部门过滤条件，直接迁移缓存实例会使其失效。
-    drop_cached_retriever(old_name)
-    drop_cached_retriever(new_name)
+        _retriever_cache.drop((kb_id, False))
+        _retriever_cache.drop((kb_id, True))
 
 
 def _normalized_overlap_text(value: str) -> str:
@@ -300,8 +319,7 @@ def _substantially_contains(left: str, right: str) -> bool:
     ]
     return (
         bool(probes)
-        and sum(probe in longer for probe in probes) / len(probes)
-        >= _OVERLAP_MATCH_RATIO
+        and sum(probe in longer for probe in probes) / len(probes) >= _OVERLAP_MATCH_RATIO
     )
 
 
@@ -314,15 +332,15 @@ def deduplicate_chunk_routes(documents: list[LCDocument]) -> list[LCDocument]:
     retained: list[LCDocument] = []
     exact_keys: set[tuple[str, str, str]] = set()
     for document in documents:
-        source = context_builder.source_name(document)
-        kb_name = context_builder.document_kb_name(document, "")
+        document_id = context_builder.document_id(document)
+        kb_id = context_builder.document_kb_id(document, "")
         route = chunk_route(document)
-        exact_key = (kb_name, source, _normalized_overlap_text(document.page_content))
+        exact_key = (kb_id, document_id, _normalized_overlap_text(document.page_content))
         if exact_key in exact_keys:
             continue
         duplicate = any(
-            context_builder.document_kb_name(existing, "") == kb_name
-            and context_builder.source_name(existing) == source
+            context_builder.document_kb_id(existing, "") == kb_id
+            and context_builder.document_id(existing) == document_id
             and chunk_route(existing) != route
             and _substantially_contains(existing.page_content, document.page_content)
             for existing in retained
@@ -333,44 +351,36 @@ def deduplicate_chunk_routes(documents: list[LCDocument]) -> list[LCDocument]:
     return retained
 
 
-def _retrieval_sources(
-    kb_name: str,
+def _retrieval_document_ids(
+    kb_id: str,
     filters: RetrievalFilters | None,
     container: ApplicationContainer | None = None,
 ) -> list[str]:
     """在 SQLite 权威源文件允许列表内解析用户传入的过滤条件。"""
     dependencies = container or get_application_container()
-    current_sources = source_state.ready_sources(kb_name, dependencies)
-    filtered_sources = dependencies.documents.filtered_sources(kb_name, filters)
-    if filtered_sources is None:
-        return list(current_sources)
-    current_set = set(current_sources)
-    return [source for source in filtered_sources if source in current_set]
+    current_document_ids = source_state.ready_document_ids(kb_id, dependencies)
+    filtered_document_ids = dependencies.documents.filtered_document_ids(kb_id, filters)
+    if filtered_document_ids is None:
+        return list(current_document_ids)
+    current_set = set(current_document_ids)
+    return [source for source in filtered_document_ids if source in current_set]
 
 
-request_source_snapshot = source_state.request_source_snapshot
+request_document_snapshot = source_state.request_document_snapshot
 
 
 _ROUTE_ORDER = (CHUNK_ROUTE_FIXED, CHUNK_ROUTE_STRUCTURED, CHUNK_ROUTE_VISUAL)
 _FUSION_RRF_K = 60
 
 
-def _kb_id(dependencies: ApplicationContainer, kb_name: str) -> str:
-    """读取知识库的稳定 kb_id，知识库不存在时视为请求无效。"""
-    kb_id = dependencies.knowledge_bases.kb_id_for(kb_name)
-    if not kb_id:
-        raise ValueError("知识库不存在")
-    return kb_id
-
-
 @dataclass(frozen=True)
 class _RoutePlan:
     """一个 (知识库, 路线) 的检索单元及其在融合中的权重。"""
-    kb_name: str
+
     kb_id: str
     route: str
     weight: float
-    requested_sources: tuple[str, ...] | None
+    requested_document_ids: tuple[str, ...] | None
 
 
 class WeightedRouteRetriever:
@@ -391,12 +401,12 @@ class WeightedRouteRetriever:
         query_vector = self._embeddings.embed_query(query)
         # 文件白名单读取请求级快照，必须在当前线程内解析。
         allowlists = {
-            plan.kb_name: source_state.current_source_allowlist(
-                plan.kb_name, plan.requested_sources
+            plan.kb_id: source_state.current_document_allowlist(
+                plan.kb_id, plan.requested_document_ids
             )
             for plan in self._plans
         }
-        active = [plan for plan in self._plans if allowlists[plan.kb_name]]
+        active = [plan for plan in self._plans if allowlists[plan.kb_id]]
         results = _run_searches(
             [
                 functools.partial(
@@ -405,7 +415,7 @@ class WeightedRouteRetriever:
                     query,
                     query_vector,
                     plan.route,
-                    list(allowlists[plan.kb_name]),
+                    list(allowlists[plan.kb_id]),
                     RETRIEVAL_DENSE_K,
                 )
                 for plan in active
@@ -416,11 +426,13 @@ class WeightedRouteRetriever:
         # 融合按计划顺序累加，保证并发不改变同分时的排序。
         for plan, hits in zip(active, results):
             for rank, document in enumerate(hits):
-                document.metadata["kb_name"] = plan.kb_name
+                document.metadata["kb_id"] = plan.kb_id
+                # 发布切换期间新旧两代子块同时可见、序号重复，键里带上代号以免互相合并。
                 key = (
-                    plan.kb_name,
-                    document.metadata.get("source"),
+                    plan.kb_id,
+                    document.metadata.get("document_id"),
                     plan.route,
+                    document.metadata.get("generation"),
                     document.metadata.get("chunk_index"),
                 )
                 scores[key] = scores.get(key, 0.0) + plan.weight / (_FUSION_RRF_K + rank + 1)
@@ -431,37 +443,34 @@ class WeightedRouteRetriever:
 def _route_plans(
     dependencies: ApplicationContainer,
     index: ChunkIndex,
-    kb_name: str,
-    requested_sources: list[str] | None,
+    kb_id: str,
+    requested_document_ids: list[str] | None,
     total_weight: float,
 ) -> list[_RoutePlan]:
     """探测一个知识库实际存在的路线，并把总权重按路线权重重新归一分配。"""
-    current_sources = source_state.current_source_allowlist(kb_name, requested_sources)
-    if not current_sources:
+    current_document_ids = source_state.current_document_allowlist(kb_id, requested_document_ids)
+    if not current_document_ids:
         return []
-    kb_id = _kb_id(dependencies, kb_name)
     routes = _route_cache.routes(
-        kb_name,
-        tuple(current_sources),
-        functools.partial(index.available_routes, kb_id, list(current_sources)),
+        kb_id,
+        tuple(current_document_ids),
+        functools.partial(index.available_routes, kb_id, list(current_document_ids)),
     )
     if not routes:
         raise ValueError("知识库索引缺失或版本过旧，请在知识库管理中完整重建索引后再提问。")
-    weights = [
-        (route, RETRIEVAL_ROUTE_WEIGHTS[route]) for route in _ROUTE_ORDER if route in routes
-    ]
+    weights = [(route, RETRIEVAL_ROUTE_WEIGHTS[route]) for route in _ROUTE_ORDER if route in routes]
     available_weight = sum(weight for _, weight in weights)
-    requested = tuple(requested_sources) if requested_sources is not None else None
+    requested = tuple(requested_document_ids) if requested_document_ids is not None else None
     # 只在实际有文档的路线间归一化权重，避免空视觉路线无声压缩固定路线的召回预算。
     return [
-        _RoutePlan(kb_name, kb_id, route, total_weight * weight / available_weight, requested)
+        _RoutePlan(kb_id, route, total_weight * weight / available_weight, requested)
         for route, weight in weights
     ]
 
 
 def _retrieve_lexical_candidates_for_base(
     dependencies: ApplicationContainer,
-    kb_name: str,
+    kb_id: str,
     query: str,
     allowed_sources: list[str] | None,
     per_route: int,
@@ -471,15 +480,14 @@ def _retrieve_lexical_candidates_for_base(
     该受限路径保护包含编号、日期或产品名的问题，避免其精确性被向量相似度稀释；
     结果稍后与主候选集合合并，不作为第二套最终排序。
     """
-    sources = source_state.current_source_allowlist(kb_name, allowed_sources)
-    if not sources:
+    document_ids = source_state.current_document_allowlist(kb_id, allowed_sources)
+    if not document_ids:
         return []
-    kb_id = _kb_id(dependencies, kb_name)
     index = get_chunk_index()
     results = _run_searches(
         [
             functools.partial(
-                index.search_lexical, kb_id, query, route, list(sources), per_route
+                index.search_lexical, kb_id, query, route, list(document_ids), per_route
             )
             for route in _ROUTE_ORDER
         ]
@@ -487,13 +495,13 @@ def _retrieve_lexical_candidates_for_base(
     candidates: list[LCDocument] = []
     for hits in results:
         for document in hits:
-            document.metadata["kb_name"] = kb_name
+            document.metadata["kb_id"] = kb_id
             candidates.append(document)
     return candidates
 
 
 def retrieve_lexical_candidates(
-    kb_name: str,
+    kb_id: str,
     query: str,
     filters: RetrievalFilters | None = None,
     *,
@@ -504,25 +512,32 @@ def retrieve_lexical_candidates(
     """保留小规模 BM25 证据池，让精确术语穿过向量融合噪声；失败时只记录日志。"""
     try:
         dependencies = container or get_application_container()
-        kb_name = application_config.validate_kb_name(kb_name)
-        if not dependencies.documents.knowledge_base_exists(kb_name):
+        kb_id = application_config.validate_kb_id(kb_id)
+        if not dependencies.documents.knowledge_base_exists(kb_id):
             return []
         candidates = _retrieve_lexical_candidates_for_base(
             dependencies,
-            kb_name,
+            kb_id,
             query,
-            _retrieval_sources(kb_name, filters, dependencies),
+            _retrieval_document_ids(kb_id, filters, dependencies),
             per_route,
         )
         # 能读取通用知识库时补充通用政策材料；查询通用知识库本身时不重复加入。
-        if source_state.supplements_common(kb_name, include_common, dependencies):
+        common_id = source_state.supplements_common(kb_id, include_common, dependencies)
+        if common_id:
             candidates.extend(
                 _retrieve_lexical_candidates_for_base(
                     dependencies,
-                    source_state.COMMON_KNOWLEDGE_BASE,
+                    common_id,
                     query,
-                    _retrieval_sources(
-                        source_state.COMMON_KNOWLEDGE_BASE, filters, dependencies
+                    _retrieval_document_ids(
+                        common_id,
+                        {
+                            key: value
+                            for key, value in (filters or {}).items()
+                            if key != "document_ids"
+                        },
+                        dependencies,
                     ),
                     per_route,
                 )
@@ -534,7 +549,7 @@ def retrieve_lexical_candidates(
 
 
 def build_retriever(
-    kb_name: str,
+    kb_id: str,
     filters: RetrievalFilters | None = None,
     *,
     include_common: bool = False,
@@ -547,28 +562,29 @@ def build_retriever(
     通用知识库。
     """
     dependencies = container or get_application_container()
-    kb_name = application_config.validate_kb_name(kb_name)
-    if not dependencies.documents.knowledge_base_exists(kb_name):
+    kb_id = application_config.validate_kb_id(kb_id)
+    if not dependencies.documents.knowledge_base_exists(kb_id):
         raise ValueError("知识库不存在")
 
     index = get_chunk_index()
     embeddings = CachedQueryEmbeddings(dependencies.create_query_embeddings())
-    sources = _retrieval_sources(kb_name, filters, dependencies)
+    document_ids = _retrieval_document_ids(kb_id, filters, dependencies)
     # 当前知识库主导召回，通用知识库负责补充；缺失路线会重新归一化权重。
-    plans = _route_plans(
-        dependencies, index, kb_name, sources, RETRIEVAL_KB_WEIGHT_CURRENT
-    )
+    plans = _route_plans(dependencies, index, kb_id, document_ids, RETRIEVAL_KB_WEIGHT_CURRENT)
 
-    if source_state.supplements_common(kb_name, include_common, dependencies):
-        common_sources = _retrieval_sources(
-            source_state.COMMON_KNOWLEDGE_BASE, filters, dependencies
+    common_id = source_state.supplements_common(kb_id, include_common, dependencies)
+    if common_id:
+        common_document_ids = _retrieval_document_ids(
+            common_id,
+            {key: value for key, value in (filters or {}).items() if key != "document_ids"},
+            dependencies,
         )
         plans.extend(
             _route_plans(
                 dependencies,
                 index,
-                source_state.COMMON_KNOWLEDGE_BASE,
-                common_sources,
+                common_id,
+                common_document_ids,
                 RETRIEVAL_KB_WEIGHT_COMMON,
             )
         )
@@ -578,8 +594,10 @@ def build_retriever(
     total_weight = sum(plan.weight for plan in plans)
     normalized = [
         _RoutePlan(
-            plan.kb_name, plan.kb_id, plan.route, plan.weight / total_weight,
-            plan.requested_sources,
+            plan.kb_id,
+            plan.route,
+            plan.weight / total_weight,
+            plan.requested_document_ids,
         )
         for plan in plans
     ]

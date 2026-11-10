@@ -60,10 +60,12 @@ def update_role(
         db_file=database_file(),
         actor_role_id=principal.role_id,
         actor_menu_permissions=principal.menu_permissions,
-        actor_knowledge_base_permissions=principal.knowledge_base_permissions,
+        actor_all_knowledge_bases=principal.all_knowledge_bases,
+        actor_knowledge_base_ids=principal.knowledge_base_ids,
         role_id=role_id,
         menu_permissions=data.menu_permissions,
-        knowledge_base_permissions=data.knowledge_base_permissions,
+        all_knowledge_bases=data.all_knowledge_bases,
+        knowledge_base_ids=data.knowledge_base_ids,
     )
     return {"status": "success"}
 

@@ -1,6 +1,8 @@
 """Application use cases for document mutations and indexing coordination."""
 
+import logging
 import os
+import shutil
 import uuid
 from dataclasses import dataclass
 from typing import BinaryIO
@@ -9,7 +11,6 @@ from services.core import config as application_config
 from services.core.container import get_application_container
 from services.core.errors import (
     InvalidRequestError,
-    OperationFailedError,
     PayloadTooLargeError,
     ResourceNotFoundError,
     UnsupportedMediaError,
@@ -26,13 +27,10 @@ from services.documents.parser_modes import (
 from services.documents.types import SUPPORTED_DOCUMENT_EXTENSIONS
 from services.indexing import pipeline as indexing_pipeline
 from services.indexing import worker as index_worker
-from services.indexing.jobs import INDEX_JOB_FAILED
 from services.retrieval import retriever
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
-# 文件系统按字节限制单级名称（常见为 255）。上传的临时文件名会再加上 41 字节
-# （前导点、32 位随机串和 .upload），MinerU 结果目录再加 7 字节，所以新上传的名称留出余量。
-# validate_filename 仍只限制 255 个字符，不会让已有文档变得不可访问。
+# 沿用 200 字节的上传名称限制，为 MinerU 结果目录等解析产物的后缀预留余量。
 MAX_UPLOAD_FILENAME_BYTES = 200
 _SUPPORTED_EXTENSIONS = set(SUPPORTED_DOCUMENT_EXTENSIONS)
 
@@ -42,6 +40,7 @@ class DocumentMutationResult:
     """Public values produced by a document mutation use case."""
 
     job_id: str
+    document_id: str
     metadata: DocumentMetadata | None = None
     parser_mode: str | None = None
 
@@ -75,34 +74,42 @@ def _validated_parser_mode(filename: str, parser_mode: str | None) -> str:
     return normalized
 
 
-def _enqueue_document_refresh(kb_name: str, filename: str) -> str:
-    """Create a durable refresh job before waking the in-process worker."""
-    index_jobs = get_application_container().index_jobs()
-    job_id = index_jobs.create(kb_name, "process", filename)
-    if not index_jobs.attach_document_job(kb_name, filename, job_id):
-        index_jobs.finish(job_id, INDEX_JOB_FAILED, "文档不存在")
-        raise ResourceNotFoundError("文档不存在", code="document_not_found")
-    retriever.drop_cached_retriever(kb_name)
-    index_worker.enqueue(job_id)
-    return job_id
+logger = logging.getLogger(__name__)
+
+
+def _wake_worker(job_id: str) -> None:
+    """任务已经提交；唤醒失败由周期补扫处理，不能回滚成功上传。"""
+    try:
+        if not index_worker.enqueue(job_id):
+            logger.info("Index job %s awaits queued scan", job_id)
+    except Exception:
+        logger.warning("Failed to wake index worker for %s", job_id, exc_info=True)
+
+
+def _remove_new_directory(path: str) -> None:
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning(
+            "Upload cleanup failed for %s; startup sweep will retry", path, exc_info=True
+        )
 
 
 def upload_document(
-    kb_name: str,
+    kb_id: str,
     filename: str | None,
     source: BinaryIO,
     *,
     metadata: DocumentMetadataInput | None,
     parser_mode: str | None,
 ) -> DocumentMutationResult:
-    """Atomically store an upload and create its durable indexing job."""
+    """每次上传创建独立身份；文档和初始任务在同一事务提交。"""
     documents = get_application_container().documents
-    index_jobs = get_application_container().index_jobs()
     filename = _validated_filename(filename)
     if os.path.splitext(filename)[1].lower() not in _SUPPORTED_EXTENSIONS:
-        raise UnsupportedMediaError(
-            "暂不支持该文件类型", code="unsupported_document_type"
-        )
+        raise UnsupportedMediaError("暂不支持该文件类型", code="unsupported_document_type")
     normalized_parser = _validated_parser_mode(filename, parser_mode)
     try:
         normalized_metadata = documents.normalize_metadata(metadata)
@@ -110,122 +117,98 @@ def upload_document(
         raise InvalidRequestError(
             f"文档元数据无效：{exc}", code="invalid_document_metadata"
         ) from exc
-    if not documents.knowledge_base_exists(kb_name):
-        raise ResourceNotFoundError(
-            "知识库不存在", code="knowledge_base_not_found"
-        )
-
-    path = documents.document_path(kb_name, filename)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    temporary_path = os.path.join(
-        os.path.dirname(path), f".{filename}.{uuid.uuid4().hex}.upload"
-    )
+    if not documents.knowledge_base_exists(kb_id):
+        raise ResourceNotFoundError("知识库不存在", code="knowledge_base_not_found")
+    document_id = str(uuid.uuid4())
+    upload_dir = os.path.join(documents.uploads_directory(), uuid.uuid4().hex)
+    os.makedirs(upload_dir, exist_ok=False)
+    temporary_path = os.path.join(upload_dir, filename)
+    directory = documents.document_directory(kb_id, document_id)
     size = 0
     try:
         with open(temporary_path, "wb") as output:
             while chunk := source.read(1024 * 1024):
                 size += len(chunk)
                 if size > MAX_UPLOAD_BYTES:
-                    raise PayloadTooLargeError(
-                        "单个文件不能超过 50 MB", code="document_too_large"
-                    )
+                    raise PayloadTooLargeError("单个文件不能超过 50 MB", code="document_too_large")
                 output.write(chunk)
-        with indexing_pipeline.document_lock(kb_name, filename):
-            os.replace(temporary_path, path)
-            job_id = index_jobs.create(kb_name, "process", filename)
+        with indexing_pipeline.document_lock(kb_id, document_id):
+            if not documents.knowledge_base_exists(kb_id):
+                raise ResourceNotFoundError("知识库不存在", code="knowledge_base_not_found")
+            # 新 ID 目录不能覆盖。建目录失败时不清理非本次创建的目录。
+            os.makedirs(directory, exist_ok=False)
             try:
-                documents.upsert_uploaded_document(
-                    kb_name,
+                os.replace(temporary_path, documents.stored_path(kb_id, document_id, filename))
+                job_id = documents.create_document_with_job(
+                    kb_id,
+                    document_id,
                     filename,
-                    path=path,
                     size=size,
-                    job_id=job_id,
                     parser_mode=normalized_parser,
                     metadata=normalized_metadata,
                 )
-            except Exception as exc:
-                index_jobs.finish(job_id, INDEX_JOB_FAILED, str(exc))
+            except BaseException:
+                _remove_new_directory(directory)
                 raise
-            index_worker.enqueue(job_id)
     finally:
-        if os.path.exists(temporary_path):
-            os.remove(temporary_path)
-    return DocumentMutationResult(
-        job_id=job_id, metadata=normalized_metadata, parser_mode=normalized_parser
-    )
+        _remove_new_directory(upload_dir)
+    retriever.drop_cached_retriever(kb_id)
+    _wake_worker(job_id)
+    return DocumentMutationResult(job_id, document_id, normalized_metadata, normalized_parser)
 
 
 def update_document_metadata(
-    kb_name: str, filename: str, metadata: DocumentMetadataInput
+    kb_id: str,
+    document_id: str,
+    metadata: DocumentMetadataInput,
 ) -> DocumentMutationResult:
-    """Persist document filter metadata without rebuilding content indexes."""
     documents = get_application_container().documents
     try:
         normalized = documents.normalize_metadata(metadata)
     except ValueError as exc:
-        raise InvalidRequestError(
-            str(exc), code="invalid_document_metadata"
-        ) from exc
-    path = documents.document_path(kb_name, filename)
-    with indexing_pipeline.document_lock(kb_name, filename):
-        if not documents.document_exists(
-            kb_name, filename
-        ) or not os.path.isfile(path):
-            raise ResourceNotFoundError("文档不存在", code="document_not_found")
-        try:
-            documents.update_metadata(kb_name, filename, normalized)
-        except ValueError as exc:
-            raise ResourceNotFoundError(
-                str(exc), code="document_not_found"
-            ) from exc
-    return DocumentMutationResult(job_id="", metadata=normalized)
+        raise InvalidRequestError(str(exc), code="invalid_document_metadata") from exc
+    with indexing_pipeline.document_lock(kb_id, document_id):
+        documents.get_document(kb_id, document_id)
+        documents.update_metadata(kb_id, document_id, normalized)
+    return DocumentMutationResult("", document_id, metadata=normalized)
+
+
+def reindex_document(
+    kb_id: str, document_id: str, *, parser_mode: str | None = None
+) -> DocumentMutationResult:
+    documents = get_application_container().documents
+    with indexing_pipeline.document_lock(kb_id, document_id):
+        record = documents.get_document(kb_id, document_id)
+        normalized_parser = record["parser_mode"]
+        if parser_mode is not None:
+            filename = record["filename"]
+            if not (
+                is_pdf_filename(filename)
+                or is_docx_filename(filename)
+                or is_image_filename(filename)
+            ):
+                raise InvalidRequestError(
+                    "只有 PDF、DOCX 或图片文档可以更换解析方式", code="document_parser_not_editable"
+                )
+            normalized_parser = _validated_parser_mode(filename, parser_mode)
+        if not os.path.isfile(documents.document_path(kb_id, document_id)):
+            raise ResourceNotFoundError("原文件不存在", code="document_not_found")
+        job_id = documents.schedule_reindex(kb_id, document_id, parser_mode=normalized_parser)
+    retriever.drop_cached_retriever(kb_id)
+    _wake_worker(job_id)
+    return DocumentMutationResult(job_id, document_id, parser_mode=normalized_parser)
 
 
 def update_document_parser(
-    kb_name: str, filename: str, parser_mode: str
+    kb_id: str, document_id: str, parser_mode: str
 ) -> DocumentMutationResult:
-    """Persist a parser selection and schedule a complete document refresh."""
-    documents = get_application_container().documents
-    if not (is_pdf_filename(filename) or is_docx_filename(filename) or is_image_filename(filename)):
-        raise InvalidRequestError(
-            "只有 PDF、DOCX 或图片文档可以更换解析方式",
-            code="document_parser_not_editable",
-        )
-    normalized_parser = _validated_parser_mode(filename, parser_mode)
-    path = documents.document_path(kb_name, filename)
-    with indexing_pipeline.document_lock(kb_name, filename):
-        if not documents.document_exists(
-            kb_name, filename
-        ) or not os.path.isfile(path):
-            raise ResourceNotFoundError("文档不存在", code="document_not_found")
-        try:
-            documents.update_parser_mode(
-                kb_name, filename, normalized_parser
-            )
-        except ValueError as exc:
-            raise ResourceNotFoundError(
-                str(exc), code="document_not_found"
-            ) from exc
-        job_id = _enqueue_document_refresh(kb_name, filename)
-    return DocumentMutationResult(job_id=job_id, parser_mode=normalized_parser)
+    return reindex_document(kb_id, document_id, parser_mode=parser_mode)
 
 
-def delete_document(kb_name: str, filename: str) -> DocumentMutationResult:
-    """Delete source state and schedule durable cleanup of both indexes."""
+def delete_document(kb_id: str, document_id: str) -> DocumentMutationResult:
     documents = get_application_container().documents
-    index_jobs = get_application_container().index_jobs()
-    with indexing_pipeline.document_lock(kb_name, filename):
-        if not documents.document_exists(kb_name, filename):
-            raise ResourceNotFoundError("文档不存在", code="document_not_found")
-        job_id = index_jobs.create(kb_name, "delete", filename)
-        try:
-            mineru_client.remove_saved_result(kb_name, filename)
-            documents.delete_document(kb_name, filename)
-        except Exception as exc:
-            index_jobs.finish(job_id, INDEX_JOB_FAILED, str(exc))
-            raise OperationFailedError(
-                f"文档删除失败：{exc}", code="document_delete_failed"
-            ) from exc
-    retriever.drop_cached_retriever(kb_name)
-    index_worker.enqueue(job_id)
-    return DocumentMutationResult(job_id=job_id)
+    with indexing_pipeline.document_lock(kb_id, document_id):
+        job_id = documents.schedule_document_delete(kb_id, document_id)
+    retriever.drop_cached_retriever(kb_id)
+    _wake_worker(job_id)
+    return DocumentMutationResult(job_id, document_id)

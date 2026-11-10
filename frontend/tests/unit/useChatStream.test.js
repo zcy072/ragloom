@@ -35,7 +35,7 @@ const createComposable = ({
   const composable = useChatStream(
     {
       messages,
-      selectedKb: ref('研发部'),
+      selectedKb: ref('kb-rd'),
       selectedModel: ref('OpenAI'),
       modelConfigured,
       hasRetrievalFilters: ref(false),
@@ -120,13 +120,13 @@ test('stopping an active request aborts it without appending an error answer', a
   ]);
 });
 
-test('a 412 response marks the model unavailable and shows backend detail', async () => {
+test('a model_not_configured response marks the model unavailable and shows backend detail', async () => {
   const fixture = createComposable({
     authorizedFetch: async () => ({
       ok: false,
-      status: 412,
+      status: 503,
       async json() {
-        return { detail: '请先配置模型密钥' };
+        return { detail: '请先配置模型密钥', code: 'model_not_configured' };
       }
     })
   });

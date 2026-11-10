@@ -17,8 +17,8 @@ class DocumentMetadata(TypedDict):
 class DocumentRecord(DocumentMetadata):
     """Document management record mapped from the application database."""
 
+    document_id: str
     filename: str
-    path: str
     size: int
     uploaded_at: str
     status: str
@@ -27,10 +27,15 @@ class DocumentRecord(DocumentMetadata):
     parser_mode: str
 
 
+class DocumentFilterOption(TypedDict):
+    document_id: str
+    filename: str
+
+
 class DocumentFilterOptions(TypedDict):
     """Distinct document fields available to retrieval filters."""
 
-    sources: list[str]
+    documents: list[DocumentFilterOption]
     document_types: list[str]
     tags: list[str]
 

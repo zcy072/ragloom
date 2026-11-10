@@ -1,17 +1,15 @@
 """Local paths and persisted result artifacts produced by MinerU."""
 
 import json
-import logging
 import os
 import shutil
 from pathlib import Path
 from typing import Any
 
+from services.core.config import validate_document_id, validate_kb_id
 from services.core.settings import get_settings
 
 from .errors import MinerUError
-
-logger = logging.getLogger(__name__)
 
 
 def _data_dir() -> Path:
@@ -44,16 +42,14 @@ def result_dir_for_document(file_path: str) -> Path:
     data_root = _data_dir().resolve()
     try:
         relative = source.relative_to(data_root)
-        return _result_dir_for_filename(
-            _results_root() / relative.parent, relative.name
-        )
+        return _result_dir_for_filename(_results_root() / relative.parent, relative.name)
     except ValueError:
         return _result_dir_for_filename(_results_root(), source.name)
 
 
-def result_dir_for_knowledge_base(kb_name: str) -> Path:
-    """返回保存指定知识库全部 MinerU 结果的目录。"""
-    return _results_root() / _path_component(kb_name)
+def result_dir_for_knowledge_base(kb_id: str) -> Path:
+    """返回保存指定知识库全部 MinerU 结果的目录，目录名是 kb_id。"""
+    return _results_root() / _path_component(kb_id)
 
 
 def read_saved_markdown(file_path: str) -> str:
@@ -69,12 +65,8 @@ def read_saved_content_list(file_path: str) -> list[Any]:
     """读取清单指定的结构化 JSON，同时防止路径逃逸。"""
     result_dir = result_dir_for_document(file_path)
     try:
-        manifest = json.loads(
-            (result_dir / "pymodel_manifest.json").read_text(encoding="utf-8")
-        )
-        relative_path = (
-            manifest.get("content_list", "") if isinstance(manifest, dict) else ""
-        )
+        manifest = json.loads((result_dir / "pymodel_manifest.json").read_text(encoding="utf-8"))
+        relative_path = manifest.get("content_list", "") if isinstance(manifest, dict) else ""
         if not isinstance(relative_path, str) or not relative_path:
             return []
         content_path = (result_dir / relative_path).resolve()
@@ -113,42 +105,23 @@ def read_saved_page_texts(file_path: str) -> list[tuple[int, str]]:
         return []
 
 
-def remove_saved_result(kb_name: str, filename: str) -> bool:
-    """删除单个文档持久化的 MinerU 结果目录。"""
-    target = _result_dir_for_filename(
-        result_dir_for_knowledge_base(kb_name), filename
-    )
-    if not target.exists():
-        return False
+def remove_document_results(kb_id: str, document_id: str) -> None:
+    """按不可复用 ID 清理整个结果目录，不依赖已删除的文档记录或文件名。"""
+    target = _results_root() / validate_kb_id(kb_id) / validate_document_id(document_id)
     try:
         shutil.rmtree(target)
-        return True
-    except OSError as exc:
-        logger.warning("MinerU result cleanup failed for %s: %s", filename, exc)
-        return False
+    except FileNotFoundError:
+        pass
 
 
-def remove_saved_results_for_knowledge_base(kb_name: str) -> bool:
-    """删除指定知识库拥有的全部 MinerU 结果。"""
-    target = result_dir_for_knowledge_base(kb_name)
+def remove_saved_results_for_knowledge_base(kb_id: str) -> bool:
+    """删除指定知识库拥有的全部 MinerU 正式结果；任务私有工作区不在其中，由任务自己清理。
+
+    目录不存在算成功并返回 False；实际 I/O 错误向调用方抛出，删除流程据此保留
+    deleting 状态并重试。
+    """
+    target = result_dir_for_knowledge_base(kb_id)
     if not target.exists():
         return False
-    try:
-        shutil.rmtree(target)
-        return True
-    except OSError as exc:
-        logger.warning("MinerU result cleanup failed for %s: %s", kb_name, exc)
-        return False
-
-
-def rename_saved_results_for_knowledge_base(old_name: str, new_name: str) -> bool:
-    """知识库重命名时迁移其全部持久化 MinerU 结果。"""
-    source = result_dir_for_knowledge_base(old_name)
-    target = result_dir_for_knowledge_base(new_name)
-    if not source.exists():
-        return False
-    if target.exists():
-        raise OSError("目标知识库已存在 MinerU 解析结果目录")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    source.rename(target)
+    shutil.rmtree(target)
     return True

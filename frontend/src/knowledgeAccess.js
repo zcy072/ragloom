@@ -3,17 +3,14 @@ const permissionsFor = (user, key) => {
   const permissions = user?.[key];
   return Array.isArray(permissions) ? permissions : [];
 };
-/** 判断用户是否有权读取指定知识库。 */
-const canAccessKnowledgeBase = (user, knowledgeBaseName) => {
-  const permissions = permissionsFor(user, 'knowledgeBasePermissions').length
-    ? permissionsFor(user, 'knowledgeBasePermissions')
-    : permissionsFor(user, 'deptPermissions');
-  return permissions.includes('全公司') || permissions.includes(knowledgeBaseName);
-};
+/** 判断用户是否有权读取指定知识库；权限按知识库 ID 判断，与显示名称无关。 */
+const canAccessKnowledgeBase = (user, kbId) =>
+  user?.allKnowledgeBases === true || permissionsFor(user, 'knowledgeBaseIds').includes(kbId);
 /** 从知识库列表中过滤出当前用户可访问的项目。 */
-export const filterKnowledgeBases = (knowledgeBases, user) =>
+export const filterKnowledgeBases = (knowledgeBases, user, { includeDeleting = false } = {}) =>
   (knowledgeBases || []).filter((knowledgeBase) =>
-    canAccessKnowledgeBase(user, knowledgeBase.name)
+    canAccessKnowledgeBase(user, knowledgeBase.kb_id)
+    && (includeDeleting || knowledgeBase.state !== 'deleting')
   );
 /** 判断用户是否可以进入知识库页面。 */
 export const canOpenKnowledgeBase = (user) => {

@@ -1,7 +1,9 @@
 import unittest
 
+from langchain_core.documents import Document
+
 from evaluation import metrics
-from evaluation.run_eval import diagnose_rerank_loss
+from evaluation.run_eval import diagnose_rerank_loss, document_ids_of, ranked_labels
 
 
 class QuestionMetricsTest(unittest.TestCase):
@@ -30,6 +32,26 @@ class QuestionMetricsTest(unittest.TestCase):
     def test_empty_gold_is_rejected(self):
         with self.assertRaises(ValueError):
             metrics.question_metrics(["a"], [], [1])
+
+
+class SameNameDocumentsTest(unittest.TestCase):
+    def test_same_name_documents_are_ranked_and_scored_separately(self):
+        documents = [
+            Document(page_content="x", metadata={"source": "同名.txt", "document_id": "id-other"}),
+            Document(page_content="y", metadata={"source": "同名.txt", "document_id": "id-other"}),
+            Document(page_content="z", metadata={"source": "同名.txt", "document_id": "id-gold"}),
+        ]
+        labels = {"id-gold": "news_gold.txt", "id-other": "news_other.txt"}
+
+        ranked = ranked_labels(document_ids_of(documents), labels)
+        result = metrics.question_metrics(ranked, ["news_gold.txt"], [1, 2])
+
+        # 按文件名会合并成一篇并在第 1 位命中；按 document_id 是两篇，标准文档排第 2。
+        self.assertEqual(metrics.unique_in_order(ranked), ["news_other.txt", "news_gold.txt"])
+        self.assertEqual((result["hit@1"], result["full@2"], result["mrr"]), (0.0, 1.0, 0.5))
+
+    def test_unmapped_document_id_never_matches_gold(self):
+        self.assertEqual(ranked_labels(["id-x"], {"id-gold": "news_gold.txt"}), ["id-x"])
 
 
 class SummaryTest(unittest.TestCase):

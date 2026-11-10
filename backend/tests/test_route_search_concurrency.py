@@ -49,25 +49,25 @@ class WeightedRouteRetrieverTests(unittest.TestCase):
         embeddings = MagicMock()
         embeddings.embed_query.return_value = [0.1]
         plans = [
-            retrieval_service._RoutePlan("one", "kb1", "fixed", 0.5, None),
-            retrieval_service._RoutePlan("two", "kb2", "fixed", 0.5, None),
-            retrieval_service._RoutePlan("empty", "kb3", "fixed", 0.5, None),
+            retrieval_service._RoutePlan("kb1", "fixed", 0.5, None),
+            retrieval_service._RoutePlan("kb2", "fixed", 0.5, None),
+            retrieval_service._RoutePlan("kb3", "fixed", 0.5, None),
         ]
         retriever = retrieval_service.WeightedRouteRetriever(index, embeddings, plans)
 
-        def allowlist(kb_name, _requested):
-            return [] if kb_name == "empty" else [f"{kb_name}.pdf"]
+        def allowlist(kb_id, _requested):
+            return [] if kb_id == "kb3" else [f"{kb_id}.pdf"]
 
-        original = retrieval_service.source_state.current_source_allowlist
-        retrieval_service.source_state.current_source_allowlist = allowlist
+        original = retrieval_service.source_state.current_document_allowlist
+        retrieval_service.source_state.current_document_allowlist = allowlist
         try:
             documents = retriever.invoke("q")
         finally:
-            retrieval_service.source_state.current_source_allowlist = original
+            retrieval_service.source_state.current_document_allowlist = original
 
         self.assertEqual(index.search_hybrid.call_count, 2)
         self.assertEqual([d.metadata["source"] for d in documents], ["a", "b", "b"])
-        self.assertEqual({d.metadata["kb_name"] for d in documents}, {"one", "two"})
+        self.assertEqual({d.metadata["kb_id"] for d in documents}, {"kb1", "kb2"})
 
 
 if __name__ == "__main__":

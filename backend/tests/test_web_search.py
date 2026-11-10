@@ -155,11 +155,11 @@ class WebSearchFlowTest(test_chat_trace.ChatFlowTestCase):
         self.addCleanup(web_search.budget.reset)
 
     def test_web_results_are_reranked_cited_and_traced(self):
-        request = chat_service.ChatRequest(question="今年的政策？", kb_name="技术部", web_search=True)
+        request = chat_service.ChatRequest(question="今年的政策？", kb_id=self.tech_id, web_search=True)
         owner = chat_service.SessionOwner(self.plain_id, "user")
         web_doc = LCDocument(page_content="网页正文", metadata={
             "source": "政策解读", "url": "https://example.com/p", "site_name": "政府网",
-            "date": "2026-10-01", "kb_name": "", "chunk_route": "web", "relevance_score": 0.9,
+            "date": "2026-10-01", "kb_id": "", "chunk_route": "web", "relevance_score": 0.9,
         })
         outcome = web_search.WebSearchOutcome([web_doc], 12.0)
         seen_messages = []
@@ -202,7 +202,7 @@ class WebSearchFlowTest(test_chat_trace.ChatFlowTestCase):
 
     def test_web_search_requires_permission(self):
         (response,) = self._request("plain", "user-password", [
-            ("POST", "/api/chat", {"question": "q", "kb_name": "技术部", "web_search": True}),
+            ("POST", "/api/chat", {"question": "q", "kb_id": self.tech_id, "web_search": True}),
         ])
         self.assertEqual(response.status_code, 403)
 

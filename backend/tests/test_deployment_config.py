@@ -183,22 +183,49 @@ class DeploymentConfigTest(unittest.TestCase):
         self.assertIn("proxy_read_timeout 300s;", chat_location)
 
     def test_deployment_smoke_submits_the_plaintext_password_contract(self):
+        session = deployment_smoke.new_session()
         with patch.object(
             deployment_smoke,
             "request_json",
-            return_value={"access_token": "test-token"},
+            return_value={"status": "success", "user": {"username": "admin"}},
         ) as request:
-            token = deployment_smoke.login(
-                "http://127.0.0.1:8000", "admin", "test-password"
-            )
+            deployment_smoke.login(session, "http://127.0.0.1:8000", "admin", "test-password")
 
-        self.assertEqual(token, "test-token")
         request.assert_called_once_with(
+            session,
             "http://127.0.0.1:8000",
             "/api/login",
             method="POST",
             payload={"username": "admin", "password": "test-password"},
         )
+
+    def test_deployment_smoke_sends_the_write_header_only_on_writes(self):
+        sent = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        class FakeSession:
+            def open(self, request, timeout):
+                sent.append(request)
+                return FakeResponse()
+
+        session = FakeSession()
+        deployment_smoke.request_json(session, "http://h", "/api/kbs")  # type: ignore[arg-type]
+        deployment_smoke.request_json(  # type: ignore[arg-type]
+            session, "http://h", "/api/kbs", method="POST", payload={"name": "x"}
+        )
+
+        self.assertIsNone(sent[0].get_header("X-ragloom-request"))
+        self.assertEqual(sent[1].get_header("X-ragloom-request"), "1")
+        self.assertIsNone(sent[1].get_header("Authorization"))
 
     def test_local_check_script_runs_backend_and_frontend_regressions(self):
         check_script = (PROJECT_DIR / "scripts" / "check.sh").read_text(encoding="utf-8")

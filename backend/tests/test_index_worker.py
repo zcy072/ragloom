@@ -11,6 +11,44 @@ from tests.support import IsolatedStorageTestCase
 
 
 class IndexWorkerTest(IsolatedStorageTestCase):
+    def test_queued_scan_recovers_missed_wakeup_while_queue_is_busy(self):
+        now = [0.0]
+        pending = ["first", "second"]
+        entered, release, completed = threading.Event(), threading.Event(), threading.Event()
+        processed = []
+
+        def dispatch(job_id):
+            processed.append(job_id)
+            if job_id == "first":
+                entered.set()
+                release.wait(timeout=2)
+            if job_id == "missed":
+                pending.clear()
+                completed.set()
+
+        worker = IndexWorker(
+            dispatcher=dispatch,
+            pending_job_ids=lambda: list(pending),
+            worker_count=1,
+            clock=lambda: now[0],
+        )
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(timeout=2))
+            pending[:] = ["missed"]
+            now[0] = 6.0
+            release.set()
+            self.assertTrue(completed.wait(timeout=2))
+            self.assertEqual(processed, ["first", "second", "missed"])
+        finally:
+            release.set()
+            worker.stop()
+        pending[:] = ["after-shutdown"]
+        now[0] = 12.0
+        worker._scan_queued(force=True)
+        self.assertFalse(worker.enqueue("after-shutdown"))
+        self.assertEqual(processed, ["first", "second", "missed"])
+
     def test_concurrent_duplicate_enqueue_dispatches_job_once(self):
         dispatch_started = threading.Event()
         release_dispatch = threading.Event()
@@ -28,6 +66,7 @@ class IndexWorkerTest(IsolatedStorageTestCase):
         worker = IndexWorker(dispatcher=dispatch, pending_job_ids=lambda: [])
         worker.start()
         try:
+
             def enqueue_same_job():
                 enqueue_barrier.wait(timeout=1)
                 enqueue_results.append(worker.enqueue("shared-job"))
@@ -163,15 +202,15 @@ class IndexWorkerTest(IsolatedStorageTestCase):
 
     def test_api_lifespan_starts_and_stops_the_worker(self):
         async def exercise_lifespan():
-            with patch.object(api.index_worker, "start") as start, patch.object(
-                api.index_worker, "stop"
-            ) as stop, patch.object(
-                api.retriever, "start_retriever_cache_warmup"
-            ) as warmup, patch.object(
-                api.chat_ranking, "start_rerank_client"
-            ) as start_rerank, patch.object(
-                api.chat_ranking, "close_rerank_client", new=AsyncMock()
-            ) as close_rerank:
+            with (
+                patch.object(api.index_worker, "start") as start,
+                patch.object(api.index_worker, "stop") as stop,
+                patch.object(api.retriever, "start_retriever_cache_warmup") as warmup,
+                patch.object(api.chat_ranking, "start_rerank_client") as start_rerank,
+                patch.object(
+                    api.chat_ranking, "close_rerank_client", new=AsyncMock()
+                ) as close_rerank,
+            ):
                 async with api.lifespan(api.app):
                     start.assert_called_once_with()
                     start_rerank.assert_called_once_with()

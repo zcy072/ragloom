@@ -11,11 +11,18 @@ from unittest.mock import patch
 from services.core import config as application_config
 from services.core import database_schema
 from services.identity import permissions as identity_permissions
+from tests.support import TEST_MODEL_API_KEY_ENCRYPTION_KEY, fixture_document_id
 
 
 class ApplicationStorageTest(unittest.TestCase):
     def setUp(self):
         self.original_app_storage = sys.modules.get("app_storage")
+        # 启动会校验主密钥，自建存储的用例同样需要合法的测试密钥。
+        environment = patch.dict(
+            os.environ, {"MODEL_API_KEY_ENCRYPTION_KEY": TEST_MODEL_API_KEY_ENCRYPTION_KEY}
+        )
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def tearDown(self):
         if self.original_app_storage is None:
@@ -40,17 +47,23 @@ class ApplicationStorageTest(unittest.TestCase):
             self.assertFalse(os.path.exists(app.DB_FILE))
             for value in ("", ".", "..", "../secret", "a/b", "a\\b"):
                 with self.assertRaises(ValueError):
-                    application_config.validate_kb_name(value)
-                with self.assertRaises(ValueError):
                     application_config.validate_filename(value)
-            # “全公司”是角色权限里表示全部知识库的保留值，新建和改名都会经过这里。
-            with self.assertRaises(ValueError):
-                application_config.validate_kb_name(" 全公司 ")
-
+            # 路径只由 UUID kb_id 和校验后的文件名组成，显示名称不进入路径。
+            for value in ("", "研发部", "../secret", "a/b"):
+                with self.assertRaises(ValueError):
+                    application_config.validate_kb_id(value)
+            kb_id = "0b0f1a5e-3c1d-4b57-9a0e-6f7d8c9b1a2c"
             self.assertEqual(
-                app.documents.document_path("研发部", "方案.pdf"),
-                os.path.join(data_dir, "研发部", "方案.pdf"),
+                app.documents.stored_path(
+                    kb_id, fixture_document_id(kb_id, "方案.pdf"), "方案.pdf"
+                ),
+                os.path.join(data_dir, kb_id, fixture_document_id(kb_id, "方案.pdf"), "方案.pdf"),
             )
+            # 显示名称可以含路径字符，但不能为空、过长或含控制字符。
+            self.assertEqual(application_config.validate_kb_name(" 研发/部 "), "研发/部")
+            for value in ("", "  ", "a" * 81, "a\nb"):
+                with self.assertRaises(ValueError):
+                    application_config.validate_kb_name(value)
 
     def test_existing_account_password_survives_restart(self):
         with tempfile.TemporaryDirectory() as data_dir:
@@ -83,14 +96,16 @@ class ApplicationStorageTest(unittest.TestCase):
 
             self.assertEqual(
                 rows,
-                [(
-                    "通用知识库",
-                    application_config.DEFAULT_CHUNK_SIZE,
-                    application_config.DEFAULT_CHUNK_OVERLAP,
-                )],
+                [
+                    (
+                        "通用知识库",
+                        application_config.DEFAULT_CHUNK_SIZE,
+                        application_config.DEFAULT_CHUNK_OVERLAP,
+                    )
+                ],
             )
 
-    def test_existing_knowledge_base_prevents_default_common_base_seed(self):
+    def test_common_knowledge_base_is_ensured_by_system_key_next_to_existing_bases(self):
         with tempfile.TemporaryDirectory() as data_dir:
             app = self.load_app_storage(data_dir)
             app.initialize_database()
@@ -101,15 +116,26 @@ class ApplicationStorageTest(unittest.TestCase):
             )
 
             app.bootstrap_defaults()
+            app.bootstrap_defaults()
 
             with sqlite3.connect(app.DB_FILE) as conn:
-                names = [
-                    row[0]
-                    for row in conn.execute(
-                        "SELECT name FROM knowledge_bases ORDER BY name"
-                    ).fetchall()
-                ]
-            self.assertEqual(names, ["自定义业务库"])
+                rows = conn.execute(
+                    "SELECT name, system_key FROM knowledge_bases ORDER BY name"
+                ).fetchall()
+            self.assertEqual(rows, [("自定义业务库", None), ("通用知识库", "common")])
+
+    def test_default_common_name_taken_by_a_regular_base_fails_startup(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            app = self.load_app_storage(data_dir)
+            app.initialize_database()
+            app.knowledge_bases.create(
+                "通用知识库",
+                application_config.DEFAULT_CHUNK_SIZE,
+                application_config.DEFAULT_CHUNK_OVERLAP,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "已被普通知识库占用"):
+                app.bootstrap_defaults()
 
     def test_unset_initial_password_is_random_and_written_to_a_private_file(self):
         from services.core import bootstrap
@@ -117,9 +143,10 @@ class ApplicationStorageTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as data_dir:
             app = self.load_app_storage(data_dir)
             app.initialize_database()
-            with patch.dict(os.environ, {"INITIAL_ADMIN_PASSWORD": ""}), self.assertLogs(
-                "services.core.bootstrap", "WARNING"
-            ) as logs:
+            with (
+                patch.dict(os.environ, {"INITIAL_ADMIN_PASSWORD": ""}),
+                self.assertLogs("services.core.bootstrap", "WARNING") as logs,
+            ):
                 app.bootstrap_defaults()
 
             path = os.path.join(data_dir, bootstrap.INITIAL_ADMIN_PASSWORD_FILENAME)
@@ -148,24 +175,16 @@ class ApplicationStorageTest(unittest.TestCase):
             app.initialize_database()
             with sqlite3.connect(app.DB_FILE) as conn:
                 schema_version = conn.execute("PRAGMA user_version").fetchone()[0]
-                account_columns = {
-                    row[1] for row in conn.execute("PRAGMA table_info(accounts)")
-                }
-                document_columns = {
-                    row[1] for row in conn.execute("PRAGMA table_info(documents)")
-                }
+                account_columns = {row[1] for row in conn.execute("PRAGMA table_info(accounts)")}
+                document_columns = {row[1] for row in conn.execute("PRAGMA table_info(documents)")}
                 session_columns = {
                     row[1] for row in conn.execute("PRAGMA table_info(chat_sessions)")
                 }
                 tables = {
                     row[0]
-                    for row in conn.execute(
-                        "SELECT name FROM sqlite_master WHERE type = 'table'"
-                    )
+                    for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
                 }
-                indexes = {
-                    row[1] for row in conn.execute("PRAGMA index_list(documents)")
-                }
+                indexes = {row[1] for row in conn.execute("PRAGMA index_list(documents)")}
                 session_indexes = {
                     row[1] for row in conn.execute("PRAGMA index_list(chat_sessions)")
                 }
@@ -173,8 +192,14 @@ class ApplicationStorageTest(unittest.TestCase):
             self.assertEqual(
                 account_columns,
                 {
-                    "id", "username", "name", "phone", "password",
-                    "status", "role_id", "created_at",
+                    "id",
+                    "username",
+                    "name",
+                    "phone",
+                    "password",
+                    "status",
+                    "role_id",
+                    "created_at",
                 },
             )
             self.assertTrue(
@@ -187,7 +212,11 @@ class ApplicationStorageTest(unittest.TestCase):
                     "parser_mode",
                 }.issubset(document_columns)
             )
-            self.assertIn("kb_name", document_columns)
+            self.assertIn("kb_id", document_columns)
+            self.assertNotIn("kb_name", document_columns)
+            self.assertNotIn("path", document_columns)
+            self.assertIn("kb_id", session_columns)
+            self.assertNotIn("kb_name", session_columns)
             self.assertNotIn("title", document_columns)
             self.assertNotIn("owner_type", session_columns)
             self.assertIn("account_id", session_columns)
@@ -196,9 +225,7 @@ class ApplicationStorageTest(unittest.TestCase):
                     "knowledge_bases",
                     "accounts",
                     "chat_session_memory",
-                }.issubset(
-                    tables
-                )
+                }.issubset(tables)
             )
             self.assertIn("idx_documents_kb_status", indexes)
             self.assertIn("idx_chat_sessions_account_updated", session_indexes)
@@ -207,13 +234,18 @@ class ApplicationStorageTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as data_dir:
             app = self.load_app_storage(data_dir)
             app.initialize_database()
+            kb_id = app.knowledge_bases.create("current", 800, 150).kb_id
             with sqlite3.connect(app.DB_FILE) as conn:
                 conn.execute(
                     """
                     INSERT INTO documents
-                        (kb_name, filename, path, size, uploaded_at, status)
-                    VALUES ('current', 'current.txt', 'current.txt', 0, '', 'success')
-                    """
+                        (document_id, kb_id, filename, size, uploaded_at, status)
+                    VALUES (?, ?, 'current.txt', 0, '', 'success')
+                    """,
+                    (
+                        fixture_document_id(kb_id, "current.txt"),
+                        kb_id,
+                    ),
                 )
 
             app.initialize_database()
@@ -223,27 +255,6 @@ class ApplicationStorageTest(unittest.TestCase):
                     "SELECT status FROM documents WHERE filename = 'current.txt'"
                 ).fetchone()[0]
             self.assertEqual(status, "success")
-
-    def test_rename_rewrites_only_the_document_path_prefix(self):
-        with tempfile.TemporaryDirectory() as data_dir:
-            app = self.load_app_storage(data_dir)
-            app.initialize_database()
-            app.knowledge_bases.create("研发", 800, 150)
-            old_path = os.path.join(data_dir, "研发", "研发规范.pdf")
-            with sqlite3.connect(app.DB_FILE) as conn:
-                conn.execute(
-                    "INSERT INTO documents (kb_name, filename, path, size, uploaded_at, status) "
-                    "VALUES ('研发', '研发规范.pdf', ?, 0, '', 'ready')",
-                    (old_path,),
-                )
-
-            app.knowledge_bases.rename_relational_data(
-                "研发", "产品", os.path.join(data_dir, "研发"), os.path.join(data_dir, "产品")
-            )
-
-            with sqlite3.connect(app.DB_FILE) as conn:
-                path = conn.execute("SELECT path FROM documents").fetchone()[0]
-            self.assertEqual(path, os.path.join(data_dir, "产品", "研发规范.pdf"))
 
     def test_future_database_schema_version_is_rejected(self):
         with tempfile.TemporaryDirectory() as data_dir:
@@ -300,20 +311,19 @@ class ApplicationStorageTest(unittest.TestCase):
             app.initialize_app_storage()
             with sqlite3.connect(app.DB_FILE) as conn:
                 conn.execute(
-                    "UPDATE roles SET menu_permissions = ?, knowledge_base_permissions = ? WHERE name = ?",
-                    (json.dumps(["问答对话"]), json.dumps(["技术部"]), "超级管理员"),
+                    "UPDATE roles SET menu_permissions = ?, all_knowledge_bases = 0 WHERE name = ?",
+                    (json.dumps(["问答对话"]), "超级管理员"),
                 )
 
             app = self.load_app_storage(data_dir)
             app.initialize_app_storage()
             with sqlite3.connect(app.DB_FILE) as conn:
-                menus, knowledge_bases = conn.execute(
-                    "SELECT menu_permissions, knowledge_base_permissions FROM roles WHERE name = ?", ("超级管理员",)
+                menus, all_knowledge_bases = conn.execute(
+                    "SELECT menu_permissions, all_knowledge_bases FROM roles WHERE name = ?",
+                    ("超级管理员",),
                 ).fetchone()
-            self.assertTrue(
-                set(identity_permissions.MENU_PERMISSIONS).issubset(json.loads(menus))
-            )
-            self.assertIn("全公司", json.loads(knowledge_bases))
+            self.assertTrue(set(identity_permissions.MENU_PERMISSIONS).issubset(json.loads(menus)))
+            self.assertEqual(all_knowledge_bases, 1)
 
 
 if __name__ == "__main__":

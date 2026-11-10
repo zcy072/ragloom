@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
     StrictBool,
+    StringConstraints,
     field_validator,
     model_validator,
 )
@@ -27,6 +28,7 @@ from services.indexing.contracts import IndexJobOperation, IndexJobStatus
 
 class ApiModel(BaseModel):
     """Base API contract that rejects unknown fields and trims strings."""
+
     model_config = ConfigDict(
         extra="forbid",
         populate_by_name=True,
@@ -36,6 +38,7 @@ class ApiModel(BaseModel):
 
 class SuccessResponse(ApiModel):
     """Common response returned by successful mutation endpoints."""
+
     status: Literal["success"] = "success"
 
 
@@ -53,38 +56,54 @@ class PageResponse[PageItem](ApiModel):
 _PASSWORD_MAX_CHARS = 256
 
 
-class LoginRequest(ApiModel):
+# 密码字段原样保留首尾空格；其余文本字段仍按 ApiModel 的约定去掉首尾空白。
+_TrimmedText = Annotated[str, StringConstraints(strip_whitespace=True)]
+
+
+class CredentialRequest(BaseModel):
+    """Base for requests carrying passwords: unknown fields rejected, passwords never trimmed."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+
+class LoginRequest(CredentialRequest):
     """Credentials submitted by an account."""
-    username: str = Field(min_length=1, max_length=80)
+
+    username: _TrimmedText = Field(min_length=1, max_length=80)
     password: str = Field(min_length=1, max_length=_PASSWORD_MAX_CHARS)
 
 
-class RegistrationRequest(ApiModel):
+class RegistrationRequest(CredentialRequest):
     """New user registration awaiting administrator approval."""
-    username: str = Field(min_length=1, max_length=80)
-    name: str = Field(min_length=1, max_length=80)
-    phone: str = Field(max_length=32)
+
+    username: _TrimmedText = Field(min_length=1, max_length=80)
+    name: _TrimmedText = Field(min_length=1, max_length=80)
+    phone: _TrimmedText = Field(max_length=32)
     password: str = Field(max_length=_PASSWORD_MAX_CHARS)
 
 
-class PasswordChangeRequest(ApiModel):
+class PasswordChangeRequest(CredentialRequest):
     """Password-change payload for the current account."""
+
     old_password: str = Field(max_length=_PASSWORD_MAX_CHARS)
     new_password: str = Field(max_length=_PASSWORD_MAX_CHARS)
 
 
 class JobResponse(SuccessResponse):
     """Successful mutation response exposing its durable index job ID."""
+
     job_id: str
 
 
 class RebuildResponse(JobResponse):
     """Confirmation that a complete knowledge-base rebuild was queued."""
+
     rebuilding: bool
 
 
 class KnowledgeBaseNameRequest(ApiModel):
     """Validated knowledge-base name used by create and rename operations."""
+
     name: str = Field(min_length=1, max_length=80)
 
     @field_validator("name")
@@ -96,13 +115,26 @@ class KnowledgeBaseNameRequest(ApiModel):
 
 class KnowledgeBaseSummary(ApiModel):
     """Knowledge-base list item with its document count."""
+
+    kb_id: str
     name: str
+    system_key: str | None = None
+    state: str
     date: str
     docs: int
 
 
+class KnowledgeBaseMutationResponse(ApiModel):
+    """Result of creating or renaming a knowledge base; ``kb_id`` is the stable identity."""
+
+    status: str
+    kb_id: str
+    name: str
+
+
 class ChunkConfigRequest(ApiModel):
     """Requested parent chunk size and overlap for future index builds."""
+
     chunk_size: int = Field(default=DEFAULT_CHUNK_SIZE, ge=100, le=4000)
     chunk_overlap: int = Field(default=DEFAULT_CHUNK_OVERLAP, ge=0)
 
@@ -116,6 +148,7 @@ class ChunkConfigRequest(ApiModel):
 
 class ChunkConfigResponse(ApiModel):
     """Effective chunk configuration and whether indexes are stale."""
+
     chunk_size: int
     chunk_overlap: int
     index_needs_rebuild: bool
@@ -123,22 +156,31 @@ class ChunkConfigResponse(ApiModel):
 
 class RetrievalConfigRequest(ApiModel):
     """Retrieval behavior that can change without rebuilding indexes."""
+
     query_rewrite_enabled: StrictBool
 
 
 class RetrievalConfigResponse(ApiModel):
     """Current retrieval behavior for one knowledge base."""
+
     query_rewrite_enabled: bool
+
+
+class DocumentFilterOptionResponse(ApiModel):
+    document_id: str
+    filename: str
 
 
 class DocumentFilterOptionsResponse(ApiModel):
     """Distinct metadata values available to retrieval filters."""
-    sources: list[str]
+
+    documents: list[DocumentFilterOptionResponse]
     document_types: list[str]
     tags: list[str]
 
 
 class IndexJobResponse(ApiModel):
+    document_id: str | None = None
     """Public state and timestamps for one durable indexing job."""
     id: str
     filename: str | None = None
@@ -152,12 +194,15 @@ class IndexJobResponse(ApiModel):
 
 class DashboardFileType(ApiModel):
     """Dashboard document count grouped by file type."""
+
     ext: str
     count: int
 
 
 class DashboardKnowledgeBase(ApiModel):
     """Dashboard processing and size statistics for one knowledge base."""
+
+    kb_id: str
     name: str
     docs: int
     size: str
@@ -169,12 +214,14 @@ class DashboardKnowledgeBase(ApiModel):
 
 class DashboardPiePoint(ApiModel):
     """Named value consumed by dashboard pie charts."""
+
     name: str
     value: int
 
 
 class DashboardLinePoint(ApiModel):
     """One trend-chart point: an MM-DD label with that day's question and answer totals."""
+
     name: str
     question_count: int = Field(serialization_alias="提问数", validation_alias="提问数")
     answer_count: int = Field(serialization_alias="回答数", validation_alias="回答数")
@@ -182,6 +229,7 @@ class DashboardLinePoint(ApiModel):
 
 class DashboardStatsResponse(ApiModel):
     """Complete dashboard totals, breakdowns, and recent trends."""
+
     kbs: int
     docs: int
     size: str
@@ -193,6 +241,7 @@ class DashboardStatsResponse(ApiModel):
 
 class DocumentMetadataRequest(ApiModel):
     """Editable metadata used for document-level retrieval filters."""
+
     document_type: str = Field(default="", max_length=80)
     tags: list[str] | str = Field(default_factory=list)
     effective_date: str = Field(default="", max_length=10)
@@ -206,9 +255,7 @@ class DocumentMetadataRequest(ApiModel):
         if len(dict.fromkeys(tags)) > DOCUMENT_METADATA_MAX_TAGS:
             raise ValueError(f"最多可填写 {DOCUMENT_METADATA_MAX_TAGS} 个标签")
         if any(len(tag) > DOCUMENT_METADATA_MAX_TAG_LENGTH for tag in tags):
-            raise ValueError(
-                f"单个标签不能超过 {DOCUMENT_METADATA_MAX_TAG_LENGTH} 个字符"
-            )
+            raise ValueError(f"单个标签不能超过 {DOCUMENT_METADATA_MAX_TAG_LENGTH} 个字符")
         return value
 
     @field_validator("effective_date")
@@ -225,15 +272,16 @@ class DocumentMetadataRequest(ApiModel):
 
 class DocumentMetadataResponse(ApiModel):
     """Normalized metadata persisted for one document."""
+
     document_type: str
     tags: list[str]
     effective_date: str
 
 
 class DocumentResponse(ApiModel):
+    document_id: str
     """Document list item with processing state, parser, and metadata."""
     filename: str
-    path: str
     size: int
     uploaded_at: str
     status: str
@@ -247,6 +295,7 @@ class DocumentResponse(ApiModel):
 
 class DocumentParserOption(ApiModel):
     """One parser mode exposed to the document upload UI."""
+
     id: str
     label: str
     available: bool
@@ -256,17 +305,20 @@ class DocumentParserOption(ApiModel):
 
 class DocumentParserOptionsResponse(ApiModel):
     """All parser choices with availability. ``pdf`` repeats ``document``; frontend accepts either."""
+
     document: list[DocumentParserOption]
     pdf: list[DocumentParserOption]
 
 
 class DocumentFormatResponse(ApiModel):
     """An uploadable file extension with its display label."""
+
     extension: str
     label: str
 
 
 class DocumentUploadResponse(JobResponse):
+    document_id: str
     """Upload result with stored filename and parser mode."""
     metadata: DocumentMetadataResponse | None
     parser_mode: str
@@ -274,24 +326,28 @@ class DocumentUploadResponse(JobResponse):
 
 class DocumentMetadataUpdateResponse(ApiModel):
     """Metadata update result with normalized persisted values."""
+
     status: str
     metadata: DocumentMetadataResponse
 
 
 class DocumentParserRequest(ApiModel):
     """Request to change the parser used for one document."""
+
     parser_mode: Literal["native_text", "mineru_cloud", "paddle_ocr", "vision_model"]
 
 
 class DocumentParserUpdateResponse(JobResponse):
     """Parser update result confirming the queued refresh job."""
+
     parser_mode: str
 
 
 class ModelConfigRequest(ApiModel):
     """Editable OpenAI-compatible provider configuration."""
+
     provider: str = Field(min_length=1, max_length=120)
-    api_key: str = ""
+    api_key: str = Field(default="", max_length=4096)
     base_url: str = Field(min_length=1, max_length=500)
     default_model: str = Field(min_length=1, max_length=200)
     clear_api_key: bool = False
@@ -299,6 +355,7 @@ class ModelConfigRequest(ApiModel):
 
 class ModelConfigResponse(ApiModel):
     """Public provider settings with only API-key presence exposed."""
+
     provider: str
     configured: bool
     base_url: str | None
@@ -308,6 +365,7 @@ class ModelConfigResponse(ApiModel):
 
 class ModelCheckResponse(ApiModel):
     """Provider readiness result used by the configuration UI."""
+
     configured: bool
     provider: str | None
     model: str | None
@@ -316,26 +374,31 @@ class ModelCheckResponse(ApiModel):
 
 class ModelSaveResponse(SuccessResponse):
     """Model save result indicating whether the provider became active."""
+
     is_active: bool
 
 
 class ModelActivationResponse(SuccessResponse):
     """Response confirming the newly active provider."""
+
     provider: str
 
 
 class UserRoleRequest(ApiModel):
     """Role assignment for one user account."""
+
     role_id: int = Field(gt=0)
 
 
 class UserStatusRequest(ApiModel):
     """Approval or enabled status assigned to one user account."""
+
     status: Literal["审核中", "正常", "停用"]
 
 
 class UserResponse(ApiModel):
     """User administration list item with its resolved role."""
+
     id: int
     name: str
     phone: str
@@ -351,27 +414,33 @@ class UserPageResponse(PageResponse[UserResponse]):
 
 class RoleCreateRequest(ApiModel):
     """Name and description for a new role."""
+
     name: str = Field(min_length=1, max_length=80)
     description: str = Field(default="", max_length=500)
 
 
 class RolePermissionsRequest(ApiModel):
     """Complete replacement permission sets for one role."""
+
     menu_permissions: list[str] = Field(default_factory=list)
-    knowledge_base_permissions: list[str] = Field(default_factory=list)
+    all_knowledge_bases: bool = False
+    knowledge_base_ids: list[str] = Field(default_factory=list)
 
 
 class RoleResponse(ApiModel):
     """Role details and its menu and knowledge-base permissions."""
+
     id: int
     name: str
     description: str
     menu_permissions: list[str]
-    knowledge_base_permissions: list[str]
+    all_knowledge_bases: bool
+    knowledge_base_ids: list[str]
 
 
 class ChatSessionTitleRequest(ApiModel):
     """New display title for one chat session."""
+
     title: str = Field(min_length=1, max_length=SESSION_TITLE_RENAME_MAX_CHARS)
 
 
@@ -430,6 +499,7 @@ class OpsChatRunResponse(ApiModel):
     id: int
     created_at: str
     username: str
+    kb_id: str
     kb_name: str
     session_id: str
     question_preview: str
@@ -465,6 +535,7 @@ class OpsChatRunPageResponse(ApiModel):
 class OpsIndexJobResponse(IndexJobResponse):
     """Index job summary that names its knowledge base."""
 
+    kb_id: str
     kb_name: str
 
 
@@ -489,6 +560,7 @@ class AnalyticsDailyPoint(ApiModel):
 class AnalyticsKnowledgeBaseUsage(ApiModel):
     """How many users asked how many questions in one knowledge base."""
 
+    kb_id: str
     kb_name: str
     users: int
     questions: int
@@ -551,6 +623,7 @@ class AnalyticsSession(ApiModel):
 
     id: str
     title: str
+    kb_id: str
     kb_name: str
     created_at: str
     updated_at: str
@@ -561,6 +634,7 @@ class AnalyticsQuestion(ApiModel):
     """One recorded question; carries only its first characters."""
 
     created_at: str
+    kb_id: str
     kb_name: str
     question_preview: str
     status: str
@@ -599,6 +673,7 @@ class AnalyticsConversationResponse(ApiModel):
 
     session_id: str
     title: str
+    kb_id: str
     kb_name: str
     username: str
     messages: list[AnalyticsConversationMessage]

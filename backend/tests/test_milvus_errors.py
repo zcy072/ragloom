@@ -6,6 +6,7 @@ from pymilvus.exceptions import MilvusException
 
 from services.core.errors import ServiceUnavailableError
 from services.retrieval.milvus_index import MilvusChunkIndex
+from tests.support import fixture_document_id
 
 
 class _DownClient:
@@ -31,11 +32,11 @@ class MilvusUnavailableTest(unittest.TestCase):
         calls = {
             "dense": lambda: self.index.search_dense("kb", vector, None, ["a.pdf"], 3),
             "lexical": lambda: self.index.search_lexical("kb", "登革热", None, ["a.pdf"], 3),
-            "hybrid": lambda: self.index.search_hybrid(
-                "kb", "登革热", vector, None, ["a.pdf"], 3
-            ),
+            "hybrid": lambda: self.index.search_hybrid("kb", "登革热", vector, None, ["a.pdf"], 3),
             "routes": lambda: self.index.available_routes("kb", ["a.pdf"]),
-            "neighbors": lambda: self.index.neighbors("kb", "a.pdf", "fixed", 0, 2),
+            "neighbors": lambda: self.index.neighbors(
+                "kb", fixture_document_id("kb", "a.pdf"), "fixed", 0, 2
+            ),
         }
         for name, call in calls.items():
             with self.subTest(name):

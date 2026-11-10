@@ -3,6 +3,7 @@
 import logging
 import os
 import shutil
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 
 from services.core import config as application_config
 from services.core.container import ApplicationContainer, get_application_container
+from services.core.errors import ResourceNotFoundError
 from services.core.request_context import carry_request_id
 from services.core.settings import get_settings
 from services.documents import loaders as document_loader
@@ -26,14 +28,20 @@ from services.indexing.jobs import (
 from services.indexing.locks import document_lock, knowledge_base_lock
 from services.indexing.workspace import JobWorkspace, create_workspace
 from services.retrieval import parent_store, retriever
-from services.retrieval.chunk_index import embed_splits, get_chunk_index
+from services.retrieval.chunk_index import (
+    PublishRolledBackError,
+    embed_splits,
+    get_chunk_index,
+)
 
 logger = logging.getLogger(__name__)
+# 旧父段落在新子块生效后再保留这么久：查询从检索到回表加载父段落之间要经过重排
+# （最长 RERANK_TIMEOUT_SECONDS），期间命中的旧子块仍要能找到父段落。
+# 进程在此期间退出时旧父段落残留，下次发布会把文档已有的全部旧 parent_id 一并删除。
+OLD_PARENT_GRACE_SECONDS = 60.0
 
 
-def _get_chunk_config(
-    kb_name: str, container: ApplicationContainer
-) -> tuple[int, int]:
+def _get_chunk_config(kb_id: str, container: ApplicationContainer) -> tuple[int, int]:
     """读取知识库当前切分配置；旧数据缺失时使用全局默认值。
 
     在任务真正执行时才读取配置，确保重建采用设置页当前可见的参数。
@@ -41,7 +49,7 @@ def _get_chunk_config(
     defaults = application_config.default_chunk_config()
     try:
         return container.knowledge_base_settings.chunk_config(
-            kb_name,
+            kb_id,
             default_size=defaults.chunk_size,
             default_overlap=defaults.chunk_overlap,
         )
@@ -80,7 +88,7 @@ def _split_for_index(
 
 
 class _SupersededError(Exception):
-    """解析期间任务已被同名上传、删除或新的重建替代，后续步骤不必再做。"""
+    """解析期间任务已被重新索引、文档删除或整库重建替代，后续步骤不必再做。"""
 
 
 @dataclass(frozen=True)
@@ -106,33 +114,35 @@ class _ParsedDocument:
 
 def _prepare_document_job(
     workspace_id: str,
-    kb_name: str,
-    filename: str,
+    kb_id: str,
+    document_id: str,
     file_path: str,
     container: ApplicationContainer,
     *,
+    job_id: str | None = None,
     reuse_saved_results: bool = False,
 ) -> _PreparedJob:
     """在持有该文档的文档锁时固定任务输入，使后续解析不依赖会被并发修改的文件。
 
-    快照与数据库中该文档的当前版本一致（上传在同一把文档锁内完成），
-    之后即使同名文件被替换或删除，本任务仍只处理自己的版本。
+    快照与数据库中该文档的当前版本一致（上传在同一把文档锁内完成）。工作区不在
+    文档目录内，之后即使该文档被删除，本任务仍只读取准备时的快照。
     """
-    chunk_size, chunk_overlap = _get_chunk_config(kb_name, container)
-    parser_mode = container.documents.parser_modes(kb_name).get(filename)
+    chunk_size, chunk_overlap = _get_chunk_config(kb_id, container)
+    # 单文档任务（传入 job_id）用登记在任务上的解析方式；整库重建沿用文档当前生效的解析方式。
+    parser_mode = (
+        job_id and container.index_jobs().requested_parser_mode(job_id)
+    ) or container.documents.get_document(kb_id, document_id)["parser_mode"]
     workspace = create_workspace(
         workspace_id,
-        os.path.dirname(file_path),
-        filename,
+        file_path,
         carry_saved_results=reuse_saved_results,
     )
-    return _PreparedJob(
-        workspace, parser_mode, chunk_size, chunk_overlap, reuse_saved_results
-    )
+    return _PreparedJob(workspace, parser_mode, chunk_size, chunk_overlap, reuse_saved_results)
 
 
 def _parse_and_embed_document(
-    kb_name: str,
+    kb_id: str,
+    document_id: str,
     filename: str,
     prepared: _PreparedJob,
     container: ApplicationContainer,
@@ -162,7 +172,10 @@ def _parse_and_embed_document(
         document.page_content.strip()
         for document in documents + structured_documents + visual_documents
     ):
-        if os.path.splitext(filename)[1].lower() == ".pdf" and parser_mode == PDF_PARSER_NATIVE_TEXT:
+        if (
+            os.path.splitext(filename)[1].lower() == ".pdf"
+            and parser_mode == PDF_PARSER_NATIVE_TEXT
+        ):
             raise ValueError(
                 "PDF 未提取到有效文本，请改用 MinerU 云端解析或 Paddle 本地 OCR 后重新解析"
             )
@@ -180,6 +193,8 @@ def _parse_and_embed_document(
     )
     if not splits:
         raise ValueError("文档未提取到可索引文本，请检查文件格式或 OCR 依赖")
+    for split in splits:
+        split.metadata.update(kb_id=kb_id, document_id=document_id)
     seconds["split"] = time.monotonic() - started
     if not is_current():
         raise _SupersededError
@@ -191,47 +206,111 @@ def _parse_and_embed_document(
     return _ParsedDocument(splits, vectors, seconds)
 
 
+class _PublishError(Exception):
+    """发布失败；previous_index_intact 表示该文档发布前的父段落与子块均完好。"""
+
+    def __init__(self, message: str, *, previous_index_intact: bool) -> None:
+        super().__init__(message)
+        self.previous_index_intact = previous_index_intact
+
+
 def _publish_document(
-    kb_name: str,
-    filename: str,
+    kb_id: str,
+    document_id: str,
     prepared: _PreparedJob,
     parsed: _ParsedDocument,
     container: ApplicationContainer,
 ) -> None:
     """把解析结果写入正式索引；调用方须持有该文档的文档锁并已确认任务仍是最新版本。
 
-    顺序固定为先父段落表、后 Milvus：Milvus 写入失败时文档进入 error，
-    残留的父段落没有对应子块，不会被检索到，重建时会被覆盖。
+    检索不持锁，可能随时命中 Milvus 中任一代子块再回表取父段落，所以新旧两版
+    父段落在 Milvus 切换期间同时保留：先加新父段落，再发布子块，最后删旧父段落。
+    新旧 parent_id 由 uuid4 生成、互不相同，旧子块始终能找到自己的父段落。
+    Milvus 写入失败且已撤销时旧版本完整，新父段落保留到下次发布，失败抛出 _PublishError。
+    解析结果目录只在子块发布成功后替换，回滚时旧版本与它的结果目录保持一致。
     """
-    kb_id = container.knowledge_bases.kb_id_for(kb_name)
-    if not kb_id:
-        raise ValueError("知识库不存在")
-    prepared.workspace.publish_result_dir()
-    parent_store.replace_source(kb_id, filename, parent_store.parent_chunk_rows(parsed.splits))
-    get_chunk_index().publish_source(kb_id, filename, parsed.splits, parsed.vectors)
-    retriever.drop_cached_retriever(kb_name)
+    rows = parent_store.parent_chunk_rows(parsed.splits)
+    try:
+        previous_parent_ids = parent_store.add_document_version(kb_id, document_id, rows)
+    except Exception as exc:
+        raise _PublishError(str(exc), previous_index_intact=True) from exc
+    try:
+        get_chunk_index().publish_document(kb_id, document_id, parsed.splits, parsed.vectors)
+    except PublishRolledBackError as exc:
+        # 新父段落不撤回：insert 超时后服务端可能在撤销之后才写入这批子块，留着父段落，
+        # 这些残留子块仍能回表取到完整段落。没有子块引用的父段落不影响检索，
+        # 下次发布会把文档已有的全部旧 parent_id 一并删除，删除文档时级联删除。
+        raise _PublishError(str(exc), previous_index_intact=True) from exc
+    except Exception as exc:
+        # 新旧两代子块可能都有残留，两版父段落都保留，以免任何残留子块丢失上下文。
+        raise _PublishError(str(exc), previous_index_intact=False) from exc
+    retriever.drop_cached_retriever(kb_id)
+    try:
+        # 结果目录检索时不读取，只供重建复用；替换失败会恢复旧目录。
+        prepared.workspace.publish_result_dir()
+    except OSError:
+        # 新版本已生效；旧结果目录只影响下次整库重建复用的解析结果。
+        logger.warning("Result directory replacement failed for %s/%s", kb_id, document_id)
+    _schedule_old_parent_removal(kb_id, document_id, previous_parent_ids)
+
+
+def _remove_old_parents(kb_id: str, document_id: str, parent_ids: set[str]) -> None:
+    try:
+        parent_store.delete_parents(kb_id, document_id, parent_ids)
+    except Exception:
+        # 新版本已生效；残留的旧父段落不再被任何子块引用，下次发布会一并删除。
+        logger.warning("Removal of old parent rows failed for %s/%s", kb_id, document_id)
+
+
+def _schedule_old_parent_removal(kb_id: str, document_id: str, parent_ids: set[str]) -> None:
+    """宽限期后删除旧父段落；parent_id 是 uuid4，届时文档已再次发布或被删除也不会误删。"""
+    if not parent_ids:
+        return
+    if OLD_PARENT_GRACE_SECONDS <= 0:
+        _remove_old_parents(kb_id, document_id, parent_ids)
+        return
+    timer = threading.Timer(
+        OLD_PARENT_GRACE_SECONDS, _remove_old_parents, (kb_id, document_id, parent_ids)
+    )
+    timer.daemon = True
+    timer.start()
 
 
 def _set_document_status(
     index_jobs,
-    kb_name: str,
-    filename: str,
+    kb_id: str,
+    document_id: str,
     job_id: str,
     status: str,
     error_message: str,
+    *,
+    previous_index_intact: bool = False,
+    parser_mode: str | None = None,
 ) -> str:
-    """写入文档状态；状态写入因归属变化被拒绝时视为任务已被替代。"""
-    if not index_jobs.update_document_status(
-        kb_name, filename, status, error_message, job_id=job_id
-    ):
-        return "superseded"
-    return status
+    """写入文档状态；状态写入因归属变化被拒绝时视为任务已被替代。
+
+    失败时尚未开始发布的 rebuilding 文档回到 ready；publishing 文档在 previous_index_intact
+    （发布已完整撤销）时回到 ready，否则记为 error。返回值仍是 error，任务记为失败、重建计入失败数。
+    """
+    if status == "error":
+        written = index_jobs.fail_document(
+            kb_id,
+            document_id,
+            job_id,
+            error_message,
+            previous_index_intact=previous_index_intact,
+        )
+    else:
+        written = index_jobs.update_document_status(
+            kb_id, document_id, status, error_message, job_id=job_id, parser_mode=parser_mode
+        )
+    return status if written else "superseded"
 
 
 def _index_document(
     job_id: str,
-    kb_name: str,
-    filename: str,
+    kb_id: str,
+    document_id: str,
     file_path: str,
     container: ApplicationContainer,
     *,
@@ -243,14 +322,15 @@ def _index_document(
     重建时 ``job_id`` 是重建任务的 ID：任务本身由调用方启动和结束，这里只负责文档。
     返回 (结果, 错误信息)，结果为 ready / error / superseded / skipped。
     """
+    filename = os.path.basename(file_path)
     index_jobs = container.index_jobs()
     workspace: JobWorkspace | None = None
     try:
-        # 准备：持锁固定输入。同名文件的新上传会替代旧任务，即使旧任务此前已排队。
-        with document_lock(kb_name, filename):
+        # 准备：持锁固定输入。同一文档的新重索引请求会替代旧任务，即使旧任务此前已排队。
+        with document_lock(kb_id, document_id):
             if not rebuild and not index_jobs.start(job_id):
                 return "skipped", ""
-            if not index_jobs.is_current_document_job(kb_name, filename, job_id):
+            if not index_jobs.is_current_document_job(kb_id, document_id, job_id):
                 return "superseded", ""
             try:
                 if not os.path.isfile(file_path):
@@ -258,17 +338,25 @@ def _index_document(
                 prepared = _prepare_document_job(
                     # 重建中多个文档共用一个任务 ID，工作区必须各用各的目录。
                     uuid.uuid4().hex if rebuild else job_id,
-                    kb_name,
-                    filename,
+                    kb_id,
+                    document_id,
                     file_path,
                     container,
+                    job_id=None if rebuild else job_id,
                     reuse_saved_results=rebuild,
                 )
             except Exception as exc:
-                logger.exception("Document processing failed for %s", filename)
+                logger.exception("Document processing failed for %s", document_id)
                 message = str(exc)[:500]
+                # 准备阶段只读源文件、建私有快照，旧索引未被改动。
                 outcome = _set_document_status(
-                    index_jobs, kb_name, filename, job_id, "error", message
+                    index_jobs,
+                    kb_id,
+                    document_id,
+                    job_id,
+                    "error",
+                    message,
+                    previous_index_intact=True,
                 )
                 return outcome, message
             workspace = prepared.workspace
@@ -279,46 +367,64 @@ def _index_document(
         started = time.monotonic()
         try:
             parsed = _parse_and_embed_document(
-                kb_name,
+                kb_id,
+                document_id,
                 filename,
                 prepared,
                 container,
-                lambda: index_jobs.is_current_document_job(kb_name, filename, job_id),
+                lambda: index_jobs.is_current_document_job(kb_id, document_id, job_id),
             )
         except _SupersededError:
-            logger.info("Index job %s [%s/%s] superseded before embedding", job_id, kb_name, filename)
+            logger.info(
+                "Index job %s [%s/%s] superseded before embedding", job_id, kb_id, document_id
+            )
             return "superseded", ""
         except Exception as exc:
-            logger.exception("Document processing failed for %s", filename)
+            logger.exception("Document processing failed for %s", document_id)
             error_message = str(exc)[:500]
         phase_a_seconds = time.monotonic() - started
 
-        # 阶段 B：持锁发布。先确认任务仍拥有该文件的最新版本，保证后上传的版本最终生效。
+        # 阶段 B：持锁发布。先确认任务仍拥有该文档的最新索引请求，保证最新任务最终生效。
         waited = time.monotonic()
-        with document_lock(kb_name, filename):
+        with document_lock(kb_id, document_id):
             lock_wait_seconds = time.monotonic() - waited
-            if not index_jobs.is_current_document_job(kb_name, filename, job_id):
+            if not index_jobs.is_current_document_job(kb_id, document_id, job_id):
+                return "superseded", ""
+            # 解析期间知识库可能已进入删除流程；此时不得发布任何正式文件、父段落或向量。
+            if not container.knowledge_bases.exists(kb_id):
                 return "superseded", ""
             started = time.monotonic()
+            # 解析或嵌入失败时尚未发布，旧索引完好；发布失败时由发布步骤判断旧索引是否完好。
+            previous_index_intact = True
             if parsed is not None:
+                # 先标为 publishing：此后旧索引可能被改动，重启或意外异常时据此不再回到 ready。
+                index_jobs.begin_publish(kb_id, document_id, job_id)
                 try:
-                    _publish_document(kb_name, filename, prepared, parsed, container)
-                except Exception as exc:
-                    logger.exception("Document processing failed for %s", filename)
+                    _publish_document(kb_id, document_id, prepared, parsed, container)
+                except _PublishError as exc:
+                    logger.exception("Document publish failed for %s", document_id)
                     error_message = str(exc)[:500]
+                    previous_index_intact = exc.previous_index_intact
             outcome = _set_document_status(
                 index_jobs,
-                kb_name,
-                filename,
+                kb_id,
+                document_id,
                 job_id,
                 "ready" if not error_message else "error",
                 error_message,
+                previous_index_intact=previous_index_intact,
+                # 新版本已发布，文档改记它实际使用的解析方式。
+                parser_mode=prepared.parser_mode if not error_message else None,
             )
+            if parsed is not None:
+                # 发布时清过一次缓存，但首次上传的文档此刻才进入就绪列表；这期间建好的
+                # 检索图固定了不含它的文档列表，不再清一次会一直检索不到新文档。
+                retriever.drop_cached_retriever(kb_id)
             logger.info(
                 "Index job %s [%s/%s] %s: phaseA=%.1fs %s lock_wait=%.1fs publish=%.1fs",
                 job_id,
-                kb_name,
-                filename,
+                kb_id,
+                document_id,
                 outcome,
                 phase_a_seconds,
                 " ".join(
@@ -330,25 +436,43 @@ def _index_document(
             )
             return outcome, error_message
     finally:
+        # 工作区不在文档或知识库目录内，无锁解析期间的删除不会波及它，阶段 A 也不会在
+        # 已删除的目录下重建文件；任务只需清理自己的工作区，无需再为删除复查遗留。
         if workspace is not None:
             workspace.cleanup()
-            _remove_leftovers_of_deleted_knowledge_base(kb_name, container)
 
 
 def run_document_job(
     job_id: str,
-    kb_name: str,
-    filename: str,
-    file_path: str,
+    kb_id: str,
+    document_id: str,
     *,
     container: ApplicationContainer | None = None,
 ) -> None:
     """仅当任务仍拥有文件最新版本时，才执行上传后的索引任务。"""
     dependencies = container or get_application_container()
-    outcome, message = _index_document(
-        job_id, kb_name, filename, file_path, dependencies, rebuild=False
-    )
+    if not dependencies.documents.document_exists(
+        kb_id, document_id
+    ) or not dependencies.knowledge_bases.exists(kb_id):
+        dependencies.index_jobs().finish(job_id, INDEX_JOB_SUPERSEDED, "文档或知识库已删除")
+        return
+    try:
+        file_path = dependencies.documents.document_path(kb_id, document_id)
+    except ResourceNotFoundError:
+        dependencies.index_jobs().finish(job_id, INDEX_JOB_SUPERSEDED, "文档或知识库已删除")
+        return
     index_jobs = dependencies.index_jobs()
+    try:
+        outcome, message = _index_document(
+            job_id, kb_id, document_id, file_path, dependencies, rebuild=False
+        )
+    except Exception as exc:
+        # 意外异常（例如 SQLite 被锁）也要写回文档状态，否则文档会一直停在处理中。
+        logger.exception("Index job %s [%s/%s] failed", job_id, kb_id, document_id)
+        message = str(exc)[:500]
+        outcome = _set_document_status(
+            index_jobs, kb_id, document_id, job_id, "error", message
+        )
     if outcome == "skipped":
         return
     if outcome == "superseded":
@@ -358,78 +482,52 @@ def run_document_job(
     index_jobs.finish(job_id, job_status, message)
 
 
-def _remove_leftovers_of_deleted_knowledge_base(
-    kb_name: str, container: ApplicationContainer
-) -> None:
-    """知识库在解析期间被删除时，清除任务重新创建的目录。
-
-    删除操作不会等待解析，解析阶段又可能在删除之后才写出 MinerU 结果目录；
-    残留的 ``mineru_results/<知识库>`` 会让之后的同名创建或改名误判目标已存在。
-    每个任务结束都会调用这里，绝大多数时候知识库仍在，先不持锁判断，
-    避免为一次确认去排整库独占锁；判断为已删除后再持锁复核。
-    """
-    try:
-        if container.knowledge_bases.exists(kb_name):
-            return
-        with knowledge_base_lock(kb_name):
-            if container.knowledge_bases.exists(kb_name):
-                return
-            mineru_client.remove_saved_results_for_knowledge_base(kb_name)
-            kb_dir = container.documents.knowledge_base_path(kb_name)
-            shutil.rmtree(kb_dir, ignore_errors=True)
-    except Exception as exc:
-        logger.warning("Failed to clean leftovers of deleted knowledge base %s: %s", kb_name, exc)
-
-
 def _rebuild_one_document(
     job_id: str,
-    kb_name: str,
-    filename: str,
+    kb_id: str,
+    document_id: str,
     container: ApplicationContainer,
 ) -> tuple[str, str]:
     """重建一个文档；任何意外异常都只让该文档出错，不影响其余文档。"""
     try:
         return _index_document(
             job_id,
-            kb_name,
-            filename,
-            container.documents.document_path(kb_name, filename),
+            kb_id,
+            document_id,
+            container.documents.document_path(kb_id, document_id),
             container,
             rebuild=True,
         )
     except Exception as exc:
-        logger.exception("Rebuild of %s/%s failed", kb_name, filename)
+        logger.exception("Rebuild of %s/%s failed", kb_id, document_id)
         message = str(exc)[:500]
         try:
             outcome = _set_document_status(
-                container.index_jobs(), kb_name, filename, job_id, "error", message
+                container.index_jobs(), kb_id, document_id, job_id, "error", message
             )
         except Exception:
-            logger.exception("Could not record rebuild failure of %s/%s", kb_name, filename)
+            logger.exception("Could not record rebuild failure of %s/%s", kb_id, document_id)
             outcome = "error"
         return outcome, message
 
 
-def _drop_stale_vectors(kb_name: str, container: ApplicationContainer) -> None:
+def _drop_stale_vectors(kb_id: str, container: ApplicationContainer) -> None:
     """重建结束后，删除不再属于任何就绪文档的旧子块和父段落。
 
     重建不预先清空索引，失败文档的旧版本留到这里才删除。
     """
-    kb_id = container.knowledge_bases.kb_id_for(kb_name)
-    if not kb_id:
-        return
     try:
-        active_sources = set(container.documents.ready_sources(kb_name))
-        get_chunk_index().delete_stale_sources(kb_id, active_sources)
-        parent_store.delete_stale_sources(kb_id, active_sources)
+        active_document_ids = set(container.documents.ready_document_ids(kb_id))
+        get_chunk_index().delete_stale_documents(kb_id, active_document_ids)
+        parent_store.delete_stale_documents(kb_id, active_document_ids)
     except Exception as exc:
         # 已删除或不可用的旧版本仍会被 SQLite 允许列表排除，不会参与检索。
-        logger.warning("Stale-source cleanup failed for %s: %s", kb_name, exc)
+        logger.warning("Stale-source cleanup failed for %s: %s", kb_id, exc)
 
 
 def run_rebuild_job(
     job_id: str,
-    kb_name: str,
+    kb_id: str,
     *,
     container: ApplicationContainer | None = None,
 ) -> None:
@@ -437,54 +535,48 @@ def run_rebuild_job(
 
     各文档与上传一样并行处理，处理完立即写回自己的状态；
     解析失败只让该文档出错，其余文档照常重建。不预先清空索引：已就绪文档的旧版本
-    在新版本发布前继续参与检索，发布时由 publish_source 先写新版本再删旧版本。
+    在新版本发布前继续参与检索，发布时由 publish_document 先写新版本再删旧版本。
     """
     dependencies = container or get_application_container()
     index_jobs = dependencies.index_jobs()
-    with knowledge_base_lock(kb_name):
+    with knowledge_base_lock(kb_id):
         if not index_jobs.start(job_id):
             return
-        if not index_jobs.is_active_rebuild(kb_name, job_id):
-            index_jobs.finish(
-                job_id, INDEX_JOB_SUPERSEDED, "已被新的重建任务替代"
-            )
+        if not index_jobs.is_active_rebuild(kb_id, job_id):
+            index_jobs.finish(job_id, INDEX_JOB_SUPERSEDED, "已被新的重建任务替代")
             return
-        filenames = [
-            record["filename"]
-            for record in dependencies.documents.list_documents(kb_name)
+        document_ids = [
+            record["document_id"]
+            for record in dependencies.documents.list_documents(kb_id)
             if record["index_job_id"] == job_id
         ]
-        retriever.drop_cached_retriever(kb_name)
+        retriever.drop_cached_retriever(kb_id)
 
     outcomes: list[tuple[str, str]] = []
-    if filenames:
-        workers = min(get_settings().index_worker_threads, len(filenames))
+    if document_ids:
+        workers = min(get_settings().index_worker_threads, len(document_ids))
         with ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="rebuild-document"
         ) as executor:
             outcomes = list(
                 executor.map(
                     carry_request_id(
-                        lambda name: _rebuild_one_document(
-                            job_id, kb_name, name, dependencies
-                        )
+                        lambda name: _rebuild_one_document(job_id, kb_id, name, dependencies)
                     ),
-                    filenames,
+                    document_ids,
                 )
             )
     ready = sum(1 for outcome, _ in outcomes if outcome == "ready")
     failed = sum(1 for outcome, _ in outcomes if outcome == "error")
 
-    with knowledge_base_lock(kb_name):
+    with knowledge_base_lock(kb_id):
         # 大型重建期间配置可能变化，旧任务完成时不得覆盖新重建任务的持久化状态。
-        if not index_jobs.is_active_rebuild(kb_name, job_id):
-            index_jobs.finish(
-                job_id, INDEX_JOB_SUPERSEDED, "已被新的重建任务替代"
-            )
+        if not index_jobs.is_active_rebuild(kb_id, job_id):
+            index_jobs.finish(job_id, INDEX_JOB_SUPERSEDED, "已被新的重建任务替代")
             return
-        _drop_stale_vectors(kb_name, dependencies)
-        retriever.drop_cached_retriever(kb_name)
-        if not filenames:
+        _drop_stale_vectors(kb_id, dependencies)
+        retriever.drop_cached_retriever(kb_id)
+        if not document_ids:
             job_status, message = INDEX_JOB_FAILED, "当前知识库没有可重建的文档"
         elif failed and not ready:
             job_status, message = INDEX_JOB_FAILED, f"{failed} 个文档解析失败"
@@ -494,55 +586,38 @@ def run_rebuild_job(
         else:
             job_status, message = INDEX_JOB_COMPLETED, ""
         # 兜底：仍停在处理中的文档（意外中断）记为出错，并释放重建标记。
-        index_jobs.complete_rebuild(kb_name, job_id, "error", message or "重建未完成")
+        index_jobs.complete_rebuild(kb_id, job_id, "error", message or "重建未完成")
         index_jobs.finish(job_id, job_status, message)
 
 
-def delete_document_indexes(
-    kb_name: str,
-    filename: str,
-    *,
-    container: ApplicationContainer | None = None,
-) -> None:
-    """文件删除后，从所有检索索引中移除其对应数据。"""
-    dependencies = container or get_application_container()
-    # 这里只在源文件已删除后调用；调用方会识别重新上传，防止误删新版本的索引。
-    # 知识库已被删除时 kb_id 不存在，子块和父段落已随知识库一并清理。
-    kb_id = dependencies.knowledge_bases.kb_id_for(kb_name)
-    index = get_chunk_index()
-    if kb_id:
-        index.delete_source(kb_id, filename)
-        parent_store.delete_source(kb_id, filename)
-    if index.reset_if_empty(dependencies.documents.has_documents):
-        retriever.clear_retriever_cache()
-    retriever.drop_cached_retriever(kb_name)
+def delete_document_indexes(kb_id: str, document_id: str) -> None:
+    get_chunk_index().delete_document(kb_id, document_id)
+    parent_store.delete_document(kb_id, document_id)
+    retriever.drop_cached_retriever(kb_id)
 
 
 def run_delete_job(
     job_id: str,
-    kb_name: str,
-    filename: str,
+    kb_id: str,
+    document_id: str,
     *,
     container: ApplicationContainer | None = None,
 ) -> None:
-    """删除失效索引；若同名文件已重新上传，则放弃本次删除任务。"""
+    """幂等清理逻辑删除文档的全部外部资源；失败任务保留目标 ID 供恢复。"""
     dependencies = container or get_application_container()
     index_jobs = dependencies.index_jobs()
-    with document_lock(kb_name, filename):
+    with document_lock(kb_id, document_id):
         if not index_jobs.start(job_id):
             return
-        if dependencies.documents.document_exists(kb_name, filename):
-            index_jobs.finish(
-                job_id, INDEX_JOB_SUPERSEDED, "文件已重新上传"
-            )
-            return
         try:
-            delete_document_indexes(kb_name, filename, container=dependencies)
+            delete_document_indexes(kb_id, document_id)
+            directory = dependencies.documents.document_directory(kb_id, document_id)
+            if os.path.exists(directory):
+                shutil.rmtree(directory)
+            mineru_client.remove_document_results(kb_id, document_id)
         except Exception as exc:
-            error_message = str(exc)[:500]
-            index_jobs.finish(job_id, INDEX_JOB_FAILED, error_message)
-            index_jobs.compact_database()
+            index_jobs.finish(job_id, INDEX_JOB_FAILED, str(exc)[:500])
             return
         index_jobs.finish(job_id, INDEX_JOB_COMPLETED)
-        index_jobs.redact_orphaned_filenames(kb_name)
+        index_jobs.redact_orphaned_filenames(kb_id)
         index_jobs.compact_database()

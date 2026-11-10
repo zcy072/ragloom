@@ -75,7 +75,7 @@
       <h3 class="font-semibold text-sm mb-3">知识库使用情况</h3>
       <p v-if="!overview.knowledge_bases.length" class="text-xs text-gray-400">统计范围内没有提问</p>
       <ul v-else class="space-y-2" aria-label="知识库使用情况">
-        <li v-for="kb in overview.knowledge_bases" :key="kb.kb_name" class="flex items-center gap-3 text-xs">
+        <li v-for="kb in overview.knowledge_bases" :key="kb.kb_id" class="flex items-center gap-3 text-xs">
           <span class="w-32 truncate text-gray-700" :title="kb.kb_name">{{ kb.kb_name }}</span>
           <div class="flex-1 h-2 rounded bg-gray-100"><div class="h-2 rounded bg-blue-500" :style="{ width: `${(kb.questions / kbMax) * 100}%` }"></div></div>
           <span class="w-20 text-right tabular-nums text-gray-600">{{ kb.questions }} 次</span>
@@ -166,7 +166,7 @@
           <h4 class="mb-2 text-xs font-semibold text-gray-600">常用知识库</h4>
           <p v-if="!detail.knowledge_bases.length" class="text-xs text-gray-400">统计范围内没有提问</p>
           <ul v-else class="space-y-1.5 text-xs">
-            <li v-for="kb in detail.knowledge_bases" :key="kb.kb_name" class="flex items-center gap-2">
+            <li v-for="kb in detail.knowledge_bases" :key="kb.kb_id" class="flex items-center gap-2">
               <span class="w-28 truncate">{{ kb.kb_name }}</span>
               <div class="flex-1 h-2 rounded bg-gray-100"><div class="h-2 rounded bg-teal-500" :style="{ width: percent(kb.questions, detail.user.questions) }"></div></div>
               <span class="w-12 text-right tabular-nums">{{ kb.questions }}</span>
@@ -284,7 +284,7 @@
 import { computed, onMounted, reactive, ref } from 'vue';
 import { RefreshCw } from 'lucide-vue-next';
 
-import { apiGet } from '../apiClient';
+import { apiGet, apiPost } from '../apiClient';
 import PaginationControl from '../components/PaginationControl.vue';
 import { usePaginatedList } from '../composables/usePaginatedList';
 import { store } from '../store';
@@ -336,7 +336,7 @@ const users = usePaginatedList(`${BASE}/users`, {
 });
 const audit = usePaginatedList(`${BASE}/audit-log`, { onError: notifyError('审计记录') });
 
-const allKnowledgeBases = computed(() => (store.user?.knowledgeBasePermissions || []).includes('全公司'));
+const allKnowledgeBases = computed(() => store.user?.allKnowledgeBases === true);
 const canViewConversation = computed(() => (store.user?.menuPermissions || []).includes('查看用户对话'));
 
 const cards = computed(() => {
@@ -420,7 +420,7 @@ const openConversation = async sessionId => {
   conversation.open = true;
   conversation.data = null;
   try {
-    conversation.data = await apiGet(`${BASE}/users/${selectedUserId.value}/sessions/${encodeURIComponent(sessionId)}`);
+    conversation.data = await apiPost(`${BASE}/users/${selectedUserId.value}/sessions/${encodeURIComponent(sessionId)}/view`);
     audit.fetchPage();
   } catch (error) {
     conversation.open = false;

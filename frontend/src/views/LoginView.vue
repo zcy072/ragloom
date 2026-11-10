@@ -105,7 +105,7 @@
             </div>
             <div class="space-y-1.5">
               <label class="text-xs font-medium text-gray-500 ml-1">设置密码</label>
-              <PasswordInput v-model="regPassword" required placeholder="设置登录密码" />
+              <PasswordInput v-model="regPassword" required placeholder="至少 8 个字符，最多 72 字节" />
             </div>
             <div class="space-y-1.5">
               <label class="text-xs font-medium text-gray-500 ml-1">确认密码</label>
@@ -141,13 +141,9 @@ import { ref } from 'vue';
 import { BookOpen } from 'lucide-vue-next';
 import { toast } from '../toast';
 import { apiPost } from '../apiClient';
-import { saveAuthSession } from '../authSession';
+import { finishAuthChange } from '../authSession';
+import { existingPasswordProblem, newPasswordProblem } from '../passwordPolicy';
 import PasswordInput from '../components/PasswordInput.vue';
-
-// 与后端 services/core/config.py 的 MIN_PASSWORD_LENGTH 保持一致。
-const MIN_PASSWORD_LENGTH = 8;
-
-const emit = defineEmits(['login']);
 
 const username = ref('');
 const password = ref('');
@@ -168,26 +164,32 @@ const setView = (newView) => {
   view.value = newView;
   error.value = '';
 };
-/** 提交统一账号凭证并保存后端签发的会话。 */
+/** 提交账号凭证；后端写入会话 Cookie 后重载页面，由启动时的 /me 确认身份。 */
 const handleLogin = async () => {
+  if (loading.value) return;
   error.value = '';
+  const problem = existingPasswordProblem(password.value);
+  if (problem) {
+    error.value = problem;
+    return;
+  }
   loading.value = true;
 
   try {
-    const data = await apiPost('/api/login', {
+    await apiPost('/api/login', {
       username: username.value,
       password: password.value
-    });
-    saveAuthSession(data.access_token, data.user);
-    emit('login', data.user);
+    }, { authReload: false });
+    // 保持“正在登录”状态直到页面重载。
+    finishAuthChange();
   } catch (err) {
     error.value = err.message || '网络连接失败';
-  } finally {
     loading.value = false;
   }
 };
 /** 校验注册表单后提交普通用户注册申请。 */
 const handleRegister = async () => {
+  if (loading.value) return;
   error.value = '';
   if (!regUsername.value.trim() || !regName.value.trim()) {
     error.value = '账号名称和真实姓名不能为空';
@@ -197,8 +199,9 @@ const handleRegister = async () => {
     error.value = '两次输入的密码不一致';
     return;
   }
-  if (regPassword.value.length < MIN_PASSWORD_LENGTH) {
-    error.value = `密码至少需要 ${MIN_PASSWORD_LENGTH} 个字符`;
+  const problem = newPasswordProblem(regPassword.value);
+  if (problem) {
+    error.value = problem;
     return;
   }
 

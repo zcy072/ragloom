@@ -19,13 +19,13 @@ from services.identity import auth as auth_service
 router = APIRouter(prefix="/api", tags=["documents"])
 
 
-@router.get("/documents/{kb_name}", response_model=list[schemas.DocumentResponse])
+@router.get("/documents/{kb_id}", response_model=list[schemas.DocumentResponse])
 def list_documents(
-    kb_name: dependencies.KnowledgeBasePath,
+    kb_id: dependencies.KnowledgeBaseIdPath,
     _principal=Depends(auth_service.require_knowledge_base_reader),
 ):
     """返回指定知识库中当前用户可见的文档记录。"""
-    return app_storage.documents.list_documents(kb_name)
+    return app_storage.documents.list_documents(kb_id)
 
 
 @router.get("/document_parsers", response_model=schemas.DocumentParserOptionsResponse)
@@ -41,9 +41,9 @@ def list_document_formats(_principal=Depends(auth_service.current_principal)):
     return document_loader.list_document_format_options()
 
 
-@router.post("/documents/{kb_name}", response_model=schemas.DocumentUploadResponse)
+@router.post("/documents/{kb_id}", response_model=schemas.DocumentUploadResponse)
 def upload_document(
-    kb_name: dependencies.KnowledgeBasePath,
+    kb_id: dependencies.KnowledgeBaseIdPath,
     file: UploadFile = File(...),
     metadata: str | None = Form(None),
     parser_mode: str | None = Form(None),
@@ -54,14 +54,12 @@ def upload_document(
         if metadata is None:
             supplied_metadata = None
         else:
-            metadata_request = schemas.DocumentMetadataRequest.model_validate(
-                json.loads(metadata)
-            )
+            metadata_request = schemas.DocumentMetadataRequest.model_validate(json.loads(metadata))
             supplied_metadata = metadata_request.model_dump()
     except (TypeError, json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(422, f"文档元数据无效：{exc}") from exc
     result = document_use_cases.upload_document(
-        kb_name,
+        kb_id,
         file.filename,
         file.file,
         metadata=supplied_metadata,
@@ -70,25 +68,24 @@ def upload_document(
     return {
         "status": "success",
         "job_id": result.job_id,
+        "document_id": result.document_id,
         "metadata": result.metadata,
         "parser_mode": result.parser_mode,
     }
 
 
 @router.put(
-    "/documents/{kb_name}/{filename}/metadata",
+    "/documents/{kb_id}/{document_id}/metadata",
     response_model=schemas.DocumentMetadataUpdateResponse,
 )
 def update_document_metadata(
-    kb_name: dependencies.KnowledgeBasePath,
-    filename: dependencies.FilenamePath,
+    kb_id: dependencies.KnowledgeBaseIdPath,
+    document_id: dependencies.DocumentIdPath,
     data: schemas.DocumentMetadataRequest,
     _principal=Depends(auth_service.require_knowledge_base_manager),
 ):
     """保存由业务数据库负责的文档筛选元数据。"""
-    result = document_use_cases.update_document_metadata(
-        kb_name, filename, data.model_dump()
-    )
+    result = document_use_cases.update_document_metadata(kb_id, document_id, data.model_dump())
     return {
         "status": "success",
         "metadata": result.metadata,
@@ -96,19 +93,17 @@ def update_document_metadata(
 
 
 @router.put(
-    "/documents/{kb_name}/{filename}/parser",
+    "/documents/{kb_id}/{document_id}/parser",
     response_model=schemas.DocumentParserUpdateResponse,
 )
 def update_document_parser(
-    kb_name: dependencies.KnowledgeBasePath,
-    filename: dependencies.FilenamePath,
+    kb_id: dependencies.KnowledgeBaseIdPath,
+    document_id: dependencies.DocumentIdPath,
     data: schemas.DocumentParserRequest,
     _principal=Depends(auth_service.require_knowledge_base_manager),
 ):
     """修改文档解析方式，并创建重新解析和索引任务。"""
-    result = document_use_cases.update_document_parser(
-        kb_name, filename, data.parser_mode
-    )
+    result = document_use_cases.update_document_parser(kb_id, document_id, data.parser_mode)
     return {
         "status": "success",
         "job_id": result.job_id,
@@ -116,26 +111,38 @@ def update_document_parser(
     }
 
 
-@router.delete("/documents/{kb_name}/{filename}", response_model=schemas.JobResponse)
+@router.delete("/documents/{kb_id}/{document_id}", response_model=schemas.JobResponse)
 def delete_document(
-    kb_name: dependencies.KnowledgeBasePath,
-    filename: dependencies.FilenamePath,
+    kb_id: dependencies.KnowledgeBaseIdPath,
+    document_id: dependencies.DocumentIdPath,
     _principal=Depends(auth_service.require_knowledge_base_manager),
 ):
     """删除文档关系数据，并创建持久化索引清理任务。"""
-    result = document_use_cases.delete_document(kb_name, filename)
+    result = document_use_cases.delete_document(kb_id, document_id)
     return {"status": "success", "job_id": result.job_id}
 
 
-@router.get("/documents/{kb_name}/{filename}")
+@router.post("/documents/{kb_id}/{document_id}/reindex", response_model=schemas.JobResponse)
+def reindex_document(
+    kb_id: dependencies.KnowledgeBaseIdPath,
+    document_id: dependencies.DocumentIdPath,
+    _principal=Depends(auth_service.require_knowledge_base_manager),
+):
+    result = document_use_cases.reindex_document(kb_id, document_id)
+    return {"status": "success", "job_id": result.job_id}
+
+
+@router.get("/documents/{kb_id}/{document_id}")
 def download_document(
-    kb_name: dependencies.KnowledgeBasePath,
-    filename: dependencies.FilenamePath,
+    kb_id: dependencies.KnowledgeBaseIdPath,
+    document_id: dependencies.DocumentIdPath,
     preview: bool = False,
     _principal=Depends(auth_service.require_knowledge_base_reader),
 ):
     """返回原始文件；预览请求则以内联且安全的方式返回支持格式。"""
-    file_path = app_storage.documents.document_path(kb_name, filename)
+    record = app_storage.documents.get_document(kb_id, document_id)
+    filename = record["filename"]
+    file_path = app_storage.documents.stored_path(kb_id, document_id, filename)
     if not os.path.exists(file_path):
         if preview:
             safe_filename = html.escape(filename)
@@ -143,7 +150,7 @@ def download_document(
                 "<html><head><meta charset='utf-8'><style>"
                 "body{font-family:sans-serif;padding:40px;text-align:center;color:#666;background:#f8fafc;}"
                 "h2{color:#ef4444;}</style></head><body><h2>文件未找到</h2>"
-                f"<p>原文档 <b>{safe_filename}</b> 已被改名或删除，无法预览。</p></body></html>"
+                f"<p>原文档 <b>{safe_filename}</b> 已被删除或暂不可用，无法预览。</p></body></html>"
             )
             return HTMLResponse(content=page, status_code=404)
         raise HTTPException(404, "File not found")

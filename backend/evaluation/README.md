@@ -7,7 +7,7 @@
 - 只评测文本新闻检索。表格、版面、OCR 和 MinerU 路线没有被量化。
 - 语料是抽样的：标准文档加随机干扰文档，规模写在 `manifest.json`。语料比真实场景小，绝对数值会偏乐观，更适合看配置之间的相对差异。
 - 题目取自 CRUD-RAG 的 2 文档和 3 文档问答任务，标准答案是数据集自带的原文，不是人工标注的本项目数据。
-- 指标按“文档”计算：多个切片命中同一文档只算一次。
+- 指标按“文档”计算：多个切片命中同一文档只算一次。文档身份是 document_id，同名文档分开计数；排名经 `evaluation_document_ids.json` 映射回语料标签后再与题目的 `gold` 比对。
 
 ## 运行
 
@@ -40,7 +40,7 @@ docker compose run --rm --no-deps -v "$PWD/backend:/app" \
   --data /eval/set --storage /eval/storage --output /eval/report.json
 ```
 
-索引完成后再次运行会复用已建好的库。加 `--limit 20` 可先小规模试跑。
+索引完成后再次运行会复用已建好的库。`evaluation_document_ids.json` 保存语料标签到上传返回 document_id 的映射；重跑按 ID 复用就绪文档，对 error 文档发起原 ID 的重新索引。映射缺失或含未登记文档时需重建隔离评测存储，不按文件名猜测身份。加 `--limit 20` 可先小规模试跑。
 
 可选参数：`--rerank-top-n N` 只在本次评测里覆盖重排保留数；`--context-spans N`、`--context-chars N` 覆盖最终上下文的段数和字符上限；`--agentic` 额外评测补充检索（`CHAT_AGENTIC_RETRIEVAL`），会调用对话模型，默认用 `Qwen/Qwen2.5-7B-Instruct`，可用环境变量 `EVAL_AGENTIC_MODEL` 改。
 

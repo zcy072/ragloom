@@ -35,11 +35,16 @@ class IndexWorker:
         pending_job_ids: PendingJobsProvider | None = None,
         container: ApplicationContainer | None = None,
         worker_count: int | None = None,
+        scan_interval: float = 5.0,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """初始化内存队列和可替换的任务执行、待执行任务查询函数。
 
         ``worker_count`` 为空时在 ``start`` 时读取 ``INDEX_WORKER_THREADS``。
         """
+        self._clock = clock
+        self._scan_interval = max(0.05, scan_interval)
+        self._next_scan = 0.0
         self._worker_count = worker_count
         self._container = container
         self._dispatcher = dispatcher or (
@@ -64,6 +69,7 @@ class IndexWorker:
                 return
             count = self._worker_count or get_settings().index_worker_threads
             self._stopping.clear()
+            self._next_scan = self._clock() + self._scan_interval
             self._started = True
             self._threads = [
                 threading.Thread(
@@ -76,14 +82,7 @@ class IndexWorker:
             for thread in self._threads:
                 thread.start()
 
-        # 先启动消费者线程，再重新入队持久化任务，避免任务在启动窗口丢失。
-        try:
-            pending_job_ids = self._pending_job_ids()
-        except Exception as exc:
-            logger.warning("Failed to load queued index jobs: %s", exc)
-            return
-        for job_id in pending_job_ids:
-            self.enqueue(job_id)
+        self._scan_queued(force=True)
 
     def stop(self) -> None:
         """通知 worker 停止，并在有限时间内等待后台线程退出。"""
@@ -112,10 +111,28 @@ class IndexWorker:
             self._queue.put(job_id)
         return True
 
+    def _scan_queued(self, *, force: bool = False) -> None:
+        with self._state_lock:
+            if self._stopping.is_set() or not self._started:
+                return
+            now = self._clock()
+            if not force and now < self._next_scan:
+                return
+            self._next_scan = now + self._scan_interval
+        try:
+            for job_id in self._pending_job_ids():
+                self.enqueue(job_id)
+        except Exception:
+            logger.warning("Failed to scan queued index jobs", exc_info=True)
+
     def _run(self) -> None:
         """持续消费任务，并保证异常后释放内存中的去重标记。"""
         while True:
-            job_id = self._queue.get()
+            self._scan_queued()
+            try:
+                job_id = self._queue.get(timeout=min(self._scan_interval, 1.0))
+            except queue.Empty:
+                continue
             try:
                 if job_id is None:
                     return
@@ -145,9 +162,7 @@ class IndexWorker:
                 self._queue.task_done()
 
 
-def dispatch_index_job(
-    job_id: str, *, container: ApplicationContainer | None = None
-) -> None:
+def dispatch_index_job(job_id: str, *, container: ApplicationContainer | None = None) -> None:
     """按任务操作类型分发到文档处理、重建或删除索引流程。"""
     dependencies = container or get_application_container()
     index_jobs = dependencies.index_jobs()
@@ -156,28 +171,27 @@ def dispatch_index_job(
         return
 
     operation = job["operation"]
-    kb_name = job["kb_name"]
-    filename = job["filename"]
+    kb_id = job["kb_id"]
+    document_id = job["document_id"]
     if operation == "process":
-        if not filename:
-            index_jobs.finish(job_id, INDEX_JOB_FAILED, "文档索引任务缺少文件名")
+        if not document_id:
+            index_jobs.finish(job_id, INDEX_JOB_FAILED, "文档索引任务缺少文档 ID")
             return
         knowledge_base.run_document_job(
             job_id,
-            kb_name,
-            filename,
-            dependencies.documents.document_path(kb_name, filename),
+            kb_id,
+            document_id,
             container=dependencies,
         )
         return
     if operation == "rebuild":
-        knowledge_base.run_rebuild_job(job_id, kb_name, container=dependencies)
+        knowledge_base.run_rebuild_job(job_id, kb_id, container=dependencies)
         return
     if operation == "delete":
-        if not filename:
-            index_jobs.finish(job_id, INDEX_JOB_FAILED, "删除索引任务缺少文件名")
+        if not document_id:
+            index_jobs.finish(job_id, INDEX_JOB_FAILED, "删除索引任务缺少文档 ID")
             return
-        knowledge_base.run_delete_job(job_id, kb_name, filename, container=dependencies)
+        knowledge_base.run_delete_job(job_id, kb_id, document_id, container=dependencies)
         return
 
     index_jobs.finish(job_id, INDEX_JOB_FAILED, "未知的索引任务类型")

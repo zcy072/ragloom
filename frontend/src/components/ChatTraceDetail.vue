@@ -37,7 +37,7 @@
     <section v-if="trace.context?.length">
       <h4 class="mb-1 font-medium text-gray-700">送给模型的上下文</h4>
       <div v-for="span in trace.context" :key="span.id" :class="cited.has(span.id) ? 'text-teal-700' : ''">
-        [来源 {{ span.id }}] <template v-if="span.url">网页 / {{ span.source }}</template><template v-else>{{ span.kb_name }} / {{ span.source }} {{ span.page }}</template>，{{ span.chars }} 字<span v-if="span.truncated" class="text-amber-600">（已截断）</span><span v-if="cited.has(span.id)">，已引用</span>
+        [来源 {{ span.id }}] <template v-if="span.url">网页 / {{ span.source }}</template><template v-else>{{ span.kb_id?.slice(0, 8) }} / {{ span.source }} {{ span.page }}</template>，{{ span.chars }} 字<span v-if="span.truncated" class="text-amber-600">（已截断）</span><span v-if="cited.has(span.id)">，已引用</span>
       </div>
     </section>
   </div>

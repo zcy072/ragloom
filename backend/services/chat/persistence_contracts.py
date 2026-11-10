@@ -10,7 +10,9 @@ class CitationEvidence(TypedDict):
 
     id: int
     source: str
-    kb_name: str
+    kb_id: NotRequired[str]
+    document_id: NotRequired[str]
+    kb_name_snapshot: NotRequired[str]
     page: str
     page_numbers: list[int]
     context_title: str
@@ -27,7 +29,9 @@ class ChatSource(TypedDict):
     page: str
     context_title: str
     content: str
-    kb_name: NotRequired[str]
+    kb_id: NotRequired[str]
+    document_id: NotRequired[str]
+    kb_name_snapshot: NotRequired[str]
     evidence: NotRequired[list[CitationEvidence]]
     # 网页来源的地址；知识库来源没有该字段。
     url: NotRequired[str]
@@ -38,6 +42,7 @@ class ChatSessionSummary(TypedDict):
 
     id: str
     username: str
+    kb_id: str
     kb_name: str
     title: str
     date: str

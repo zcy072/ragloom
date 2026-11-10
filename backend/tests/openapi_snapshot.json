@@ -123,6 +123,10 @@
         "additionalProperties": false,
         "description": "Full conversation of one account; reading it writes an audit record.",
         "properties": {
+          "kb_id": {
+            "title": "Kb Id",
+            "type": "string"
+          },
           "kb_name": {
             "title": "Kb Name",
             "type": "string"
@@ -150,6 +154,7 @@
         "required": [
           "session_id",
           "title",
+          "kb_id",
           "kb_name",
           "username",
           "messages"
@@ -214,6 +219,10 @@
             "title": "Downvotes",
             "type": "integer"
           },
+          "kb_id": {
+            "title": "Kb Id",
+            "type": "string"
+          },
           "kb_name": {
             "title": "Kb Name",
             "type": "string"
@@ -228,6 +237,7 @@
           }
         },
         "required": [
+          "kb_id",
           "kb_name",
           "users",
           "questions",
@@ -362,6 +372,10 @@
             "title": "Feedback",
             "type": "integer"
           },
+          "kb_id": {
+            "title": "Kb Id",
+            "type": "string"
+          },
           "kb_name": {
             "title": "Kb Name",
             "type": "string"
@@ -381,6 +395,7 @@
         },
         "required": [
           "created_at",
+          "kb_id",
           "kb_name",
           "question_preview",
           "status",
@@ -400,6 +415,10 @@
           },
           "id": {
             "title": "Id",
+            "type": "string"
+          },
+          "kb_id": {
+            "title": "Kb Id",
             "type": "string"
           },
           "kb_name": {
@@ -422,6 +441,7 @@
         "required": [
           "id",
           "title",
+          "kb_id",
           "kb_name",
           "created_at",
           "updated_at",
@@ -621,7 +641,7 @@
         "title": "AnalyticsUserRow",
         "type": "object"
       },
-      "Body_upload_document_api_documents__kb_name__post": {
+      "Body_upload_document_api_documents__kb_id__post": {
         "properties": {
           "file": {
             "contentMediaType": "application/octet-stream",
@@ -654,7 +674,7 @@
         "required": [
           "file"
         ],
-        "title": "Body_upload_document_api_documents__kb_name__post",
+        "title": "Body_upload_document_api_documents__kb_id__post",
         "type": "object"
       },
       "ChatFeedbackRequest": {
@@ -750,8 +770,8 @@
             ],
             "title": "Image Mime"
           },
-          "kb_name": {
-            "title": "Kb Name",
+          "kb_id": {
+            "title": "Kb Id",
             "type": "string"
           },
           "model_provider": {
@@ -794,7 +814,7 @@
         },
         "required": [
           "question",
-          "kb_name"
+          "kb_id"
         ],
         "title": "ChatRequest",
         "type": "object"
@@ -808,6 +828,10 @@
           },
           "id": {
             "title": "Id",
+            "type": "string"
+          },
+          "kb_id": {
+            "title": "Kb Id",
             "type": "string"
           },
           "kb_name": {
@@ -826,6 +850,7 @@
         "required": [
           "id",
           "username",
+          "kb_id",
           "kb_name",
           "title",
           "date"
@@ -868,6 +893,10 @@
             "title": "Context Title",
             "type": "string"
           },
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
           "evidence": {
             "items": {
               "$ref": "#/components/schemas/CitationEvidence"
@@ -879,8 +908,12 @@
             "title": "Id",
             "type": "integer"
           },
-          "kb_name": {
-            "title": "Kb Name",
+          "kb_id": {
+            "title": "Kb Id",
+            "type": "string"
+          },
+          "kb_name_snapshot": {
+            "title": "Kb Name Snapshot",
             "type": "string"
           },
           "page": {
@@ -961,8 +994,8 @@
             "title": "Id",
             "type": "string"
           },
-          "kb_name": {
-            "title": "Kb Name",
+          "kb_id": {
+            "title": "Kb Id",
             "type": "string"
           },
           "prompt_chars": {
@@ -1018,7 +1051,7 @@
         "required": [
           "id",
           "created_at",
-          "kb_name",
+          "kb_id",
           "status",
           "question",
           "actual_query",
@@ -1097,12 +1130,20 @@
             "title": "Context Title",
             "type": "string"
           },
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
           "id": {
             "title": "Id",
             "type": "integer"
           },
-          "kb_name": {
-            "title": "Kb Name",
+          "kb_id": {
+            "title": "Kb Id",
+            "type": "string"
+          },
+          "kb_name_snapshot": {
+            "title": "Kb Name Snapshot",
             "type": "string"
           },
           "page": {
@@ -1128,7 +1169,6 @@
         "required": [
           "id",
           "source",
-          "kb_name",
           "page",
           "page_numbers",
           "context_title",
@@ -1169,6 +1209,10 @@
             "title": "Fail",
             "type": "integer"
           },
+          "kb_id": {
+            "title": "Kb Id",
+            "type": "string"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -1194,6 +1238,7 @@
           }
         },
         "required": [
+          "kb_id",
           "name",
           "docs",
           "size",
@@ -1304,6 +1349,25 @@
         "title": "DashboardStatsResponse",
         "type": "object"
       },
+      "DocumentFilterOptionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          }
+        },
+        "required": [
+          "document_id",
+          "filename"
+        ],
+        "title": "DocumentFilterOptionResponse",
+        "type": "object"
+      },
       "DocumentFilterOptionsResponse": {
         "additionalProperties": false,
         "description": "Distinct metadata values available to retrieval filters.",
@@ -1315,11 +1379,11 @@
             "title": "Document Types",
             "type": "array"
           },
-          "sources": {
+          "documents": {
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/DocumentFilterOptionResponse"
             },
-            "title": "Sources",
+            "title": "Documents",
             "type": "array"
           },
           "tags": {
@@ -1331,7 +1395,7 @@
           }
         },
         "required": [
-          "sources",
+          "documents",
           "document_types",
           "tags"
         ],
@@ -1552,8 +1616,11 @@
       },
       "DocumentResponse": {
         "additionalProperties": false,
-        "description": "Document list item with processing state, parser, and metadata.",
         "properties": {
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
           "document_type": {
             "title": "Document Type",
             "type": "string"
@@ -1578,10 +1645,6 @@
             "title": "Parser Mode",
             "type": "string"
           },
-          "path": {
-            "title": "Path",
-            "type": "string"
-          },
           "size": {
             "title": "Size",
             "type": "integer"
@@ -1603,8 +1666,8 @@
           }
         },
         "required": [
+          "document_id",
           "filename",
-          "path",
           "size",
           "uploaded_at",
           "status",
@@ -1620,8 +1683,11 @@
       },
       "DocumentUploadResponse": {
         "additionalProperties": false,
-        "description": "Upload result with stored filename and parser mode.",
         "properties": {
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
           "job_id": {
             "title": "Job Id",
             "type": "string"
@@ -1649,6 +1715,7 @@
         },
         "required": [
           "job_id",
+          "document_id",
           "metadata",
           "parser_mode"
         ],
@@ -1670,11 +1737,21 @@
       },
       "IndexJobResponse": {
         "additionalProperties": false,
-        "description": "Public state and timestamps for one durable indexing job.",
         "properties": {
           "created_at": {
             "title": "Created At",
             "type": "string"
+          },
+          "document_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Id"
           },
           "error_message": {
             "default": "",
@@ -1770,6 +1847,31 @@
         "title": "JobResponse",
         "type": "object"
       },
+      "KnowledgeBaseMutationResponse": {
+        "additionalProperties": false,
+        "description": "Result of creating or renaming a knowledge base; ``kb_id`` is the stable identity.",
+        "properties": {
+          "kb_id": {
+            "title": "Kb Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "kb_id",
+          "name"
+        ],
+        "title": "KnowledgeBaseMutationResponse",
+        "type": "object"
+      },
       "KnowledgeBaseNameRequest": {
         "additionalProperties": false,
         "description": "Validated knowledge-base name used by create and rename operations.",
@@ -1799,13 +1901,34 @@
             "title": "Docs",
             "type": "integer"
           },
+          "kb_id": {
+            "title": "Kb Id",
+            "type": "string"
+          },
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "system_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Key"
           }
         },
         "required": [
+          "kb_id",
           "name",
+          "state",
           "date",
           "docs"
         ],
@@ -1907,6 +2030,7 @@
         "properties": {
           "api_key": {
             "default": "",
+            "maxLength": 4096,
             "title": "Api Key",
             "type": "string"
           },
@@ -2120,6 +2244,10 @@
             "title": "Id",
             "type": "integer"
           },
+          "kb_id": {
+            "title": "Kb Id",
+            "type": "string"
+          },
           "kb_name": {
             "title": "Kb Name",
             "type": "string"
@@ -2191,6 +2319,7 @@
           "id",
           "created_at",
           "username",
+          "kb_id",
           "kb_name",
           "session_id",
           "question_preview",
@@ -2291,6 +2420,17 @@
             "title": "Created At",
             "type": "string"
           },
+          "document_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Id"
+          },
           "error_message": {
             "default": "",
             "title": "Error Message",
@@ -2320,6 +2460,10 @@
           },
           "id": {
             "title": "Id",
+            "type": "string"
+          },
+          "kb_id": {
+            "title": "Kb Id",
             "type": "string"
           },
           "kb_name": {
@@ -2364,6 +2508,7 @@
           "operation",
           "status",
           "created_at",
+          "kb_id",
           "kb_name"
         ],
         "title": "OpsIndexJobResponse",
@@ -2673,11 +2818,16 @@
         "additionalProperties": false,
         "description": "Complete replacement permission sets for one role.",
         "properties": {
-          "knowledge_base_permissions": {
+          "all_knowledge_bases": {
+            "default": false,
+            "title": "All Knowledge Bases",
+            "type": "boolean"
+          },
+          "knowledge_base_ids": {
             "items": {
               "type": "string"
             },
-            "title": "Knowledge Base Permissions",
+            "title": "Knowledge Base Ids",
             "type": "array"
           },
           "menu_permissions": {
@@ -2695,6 +2845,10 @@
         "additionalProperties": false,
         "description": "Role details and its menu and knowledge-base permissions.",
         "properties": {
+          "all_knowledge_bases": {
+            "title": "All Knowledge Bases",
+            "type": "boolean"
+          },
           "description": {
             "title": "Description",
             "type": "string"
@@ -2703,11 +2857,11 @@
             "title": "Id",
             "type": "integer"
           },
-          "knowledge_base_permissions": {
+          "knowledge_base_ids": {
             "items": {
               "type": "string"
             },
-            "title": "Knowledge Base Permissions",
+            "title": "Knowledge Base Ids",
             "type": "array"
           },
           "menu_permissions": {
@@ -2727,7 +2881,8 @@
           "name",
           "description",
           "menu_permissions",
-          "knowledge_base_permissions"
+          "all_knowledge_bases",
+          "knowledge_base_ids"
         ],
         "title": "RoleResponse",
         "type": "object"
@@ -2753,12 +2908,16 @@
             "title": "Chars",
             "type": "integer"
           },
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
           "id": {
             "title": "Id",
             "type": "integer"
           },
-          "kb_name": {
-            "title": "Kb Name",
+          "kb_id": {
+            "title": "Kb Id",
             "type": "string"
           },
           "page": {
@@ -2787,7 +2946,7 @@
         },
         "required": [
           "id",
-          "kb_name",
+          "kb_id",
           "source",
           "page",
           "routes",
@@ -2800,8 +2959,12 @@
       "TraceDocument": {
         "description": "一个检索候选：位置、来源和原文前若干字；重排后带分数和是否进入后续环节。",
         "properties": {
-          "kb_name": {
-            "title": "Kb Name",
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
+          "kb_id": {
+            "title": "Kb Id",
             "type": "string"
           },
           "kept": {
@@ -2839,7 +3002,7 @@
         },
         "required": [
           "position",
-          "kb_name",
+          "kb_id",
           "source",
           "page",
           "route",
@@ -3074,12 +3237,6 @@
         "title": "ValidationError",
         "type": "object"
       }
-    },
-    "securitySchemes": {
-      "HTTPBearer": {
-        "scheme": "bearer",
-        "type": "http"
-      }
     }
   },
   "info": {
@@ -3090,7 +3247,7 @@
   "paths": {
     "/api/change_password": {
       "post": {
-        "description": "Change the authenticated account's password and invalidate its old token.",
+        "description": "修改当前账号密码并撤销其全部会话；成功后清除 Cookie，需要重新登录。",
         "operationId": "change_password_api_change_password_post",
         "requestBody": {
           "content": {
@@ -3128,11 +3285,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Change Password",
         "tags": [
           "auth"
@@ -3173,11 +3325,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Stream Chat Answer",
         "tags": [
           "chat"
@@ -3204,11 +3351,6 @@
             "description": "Successful Response"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Get Chat Sessions",
         "tags": [
           "chat"
@@ -3256,11 +3398,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Delete Chat Session",
         "tags": [
           "chat"
@@ -3306,11 +3443,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Get Chat Session Messages",
         "tags": [
           "chat"
@@ -3364,11 +3496,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Rename Chat Session",
         "tags": [
           "chat"
@@ -3412,11 +3539,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Get Chat Trace",
         "tags": [
           "chat"
@@ -3425,7 +3547,7 @@
     },
     "/api/chat/traces/{trace_id}/feedback": {
       "put": {
-        "description": "记录提问者对回答的评价：1 有用，-1 没用，0 取消评价。",
+        "description": "记录提问者对回答的评价：1 有用，-1 没用，0 取消评价。\n\n知识库读取权限被收回后不能再评价，否则评价仍会计入差评统计和评测导出。",
         "operationId": "set_chat_trace_feedback_api_chat_traces__trace_id__feedback_put",
         "parameters": [
           {
@@ -3470,11 +3592,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Set Chat Trace Feedback",
         "tags": [
           "chat"
@@ -3497,11 +3614,6 @@
             "description": "Successful Response"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Dashboard Stats",
         "tags": [
           "knowledge-bases"
@@ -3528,11 +3640,6 @@
             "description": "Successful Response"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "List Document Formats",
         "tags": [
           "documents"
@@ -3555,28 +3662,23 @@
             "description": "Successful Response"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "List Document Parsers",
         "tags": [
           "documents"
         ]
       }
     },
-    "/api/documents/{kb_name}": {
+    "/api/documents/{kb_id}": {
       "get": {
         "description": "返回指定知识库中当前用户可见的文档记录。",
-        "operationId": "list_documents_api_documents__kb_name__get",
+        "operationId": "list_documents_api_documents__kb_id__get",
         "parameters": [
           {
             "in": "path",
-            "name": "kb_name",
+            "name": "kb_id",
             "required": true,
             "schema": {
-              "title": "Kb Name",
+              "title": "Kb Id",
               "type": "string"
             }
           }
@@ -3589,7 +3691,7 @@
                   "items": {
                     "$ref": "#/components/schemas/DocumentResponse"
                   },
-                  "title": "Response List Documents Api Documents  Kb Name  Get",
+                  "title": "Response List Documents Api Documents  Kb Id  Get",
                   "type": "array"
                 }
               }
@@ -3607,11 +3709,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "List Documents",
         "tags": [
           "documents"
@@ -3619,14 +3716,14 @@
       },
       "post": {
         "description": "保存上传文件和元数据，并创建异步解析与索引任务。",
-        "operationId": "upload_document_api_documents__kb_name__post",
+        "operationId": "upload_document_api_documents__kb_id__post",
         "parameters": [
           {
             "in": "path",
-            "name": "kb_name",
+            "name": "kb_id",
             "required": true,
             "schema": {
-              "title": "Kb Name",
+              "title": "Kb Id",
               "type": "string"
             }
           }
@@ -3635,7 +3732,7 @@
           "content": {
             "multipart/form-data": {
               "schema": {
-                "$ref": "#/components/schemas/Body_upload_document_api_documents__kb_name__post"
+                "$ref": "#/components/schemas/Body_upload_document_api_documents__kb_id__post"
               }
             }
           },
@@ -3663,37 +3760,32 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Upload Document",
         "tags": [
           "documents"
         ]
       }
     },
-    "/api/documents/{kb_name}/{filename}": {
+    "/api/documents/{kb_id}/{document_id}": {
       "delete": {
         "description": "删除文档关系数据，并创建持久化索引清理任务。",
-        "operationId": "delete_document_api_documents__kb_name___filename__delete",
+        "operationId": "delete_document_api_documents__kb_id___document_id__delete",
         "parameters": [
           {
             "in": "path",
-            "name": "kb_name",
+            "name": "kb_id",
             "required": true,
             "schema": {
-              "title": "Kb Name",
+              "title": "Kb Id",
               "type": "string"
             }
           },
           {
             "in": "path",
-            "name": "filename",
+            "name": "document_id",
             "required": true,
             "schema": {
-              "title": "Filename",
+              "title": "Document Id",
               "type": "string"
             }
           }
@@ -3720,11 +3812,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Delete Document",
         "tags": [
           "documents"
@@ -3732,23 +3819,23 @@
       },
       "get": {
         "description": "返回原始文件；预览请求则以内联且安全的方式返回支持格式。",
-        "operationId": "download_document_api_documents__kb_name___filename__get",
+        "operationId": "download_document_api_documents__kb_id___document_id__get",
         "parameters": [
           {
             "in": "path",
-            "name": "kb_name",
+            "name": "kb_id",
             "required": true,
             "schema": {
-              "title": "Kb Name",
+              "title": "Kb Id",
               "type": "string"
             }
           },
           {
             "in": "path",
-            "name": "filename",
+            "name": "document_id",
             "required": true,
             "schema": {
-              "title": "Filename",
+              "title": "Document Id",
               "type": "string"
             }
           },
@@ -3783,37 +3870,32 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Download Document",
         "tags": [
           "documents"
         ]
       }
     },
-    "/api/documents/{kb_name}/{filename}/metadata": {
+    "/api/documents/{kb_id}/{document_id}/metadata": {
       "put": {
         "description": "保存由业务数据库负责的文档筛选元数据。",
-        "operationId": "update_document_metadata_api_documents__kb_name___filename__metadata_put",
+        "operationId": "update_document_metadata_api_documents__kb_id___document_id__metadata_put",
         "parameters": [
           {
             "in": "path",
-            "name": "kb_name",
+            "name": "kb_id",
             "required": true,
             "schema": {
-              "title": "Kb Name",
+              "title": "Kb Id",
               "type": "string"
             }
           },
           {
             "in": "path",
-            "name": "filename",
+            "name": "document_id",
             "required": true,
             "schema": {
-              "title": "Filename",
+              "title": "Document Id",
               "type": "string"
             }
           }
@@ -3850,37 +3932,32 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Update Document Metadata",
         "tags": [
           "documents"
         ]
       }
     },
-    "/api/documents/{kb_name}/{filename}/parser": {
+    "/api/documents/{kb_id}/{document_id}/parser": {
       "put": {
         "description": "修改文档解析方式，并创建重新解析和索引任务。",
-        "operationId": "update_document_parser_api_documents__kb_name___filename__parser_put",
+        "operationId": "update_document_parser_api_documents__kb_id___document_id__parser_put",
         "parameters": [
           {
             "in": "path",
-            "name": "kb_name",
+            "name": "kb_id",
             "required": true,
             "schema": {
-              "title": "Kb Name",
+              "title": "Kb Id",
               "type": "string"
             }
           },
           {
             "in": "path",
-            "name": "filename",
+            "name": "document_id",
             "required": true,
             "schema": {
-              "title": "Filename",
+              "title": "Document Id",
               "type": "string"
             }
           }
@@ -3917,12 +3994,58 @@
             "description": "Validation Error"
           }
         },
-        "security": [
+        "summary": "Update Document Parser",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/documents/{kb_id}/{document_id}/reindex": {
+      "post": {
+        "operationId": "reindex_document_api_documents__kb_id___document_id__reindex_post",
+        "parameters": [
           {
-            "HTTPBearer": []
+            "in": "path",
+            "name": "kb_id",
+            "required": true,
+            "schema": {
+              "title": "Kb Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
           }
         ],
-        "summary": "Update Document Parser",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reindex Document",
         "tags": [
           "documents"
         ]
@@ -3948,18 +4071,13 @@
             "description": "Successful Response"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "List Knowledge Bases",
         "tags": [
           "knowledge-bases"
         ]
       },
       "post": {
-        "description": "使用默认分块配置创建知识库。",
+        "description": "使用默认分块配置创建知识库，返回其不可变的 kb_id；只管理部分知识库时授予创建者角色。",
         "operationId": "create_knowledge_base_api_kbs_post",
         "requestBody": {
           "content": {
@@ -3976,7 +4094,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SuccessResponse"
+                  "$ref": "#/components/schemas/KnowledgeBaseMutationResponse"
                 }
               }
             },
@@ -3993,28 +4111,23 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Create Knowledge Base",
         "tags": [
           "knowledge-bases"
         ]
       }
     },
-    "/api/kbs/{name}": {
+    "/api/kbs/{kb_id}": {
       "delete": {
         "description": "删除知识库的索引、关系数据、原始文件和检索缓存。",
-        "operationId": "delete_knowledge_base_api_kbs__name__delete",
+        "operationId": "delete_knowledge_base_api_kbs__kb_id__delete",
         "parameters": [
           {
             "in": "path",
-            "name": "name",
+            "name": "kb_id",
             "required": true,
             "schema": {
-              "title": "Name",
+              "title": "Kb Id",
               "type": "string"
             }
           }
@@ -4041,28 +4154,74 @@
             "description": "Validation Error"
           }
         },
-        "security": [
+        "summary": "Delete Knowledge Base",
+        "tags": [
+          "knowledge-bases"
+        ]
+      },
+      "put": {
+        "description": "只修改知识库的显示名称，不影响文件、索引、任务和权限。",
+        "operationId": "rename_knowledge_base_api_kbs__kb_id__put",
+        "parameters": [
           {
-            "HTTPBearer": []
+            "in": "path",
+            "name": "kb_id",
+            "required": true,
+            "schema": {
+              "title": "Kb Id",
+              "type": "string"
+            }
           }
         ],
-        "summary": "Delete Knowledge Base",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KnowledgeBaseNameRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowledgeBaseMutationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rename Knowledge Base",
         "tags": [
           "knowledge-bases"
         ]
       }
     },
-    "/api/kbs/{name}/chunk_config": {
+    "/api/kbs/{kb_id}/chunk_config": {
       "get": {
         "description": "返回当前生效的父子分块配置。",
-        "operationId": "get_kb_chunk_config_api_kbs__name__chunk_config_get",
+        "operationId": "get_kb_chunk_config_api_kbs__kb_id__chunk_config_get",
         "parameters": [
           {
             "in": "path",
-            "name": "name",
+            "name": "kb_id",
             "required": true,
             "schema": {
-              "title": "Name",
+              "title": "Kb Id",
               "type": "string"
             }
           }
@@ -4089,11 +4248,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Get Kb Chunk Config",
         "tags": [
           "knowledge-bases"
@@ -4101,14 +4255,14 @@
       },
       "put": {
         "description": "保存分块大小，并安排完整索引重建任务。",
-        "operationId": "save_kb_chunk_config_api_kbs__name__chunk_config_put",
+        "operationId": "save_kb_chunk_config_api_kbs__kb_id__chunk_config_put",
         "parameters": [
           {
             "in": "path",
-            "name": "name",
+            "name": "kb_id",
             "required": true,
             "schema": {
-              "title": "Name",
+              "title": "Kb Id",
               "type": "string"
             }
           }
@@ -4145,28 +4299,23 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Save Kb Chunk Config",
         "tags": [
           "knowledge-bases"
         ]
       }
     },
-    "/api/kbs/{name}/document_filters": {
+    "/api/kbs/{kb_id}/document_filters": {
       "get": {
         "description": "返回可用于检索筛选的去重文档元数据值。",
-        "operationId": "get_document_filters_api_kbs__name__document_filters_get",
+        "operationId": "get_document_filters_api_kbs__kb_id__document_filters_get",
         "parameters": [
           {
             "in": "path",
-            "name": "name",
+            "name": "kb_id",
             "required": true,
             "schema": {
-              "title": "Name",
+              "title": "Kb Id",
               "type": "string"
             }
           }
@@ -4193,28 +4342,23 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Get Document Filters",
         "tags": [
           "knowledge-bases"
         ]
       }
     },
-    "/api/kbs/{name}/index_jobs": {
+    "/api/kbs/{kb_id}/index_jobs": {
       "get": {
         "description": "返回指定知识库最近的持久化索引任务。",
-        "operationId": "get_index_jobs_api_kbs__name__index_jobs_get",
+        "operationId": "get_index_jobs_api_kbs__kb_id__index_jobs_get",
         "parameters": [
           {
             "in": "path",
-            "name": "name",
+            "name": "kb_id",
             "required": true,
             "schema": {
-              "title": "Name",
+              "title": "Kb Id",
               "type": "string"
             }
           }
@@ -4227,7 +4371,7 @@
                   "items": {
                     "$ref": "#/components/schemas/IndexJobResponse"
                   },
-                  "title": "Response Get Index Jobs Api Kbs  Name  Index Jobs Get",
+                  "title": "Response Get Index Jobs Api Kbs  Kb Id  Index Jobs Get",
                   "type": "array"
                 }
               }
@@ -4245,28 +4389,23 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Get Index Jobs",
         "tags": [
           "knowledge-bases"
         ]
       }
     },
-    "/api/kbs/{name}/rebuild": {
+    "/api/kbs/{kb_id}/rebuild": {
       "post": {
         "description": "显式安排 Milvus 检索索引的完整重建。",
-        "operationId": "rebuild_knowledge_base_api_kbs__name__rebuild_post",
+        "operationId": "rebuild_knowledge_base_api_kbs__kb_id__rebuild_post",
         "parameters": [
           {
             "in": "path",
-            "name": "name",
+            "name": "kb_id",
             "required": true,
             "schema": {
-              "title": "Name",
+              "title": "Kb Id",
               "type": "string"
             }
           }
@@ -4293,28 +4432,23 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Rebuild Knowledge Base",
         "tags": [
           "knowledge-bases"
         ]
       }
     },
-    "/api/kbs/{name}/retrieval_config": {
+    "/api/kbs/{kb_id}/retrieval_config": {
       "get": {
         "description": "返回影响查询检索行为的知识库配置。",
-        "operationId": "get_kb_retrieval_config_api_kbs__name__retrieval_config_get",
+        "operationId": "get_kb_retrieval_config_api_kbs__kb_id__retrieval_config_get",
         "parameters": [
           {
             "in": "path",
-            "name": "name",
+            "name": "kb_id",
             "required": true,
             "schema": {
-              "title": "Name",
+              "title": "Kb Id",
               "type": "string"
             }
           }
@@ -4341,11 +4475,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Get Kb Retrieval Config",
         "tags": [
           "knowledge-bases"
@@ -4353,14 +4482,14 @@
       },
       "put": {
         "description": "保存不需要重建索引的检索选项。",
-        "operationId": "save_kb_retrieval_config_api_kbs__name__retrieval_config_put",
+        "operationId": "save_kb_retrieval_config_api_kbs__kb_id__retrieval_config_put",
         "parameters": [
           {
             "in": "path",
-            "name": "name",
+            "name": "kb_id",
             "required": true,
             "schema": {
-              "title": "Name",
+              "title": "Kb Id",
               "type": "string"
             }
           }
@@ -4397,70 +4526,7 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Save Kb Retrieval Config",
-        "tags": [
-          "knowledge-bases"
-        ]
-      }
-    },
-    "/api/kbs/{old_name}": {
-      "put": {
-        "description": "重命名知识库的全部关联资源，失败时执行补偿回滚。",
-        "operationId": "rename_knowledge_base_api_kbs__old_name__put",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "old_name",
-            "required": true,
-            "schema": {
-              "title": "Old Name",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/KnowledgeBaseNameRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SuccessResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
-        "summary": "Rename Knowledge Base",
         "tags": [
           "knowledge-bases"
         ]
@@ -4468,7 +4534,7 @@
     },
     "/api/login": {
       "post": {
-        "description": "Authenticate any active account through the same credential path.",
+        "description": "Authenticate any active account and start a cookie session.",
         "operationId": "login_api_login_post",
         "requestBody": {
           "content": {
@@ -4510,6 +4576,21 @@
         ]
       }
     },
+    "/api/logout": {
+      "post": {
+        "description": "删除当前会话并清除 Cookie；无需有效会话，缺失、过期或重复退出都返回 204。",
+        "operationId": "logout_api_logout_post",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Logout",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
     "/api/me": {
       "get": {
         "description": "返回当前账号实时的角色与权限，供前端在管理员改角色后刷新菜单。",
@@ -4528,11 +4609,6 @@
             "description": "Successful Response"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Current User",
         "tags": [
           "auth"
@@ -4559,11 +4635,6 @@
             "description": "Successful Response"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "List Models",
         "tags": [
           "models"
@@ -4604,11 +4675,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Save Model",
         "tags": [
           "models"
@@ -4659,11 +4725,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Check Model Config",
         "tags": [
           "models"
@@ -4707,11 +4768,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Activate Model",
         "tags": [
           "models"
@@ -4720,7 +4776,7 @@
     },
     "/api/ops/chat-runs": {
       "get": {
-        "description": "按时间倒序分页返回问答记录，可按状态、知识库、最小总耗时和用户评价过滤。",
+        "description": "按时间倒序分页返回问答记录，可按状态、知识库、最小总耗时和用户评价过滤。\n\n只返回调用者能读的 active 知识库的记录。",
         "operationId": "ops_chat_runs_api_ops_chat_runs_get",
         "parameters": [
           {
@@ -4749,19 +4805,19 @@
           },
           {
             "in": "query",
-            "name": "kb",
+            "name": "kb_id",
             "required": false,
             "schema": {
               "anyOf": [
                 {
-                  "maxLength": 80,
+                  "maxLength": 36,
                   "type": "string"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "title": "Kb"
+              "title": "Kb Id"
             }
           },
           {
@@ -4845,11 +4901,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Ops Chat Runs",
         "tags": [
           "ops"
@@ -4858,7 +4909,7 @@
     },
     "/api/ops/chat-traces/export": {
       "get": {
-        "description": "把带评价的问答导出为评测题目（JSON Lines），只包含调用者能读的知识库。",
+        "description": "把带评价的问答导出为评测题目（JSON Lines）。\n\n只导出调用者能读的 active 知识库的问答；引用来源与追踪详情一样按来源知识库过滤，\n不会带出调用者不能读的知识库中的文档 ID 和文件名。",
         "operationId": "ops_export_chat_traces_api_ops_chat_traces_export_get",
         "parameters": [
           {
@@ -4910,11 +4961,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Ops Export Chat Traces",
         "tags": [
           "ops"
@@ -4941,11 +4987,6 @@
             "description": "Successful Response"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Ops Dependencies",
         "tags": [
           "ops"
@@ -4954,7 +4995,7 @@
     },
     "/api/ops/index-jobs": {
       "get": {
-        "description": "跨知识库返回最近的索引任务，默认只看失败任务。",
+        "description": "跨知识库返回最近的索引任务，默认只看失败任务；只包含调用者能读的知识库。",
         "operationId": "ops_index_jobs_api_ops_index_jobs_get",
         "parameters": [
           {
@@ -5021,11 +5062,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Ops Index Jobs",
         "tags": [
           "ops"
@@ -5095,11 +5131,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Ops Logs",
         "tags": [
           "ops"
@@ -5108,7 +5139,7 @@
     },
     "/api/ops/overview": {
       "get": {
-        "description": "返回最近 N 天问答的状态分布、耗时分位数和按天趋势。",
+        "description": "返回最近 N 天问答的状态分布、耗时分位数和按天趋势，只统计调用者能读的知识库。",
         "operationId": "ops_overview_api_ops_overview_get",
         "parameters": [
           {
@@ -5146,11 +5177,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Ops Overview",
         "tags": [
           "ops"
@@ -5265,11 +5291,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "List Roles",
         "tags": [
           "roles"
@@ -5310,11 +5331,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Create Role",
         "tags": [
           "roles"
@@ -5358,11 +5374,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Delete Role",
         "tags": [
           "roles"
@@ -5414,11 +5425,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Update Role",
         "tags": [
           "roles"
@@ -5476,11 +5482,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Analytics Audit Log",
         "tags": [
           "user-analytics"
@@ -5527,11 +5528,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Analytics Overview",
         "tags": [
           "user-analytics"
@@ -5643,11 +5639,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Analytics Users",
         "tags": [
           "user-analytics"
@@ -5703,21 +5694,16 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Analytics User Detail",
         "tags": [
           "user-analytics"
         ]
       }
     },
-    "/api/user-analytics/users/{user_id}/sessions/{session_id}": {
-      "get": {
-        "description": "返回用户的完整会话；需要“查看用户对话”权限，每次读取都写入审计记录。",
-        "operationId": "analytics_user_conversation_api_user_analytics_users__user_id__sessions__session_id__get",
+    "/api/user-analytics/users/{user_id}/sessions/{session_id}/view": {
+      "post": {
+        "description": "返回用户的完整会话；需要“查看用户对话”权限，每次读取都写入审计记录。\n\n读取会写审计记录，所以用 POST：跨站链接触发不了，且受全局写请求头检查保护。",
+        "operationId": "analytics_user_conversation_api_user_analytics_users__user_id__sessions__session_id__view_post",
         "parameters": [
           {
             "in": "path",
@@ -5760,11 +5746,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Analytics User Conversation",
         "tags": [
           "user-analytics"
@@ -5833,11 +5814,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "List Users",
         "tags": [
           "users"
@@ -5881,11 +5857,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Delete User",
         "tags": [
           "users"
@@ -5939,11 +5910,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Update User Role",
         "tags": [
           "users"
@@ -5997,11 +5963,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
         "summary": "Update User Status",
         "tags": [
           "users"

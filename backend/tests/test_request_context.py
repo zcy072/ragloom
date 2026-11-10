@@ -5,13 +5,11 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 
-import httpx
-
-import api
 from services.chat.trace import ChatTrace
 from services.core import log_tail, logging_setup, request_context
 from services.indexing.worker import IndexWorker
 from services.retrieval.chunk_index import run_searches
+from tests.support import api_client
 
 
 class _Capture:
@@ -108,8 +106,7 @@ class RequestContextTest(unittest.TestCase):
 class RequestIdMiddlewareTest(unittest.TestCase):
     def test_each_response_gets_a_fresh_request_id_and_client_value_is_ignored(self):
         async def run():
-            transport = httpx.ASGITransport(app=api.app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            async with api_client() as client:
                 first = await client.get("/api/health", headers={"X-Request-ID": "forged"})
                 second = await client.get("/api/health")
                 return first, second

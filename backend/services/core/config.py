@@ -2,6 +2,7 @@
 
 import datetime
 import re
+import uuid
 from pathlib import Path
 
 import bcrypt
@@ -10,8 +11,6 @@ from services.core.contracts import KnowledgeBaseConfig
 from services.core.settings import get_settings
 
 INITIAL_ADMIN_USERNAME = "admin"
-# 角色知识库权限中的特殊值，表示全部知识库，不能用作知识库名称。
-ALL_KNOWLEDGE_BASES_PERMISSION = "全公司"
 DOCUMENT_METADATA_MAX_TYPE_LENGTH = 80
 DOCUMENT_METADATA_MAX_TAGS = 12
 DOCUMENT_METADATA_MAX_TAG_LENGTH = 40
@@ -36,6 +35,7 @@ def initial_admin_password() -> str:
 
 
 BCRYPT_MAX_PASSWORD_BYTES = 72
+BCRYPT_ROUNDS = 12
 
 
 MIN_PASSWORD_LENGTH = 8
@@ -55,9 +55,18 @@ def validate_registration_fields(username: str, phone: str) -> None:
 
 
 def validate_new_password(password: str) -> None:
-    """校验用户新设置的密码长度；初始管理员密码来自部署配置，不经过这里。"""
+    """校验新密码：至少 8 个字符、UTF-8 不超过 72 字节；首尾空格原样保留。
+
+    注册、改密和首次创建管理员都在生成哈希前调用这里；校验旧密码时不套用新规则，
+    以免现有短密码账号无法登录后改密。
+    """
     if len(password) < MIN_PASSWORD_LENGTH:
         raise ValueError(f"密码过短：至少需要 {MIN_PASSWORD_LENGTH} 个字符")
+    if len(password.encode("utf-8")) > BCRYPT_MAX_PASSWORD_BYTES:
+        raise ValueError(
+            f"密码过长：不能超过 {BCRYPT_MAX_PASSWORD_BYTES} 字节"
+            "（英文数字约 72 个字符，每个汉字占 3 字节）"
+        )
 
 
 def hash_password(password: str) -> str:
@@ -72,7 +81,7 @@ def hash_password(password: str) -> str:
             f"密码过长：不能超过 {BCRYPT_MAX_PASSWORD_BYTES} 字节"
             "（英文数字约 72 个字符，每个汉字占 3 字节）"
         )
-    return bcrypt.hashpw(encoded, bcrypt.gensalt()).decode("ascii")
+    return bcrypt.hashpw(encoded, bcrypt.gensalt(rounds=BCRYPT_ROUNDS)).decode("ascii")
 
 
 # 用户名不存在时用它校验一次，让响应时间与密码错误时一致，避免探测用户名。
@@ -116,11 +125,30 @@ def _validated_path_segment(value: str, max_length: int, error: str) -> str:
 
 
 def validate_kb_name(value: str) -> str:
-    """规范化知识库名称，拒绝路径穿越等不能用于文件系统的值和权限保留名。"""
-    name = _validated_path_segment(value, 80, "知识库名称无效")
-    if name == ALL_KNOWLEDGE_BASES_PERMISSION:
-        raise ValueError(f"“{ALL_KNOWLEDGE_BASES_PERMISSION}”是保留名称，不能用作知识库名称")
+    """规范化知识库显示名称：trim 后 1–80 个字符且不含控制字符。
+
+    名称只用于展示，不参与路径、授权或锁键，因此不再限制路径字符，也没有保留名。
+    """
+    name = (value or "").strip()
+    if not name or len(name) > 80 or any(ord(char) < 32 or ord(char) == 127 for char in name):
+        raise ValueError("知识库名称无效")
     return name
+
+
+def validate_kb_id(value: str) -> str:
+    """校验并规范化知识库 ID：必须是 UUID，返回小写带连字符的规范字符串。"""
+    try:
+        return str(uuid.UUID(str(value).strip()))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ValueError("知识库 ID 无效") from exc
+
+
+def validate_document_id(value: str) -> str:
+    """校验并规范化不可变文档 UUID。"""
+    try:
+        return str(uuid.UUID(str(value).strip()))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ValueError("文档 ID 无效") from exc
 
 
 def validate_filename(value: str) -> str:
@@ -192,6 +220,7 @@ CHAT_MEMORY_SUMMARY_MAX_TOKENS = 500
 # 工具化检索：由模型通过 function calling 决定是否检索、用什么查询检索。
 # 兼容接口未必支持 tools 参数，因此默认关闭，由环境变量显式开启。
 
+
 def chat_retrieval_planning_enabled() -> bool:
     """读取当前问题是否启用工具化检索规划。"""
     return get_settings().chat_retrieval_planning
@@ -200,6 +229,7 @@ def chat_retrieval_planning_enabled() -> bool:
 # 书面化补充查询：在原问题之外，再用口语转书面语的改写检索一遍并合并候选。
 # 会多一次改写模型调用，因此默认关闭，由环境变量显式开启。
 
+
 def chat_query_variant_enabled() -> bool:
     """读取当前问题是否启用书面化补充查询。"""
     return get_settings().chat_query_variant
@@ -207,6 +237,7 @@ def chat_query_variant_enabled() -> bool:
 
 # 补充检索：首轮证据不足时，由模型判断并给出新检索词再检索，最多 CHAT_AGENTIC_MAX_ROUNDS 轮。
 # 依赖 function calling 且会增加模型调用，因此默认关闭，由环境变量显式开启。
+
 
 def chat_agentic_retrieval_enabled() -> bool:
     """读取当前问题是否启用补充检索。"""

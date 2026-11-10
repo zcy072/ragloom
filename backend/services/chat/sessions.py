@@ -5,6 +5,7 @@ import uuid
 from dataclasses import dataclass
 from typing import cast
 
+from services.chat import lifecycle, source_access
 from services.chat.persistence_contracts import (
     ChatHistoryMessage,
     ChatSessionSummary,
@@ -19,6 +20,7 @@ from services.core.errors import AccessDeniedError, ResourceNotFoundError
 @dataclass(frozen=True)
 class SessionOwner:
     """用于校验持久化聊天会话归属的稳定账号身份。"""
+
     account_id: int
     username: str
 
@@ -29,6 +31,8 @@ class ConversationMemory:
 
     summary: str
     recent_history: tuple[tuple[str, str], ...]
+    # 最近几轮回答引用过的知识库文件名，从新到旧，供改写和规划确认追问的对象。
+    recent_documents: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -67,7 +71,8 @@ def _session_summary_from_row(row: tuple[object, ...]) -> ChatSessionSummary:
     return {
         "id": str(row[0]),
         "username": str(row[1]),
-        "kb_name": str(row[2]),
+        "kb_id": str(row[2]),
+        "kb_name": str(row[5]),
         "title": str(row[3]),
         "date": created_at[:10],
     }
@@ -93,8 +98,9 @@ def list_owned_sessions(
     """按最近更新时间返回一个账号拥有的全部会话。"""
     with application_db.connect(database_file(container)) as conn:
         rows = conn.execute(
-            "SELECT id, username, kb_name, title, created_at FROM chat_sessions "
-            "WHERE account_id = ? ORDER BY updated_at DESC",
+            "SELECT s.id, s.username, s.kb_id, s.title, s.created_at, k.name "
+            "FROM chat_sessions s JOIN knowledge_bases k ON k.kb_id = s.kb_id "
+            "WHERE s.account_id = ? AND k.state = 'active' ORDER BY s.updated_at DESC",
             (owner.account_id,),
         ).fetchall()
     return [_session_summary_from_row(row) for row in rows]
@@ -103,13 +109,12 @@ def list_owned_sessions(
 def _owned_session_kb(conn, session_id: str, owner: SessionOwner) -> str:
     """查出会话绑定的知识库；不存在或不属于本人时统一返回 404。"""
     row = conn.execute(
-        "SELECT kb_name FROM chat_sessions WHERE id = ? AND account_id = ?",
+        "SELECT s.kb_id FROM chat_sessions s JOIN knowledge_bases k ON k.kb_id = s.kb_id "
+        "WHERE s.id = ? AND s.account_id = ? AND k.state = 'active'",
         (session_id, owner.account_id),
     ).fetchone()
     if not row:
-        raise ResourceNotFoundError(
-            "会话不存在或无权访问", code="chat_session_not_found"
-        )
+        raise ResourceNotFoundError("会话不存在或无权访问", code="chat_session_not_found")
     return str(row[0])
 
 
@@ -132,14 +137,14 @@ def load_owned_session_messages(
 ) -> tuple[str, list[ChatHistoryMessage]]:
     """校验会话归属，并返回其知识库和按时间排序的消息。"""
     with application_db.connect(database_file(container)) as conn:
-        kb_name = _owned_session_kb(conn, session_id, owner)
+        kb_id = _owned_session_kb(conn, session_id, owner)
         message_rows = conn.execute(
             "SELECT m.role, m.content, m.sources, t.id, t.feedback FROM chat_messages m "
             "LEFT JOIN chat_traces t ON t.assistant_message_id = m.id "
             "WHERE m.session_id = ? ORDER BY m.id ASC",
             (session_id,),
         ).fetchall()
-    return kb_name, [_history_message_from_row(message) for message in message_rows]
+    return kb_id, [_history_message_from_row(message) for message in message_rows]
 
 
 def delete_owned_session(
@@ -171,9 +176,7 @@ def rename_owned_session(
             (title, session_id, owner.account_id),
         )
         if cursor.rowcount == 0:
-            raise ResourceNotFoundError(
-                "会话不存在或无权访问", code="chat_session_not_found"
-            )
+            raise ResourceNotFoundError("会话不存在或无权访问", code="chat_session_not_found")
 
 
 def save_user_message(
@@ -184,14 +187,19 @@ def save_user_message(
 ) -> int:
     """在回答生成前保存用户消息，返回消息 ID；会话的第一条消息同时决定会话标题。"""
     with application_db.connect(database_file(container)) as conn:
-        is_first_message = conn.execute(
-            "SELECT 1 FROM chat_messages WHERE session_id = ? LIMIT 1",
-            (session_id,),
-        ).fetchone() is None
+        conn.execute("BEGIN IMMEDIATE")
+        lifecycle.require_active_session(conn, session_id)
+        is_first_message = (
+            conn.execute(
+                "SELECT 1 FROM chat_messages WHERE session_id = ? LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            is None
+        )
         if is_first_message:
             # 只覆盖创建时的占位标题，已被手动重命名的会话保留用户设定的标题。
             conn.execute(
-                "UPDATE chat_sessions SET title = ? WHERE id = ? AND title = kb_name || ' 会话'",
+                "UPDATE chat_sessions SET title = ? WHERE id = ? AND title = '新会话'",
                 (session_title_from_question(content), session_id),
             )
         cursor = conn.execute(
@@ -235,6 +243,11 @@ def save_assistant_message(
     """保存助手回答和引用，并同步会话的最近更新时间，返回消息 ID。"""
     now = application_config.db_now()
     with application_db.connect(database_file(container)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        lifecycle.require_active_session(conn, session_id)
+        sources = source_access.filter_message_sources(
+            sources, lifecycle.active_source_reader(conn)
+        )
         cursor = conn.execute(
             "INSERT INTO chat_messages (session_id, role, content, sources, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -256,7 +269,7 @@ def save_assistant_message(
 def resolve_session(
     session_id: str | None,
     owner: SessionOwner,
-    kb_name: str,
+    kb_id: str,
     *,
     force_new: bool = False,
     container: ApplicationContainer | None = None,
@@ -264,20 +277,18 @@ def resolve_session(
     """解析或创建会话，并告知调用方是否需要在前置失败时清理新会话。"""
     created = False
     with application_db.connect(database_file(container)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        lifecycle.require_active_kb(conn, kb_id)
         if session_id:
             row = conn.execute(
-                "SELECT account_id, kb_name FROM chat_sessions WHERE id = ?",
+                "SELECT account_id, kb_id FROM chat_sessions WHERE id = ?",
                 (session_id,),
             ).fetchone()
             if not row:
-                raise ResourceNotFoundError(
-                    "会话不存在", code="chat_session_not_found"
-                )
+                raise ResourceNotFoundError("会话不存在", code="chat_session_not_found")
             # 会话绑定知识库，也避免合法用户把一段历史对话悄悄带到另一套检索范围中。
-            if row != (owner.account_id, kb_name):
-                raise AccessDeniedError(
-                    "无权访问该会话", code="chat_session_access_denied"
-                )
+            if row != (owner.account_id, kb_id):
+                raise AccessDeniedError("无权访问该会话", code="chat_session_access_denied")
             conn.execute(
                 "UPDATE chat_sessions SET updated_at = ? WHERE id = ?",
                 (application_config.db_now(), session_id),
@@ -288,9 +299,9 @@ def resolve_session(
         if not force_new:
             existing = conn.execute(
                 "SELECT id FROM chat_sessions "
-                "WHERE account_id = ? AND kb_name = ? "
+                "WHERE account_id = ? AND kb_id = ? "
                 "ORDER BY updated_at DESC LIMIT 1",
-                (owner.account_id, kb_name),
+                (owner.account_id, kb_id),
             ).fetchone()
         if existing:
             session_id = str(existing[0])
@@ -303,19 +314,64 @@ def resolve_session(
             created = True
             conn.execute(
                 "INSERT INTO chat_sessions "
-                "(id, account_id, username, kb_name, title, created_at, updated_at) "
+                "(id, account_id, username, kb_id, title, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     session_id,
                     owner.account_id,
                     owner.username,
-                    kb_name,
-                    f"{kb_name} 会话",
+                    kb_id,
+                    "新会话",
                     application_config.db_now(),
                     application_config.db_now(),
                 ),
             )
     return SessionResolution(session_id=session_id, created=created)
+
+
+RECENT_DOCUMENT_ANSWER_COUNT = 3
+RECENT_DOCUMENT_LIMIT = 5
+
+
+def clip_message(role: str, text: str, limit: int) -> str:
+    """按上限截断一条历史消息；助手回答保留首尾。
+
+    长回答的结论和末尾条目常被追问（“第 5 点展开说说”），只留开头会把它们截掉。
+    """
+    if len(text) <= limit:
+        return text
+    if role != "assistant":
+        return text[:limit]
+    marker = "\n……\n"
+    available = max(0, limit - len(marker))
+    head = (available + 1) // 2
+    tail = available // 2
+    return text[:head] + marker + (text[-tail:] if tail else "")
+
+
+def _recent_cited_documents(conn, session_id: str) -> tuple[str, ...]:
+    """读取最近几条回答实际引用的知识库文件名，网页来源不计入。
+
+    来源快照在保存时已按知识库状态过滤；这里只给改写和规划模型看文件名，不作为证据。
+    """
+    rows = conn.execute(
+        "SELECT sources FROM chat_messages WHERE session_id = ? AND role = 'assistant' "
+        "ORDER BY id DESC LIMIT ?",
+        (session_id, RECENT_DOCUMENT_ANSWER_COUNT),
+    ).fetchall()
+    names: list[str] = []
+    for (raw,) in rows:
+        try:
+            sources = json.loads(raw) if raw else []
+        except (TypeError, ValueError):
+            continue
+        for source in sources if isinstance(sources, list) else []:
+            if not isinstance(source, dict) or source.get("url") or not source.get("kb_id"):
+                continue
+            name = str(source.get("source") or "").strip()
+            if name and name not in names:
+                names.append(name)
+    return tuple(names[:RECENT_DOCUMENT_LIMIT])
 
 
 def _group_recent_turns(
@@ -353,7 +409,11 @@ def _pack_recent_turns(
     used_chars = 0
     for turn in _group_recent_turns(rows):
         bounded_turn = [
-            (message_id, role, text[: application_config.CHAT_MEMORY_RECENT_MESSAGE_MAX_CHARS])
+            (
+                message_id,
+                role,
+                clip_message(role, text, application_config.CHAT_MEMORY_RECENT_MESSAGE_MAX_CHARS),
+            )
             for message_id, role, text in turn
         ]
         turn_chars = sum(len(text) for _, _, text in bounded_turn)
@@ -422,8 +482,11 @@ def load_conversation_memory(
                 _effective_recent_limit(unsummarized_count, recent_limit),
             ),
         ).fetchall()
+        recent_documents = _recent_cited_documents(conn, session_id)
     history, _ = _pack_recent_turns(rows, recent_max_chars)
-    return ConversationMemory(summary=summary, recent_history=tuple(history))
+    return ConversationMemory(
+        summary=summary, recent_history=tuple(history), recent_documents=recent_documents
+    )
 
 
 def load_summary_batch(
@@ -458,7 +521,7 @@ def load_summary_batch(
     if len(rows) > trigger_message_count:
         cut = max(0, len(rows) - keep_recent) if keep_recent else len(rows)
     # 与 load_conversation_memory 使用同一套窗口规则，找出被挤出窗口的较早消息。
-    window = rows[-_effective_recent_limit(len(rows), recent_limit):]
+    window = rows[-_effective_recent_limit(len(rows), recent_limit) :]
     _, oldest_kept_id = _pack_recent_turns(list(reversed(window)), recent_max_chars)
     if oldest_kept_id is not None:
         cut = max(cut, sum(1 for row in rows if row[0] < oldest_kept_id))
@@ -482,6 +545,11 @@ def save_conversation_summary(
     """以乐观并发方式保存摘要，旧状态已变化时放弃覆盖。"""
     now = application_config.db_now()
     with application_db.connect(database_file(container)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            lifecycle.require_active_session(conn, session_id)
+        except ResourceNotFoundError:
+            return False
         cursor = conn.execute(
             "INSERT INTO chat_session_memory "
             "(session_id, summary, summary_message_id, updated_at) "

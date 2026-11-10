@@ -16,7 +16,7 @@ class OcrImageLimitTest(unittest.TestCase):
             ocr.ocr_image(image, engine)
 
         image.convert.assert_not_called()
-        engine.ocr.assert_not_called()
+        engine.predict.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -37,7 +37,7 @@ export function useDocumentPreview(url) {
     loading.value = true;
     try {
       const response = await authorizedFetch(nextUrl, { signal: controller.signal });
-      if (!response.ok) throw new Error('文档加载失败');
+      if (!response.ok) throw new Error(response.status === 404 ? '文档已删除或不存在' : '文档加载失败');
       const objectUrl = URL.createObjectURL(await response.blob());
       if (requestController !== controller) {
         URL.revokeObjectURL(objectUrl);

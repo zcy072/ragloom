@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 def _collect_candidates(
-    kb_name: str,
+    kb_id: str,
     question: str,
     has_image: bool,
     filters: RetrievalFilters | None,
@@ -34,32 +34,35 @@ def _collect_candidates(
 
     # The cached graph stays valid across requests; its source filters are refreshed once per
     # request so dense, BM25, and lexical supplementation use the same durable state.
-    with retrieval_service.request_source_snapshot(
-        kb_name, container, include_common=include_common
+    with retrieval_service.request_document_snapshot(
+        kb_id, container, include_common=include_common
     ):
         # Filtered retrievers are request-specific and must not enter the knowledge-base cache.
         cached = (
-            retrieval_service.get_cached_retriever(kb_name, include_common=include_common)
+            retrieval_service.get_cached_retriever(kb_id, include_common=include_common)
             if not filtered
             else None
         )
         if cached is None:
+            version = retrieval_service.retriever_cache_version()
             try:
                 retriever = retrieval_service.build_retriever(
-                    kb_name, filters=filters, include_common=include_common, container=container
+                    kb_id, filters=filters, include_common=include_common, container=container
                 )
             except ValueError as exc:
-                raise InvalidRequestError(
-                    str(exc), code="invalid_retrieval_request"
-                ) from exc
+                raise InvalidRequestError(str(exc), code="invalid_retrieval_request") from exc
             if retriever:
                 if not filtered:
                     retrieval_service.cache_retriever(
-                        kb_name, retriever, include_common=include_common
+                        kb_id, retriever, include_common=include_common, version=version
                     )
                 cached = retriever
             elif not has_image:
-                detail = "筛选范围内没有可用文档，请调整检索筛选条件。" if filtered else "当前知识库未上传文档，请先上传文件后再提问。"
+                detail = (
+                    "筛选范围内没有可用文档，请调整检索筛选条件。"
+                    if filtered
+                    else "当前知识库未上传文档，请先上传文件后再提问。"
+                )
                 raise InvalidStateError(
                     detail,
                     code=(
@@ -70,13 +73,13 @@ def _collect_candidates(
                 )
         semantic_docs = cached.invoke(question) if cached else []
         lexical_docs = retrieval_service.retrieve_lexical_candidates(
-            kb_name, question, filters, include_common=include_common, container=container
+            kb_id, question, filters, include_common=include_common, container=container
         )
     return semantic_docs, lexical_docs
 
 
 async def retrieve_rerank_candidates(
-    kb_name: str,
+    kb_id: str,
     question: str,
     has_image: bool,
     filters: RetrievalFilters | None = None,
@@ -92,7 +95,7 @@ async def retrieve_rerank_candidates(
     container = container or get_application_container()
     # 检索库和 SQLite 都是同步的，整段放进线程，避免阻塞 FastAPI 事件循环。
     semantic_docs, lexical_docs = await asyncio.to_thread(
-        _collect_candidates, kb_name, question, has_image, filters, include_common, container
+        _collect_candidates, kb_id, question, has_image, filters, include_common, container
     )
     # Alternate exact-term and semantic candidates so the best of each survives the 30-candidate
     # cap; concatenating them let a large lexical pool push semantic hits out of the reranker.
@@ -115,7 +118,7 @@ def _interleave_candidates(primary: list, variant: list) -> list:
 
 
 async def _retrieve_variant_candidates(
-    kb_name: str,
+    kb_id: str,
     variant_query: str,
     has_image: bool,
     filters: RetrievalFilters | None,
@@ -124,7 +127,7 @@ async def _retrieve_variant_candidates(
     """补充查询只是增强，任何失败都按没有补充候选处理，不能影响主查询。"""
     try:
         return await retrieve_rerank_candidates(
-            kb_name, variant_query, has_image, filters, **container_kwargs
+            kb_id, variant_query, has_image, filters, **container_kwargs
         )
     except Exception as exc:
         logger.debug("Query variant retrieval skipped: %s", exc)
@@ -149,7 +152,7 @@ async def _merge_variant_candidates(
 
 
 async def retrieve_candidates_with_query_fallback(
-    kb_name: str,
+    kb_id: str,
     question: str,
     search_query: str,
     has_image: bool,
@@ -175,20 +178,16 @@ async def retrieve_candidates_with_query_fallback(
         primary_kwargs["diagnostics"] = diagnostics
     if variant_query and variant_query != search_query:
         documents, variant_documents = await asyncio.gather(
-            retrieve_rerank_candidates(
-                kb_name, search_query, has_image, filters, **primary_kwargs
-            ),
+            retrieve_rerank_candidates(kb_id, search_query, has_image, filters, **primary_kwargs),
             _retrieve_variant_candidates(
-                kb_name, variant_query, has_image, filters, container_kwargs
+                kb_id, variant_query, has_image, filters, container_kwargs
             ),
         )
         if variant_documents:
-            documents = await _merge_variant_candidates(
-                documents, variant_documents, diagnostics
-            )
+            documents = await _merge_variant_candidates(documents, variant_documents, diagnostics)
     else:
         documents = await retrieve_rerank_candidates(
-            kb_name, search_query, has_image, filters, **primary_kwargs
+            kb_id, search_query, has_image, filters, **primary_kwargs
         )
     if documents or search_query == question:
         return documents, search_query
@@ -197,7 +196,7 @@ async def retrieve_candidates_with_query_fallback(
         diagnostics.fallback_attempted = True
     try:
         fallback_documents = await retrieve_rerank_candidates(
-            kb_name, question, has_image, filters, **primary_kwargs
+            kb_id, question, has_image, filters, **primary_kwargs
         )
     except Exception as exc:
         logger.debug("Original-query retrieval fallback failed: %s", exc)

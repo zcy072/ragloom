@@ -102,7 +102,7 @@ class ModelProviderStore:
         return config.encrypted_api_key if config else ""
 
     @staticmethod
-    def _repair_active_provider(
+    def repair_active_provider(
         conn: sqlite3.Connection, preferred_provider: str | None = None
     ) -> None:
         """存在可用密钥时，确保恰好有一个已配置服务商处于激活状态。"""
@@ -171,14 +171,17 @@ class ModelProviderStore:
                     "VALUES (?, ?, ?, ?, 0)",
                     (provider, encrypted_api_key or "", base_url, default_model),
                 )
-            self._repair_active_provider(conn, provider)
+            self.repair_active_provider(conn, provider)
             row = conn.execute(
                 "SELECT is_active FROM models_config WHERE provider_name = ?", (provider,)
             ).fetchone()
         return bool(row and row[0])
 
-    def activate(self, provider: str) -> None:
-        """激活一个已经配置 API Key 的模型服务商。"""
+    def activate(self, provider: str, *, expected_api_key: str | None = None) -> None:
+        """激活一个已经配置 API Key 的模型服务商。
+
+        `expected_api_key` 是调用方刚校验过的密文；校验后 Key 被并发改动时拒绝激活。
+        """
         with application_db.connect(self._db_file()) as conn:
             row = conn.execute(
                 "SELECT api_key FROM models_config WHERE provider_name = ?", (provider,)
@@ -187,6 +190,8 @@ class ModelProviderStore:
                 raise KeyError(provider)
             if not row[0]:
                 raise ValueError("请先保存该模型的 API Key")
+            if expected_api_key is not None and row[0] != expected_api_key:
+                raise ValueError("模型 API Key 刚被修改，请重新检查后再切换")
             conn.execute("UPDATE models_config SET is_active = 0")
             conn.execute(
                 "UPDATE models_config SET is_active = 1 WHERE provider_name = ?",

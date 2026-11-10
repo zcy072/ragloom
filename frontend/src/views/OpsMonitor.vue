@@ -76,7 +76,10 @@
             <option value="">全部状态</option>
             <option v-for="status in statusOptions" :key="status.value" :value="status.value">{{ status.label }}</option>
           </select>
-          <input v-model.trim="filters.kb" aria-label="知识库过滤" placeholder="知识库名称" maxlength="80" class="h-8 w-32 rounded-md border border-gray-200 px-2" @change="applyFilters" />
+          <select v-model="filters.kbId" aria-label="知识库过滤" class="h-8 max-w-40 rounded-md border border-gray-200 bg-white px-2" @change="applyFilters">
+            <option value="">全部知识库</option>
+            <option v-for="kb in knowledgeBases" :key="kb.kb_id" :value="kb.kb_id">{{ kb.name }}</option>
+          </select>
           <select v-model="filters.slowMs" aria-label="慢请求过滤" class="h-8 rounded-md border border-gray-200 bg-white px-2" @change="applyFilters">
             <option value="">不限耗时</option>
             <option value="3000">总耗时 ≥ 3 秒</option>
@@ -211,7 +214,8 @@ const dependencies = ref([]);
 const overview = ref({ total: 0, truncated: false, status_counts: {}, error_rate: 0, latency: {}, daily: [] });
 const runs = ref({ items: [], total: 0 });
 const runsLoading = ref(false);
-const filters = reactive({ status: '', kb: '', slowMs: '', feedback: '' });
+const filters = reactive({ status: '', kbId: '', slowMs: '', feedback: '' });
+const knowledgeBases = ref([]);
 const traceView = reactive({ open: false, data: null });
 const page = ref(1);
 const pageSize = ref(20);
@@ -274,13 +278,16 @@ const loadRuns = () => guarded('问答记录', async () => {
       offset: String((page.value - 1) * pageSize.value)
     });
     if (filters.status) params.set('status', filters.status);
-    if (filters.kb) params.set('kb', filters.kb);
+    if (filters.kbId) params.set('kb_id', filters.kbId);
     if (filters.slowMs) params.set('slow_ms', filters.slowMs);
     if (filters.feedback) params.set('feedback', filters.feedback);
     runs.value = await apiGet(`/api/ops/chat-runs?${params}`);
   } finally {
     runsLoading.value = false;
   }
+});
+const loadKnowledgeBases = () => guarded('知识库列表', async () => {
+  knowledgeBases.value = await apiGet('/api/kbs');
 });
 const loadJobs = () => guarded('索引任务', async () => {
   jobs.value = await apiGet('/api/ops/index-jobs?status=failed&limit=10');
@@ -339,7 +346,7 @@ const changePageSize = size => {
   page.value = 1;
   loadRuns();
 };
-const refreshAll = () => Promise.all([loadDependencies(), loadOverview(), loadRuns(), loadJobs(), loadLogs()]);
+const refreshAll = () => Promise.all([loadDependencies(), loadKnowledgeBases(), loadOverview(), loadRuns(), loadJobs(), loadLogs()]);
 
 onMounted(refreshAll);
 </script>

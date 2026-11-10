@@ -5,17 +5,6 @@ from typing import TypedDict
 from services.identity.pagination import Page
 
 
-class AccessTokenPayload(TypedDict):
-    """Validated claims carried by an authenticated access token."""
-
-    v: int
-    aid: int
-    sub: str
-    iat: int
-    exp: int
-    cred: str
-
-
 class AuthenticatedAccount(TypedDict):
     id: int
     name: str
@@ -25,7 +14,8 @@ class AuthenticatedAccount(TypedDict):
     password: str
     username: str
     role: str
-    knowledge_base_permissions: list[str]
+    all_knowledge_bases: bool
+    knowledge_base_ids: list[str]
     menu_permissions: list[str]
 
 
@@ -51,7 +41,8 @@ class RoleRecord(TypedDict):
     name: str
     description: str
     menu_permissions: list[str]
-    knowledge_base_permissions: list[str]
+    all_knowledge_bases: bool
+    knowledge_base_ids: list[str]
 
 
 RolePage = Page[RoleRecord]

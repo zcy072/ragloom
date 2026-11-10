@@ -13,6 +13,7 @@ from services.chat.sources import CITATION_PATTERN
 from services.core import config as application_config
 from services.core.contracts import ModelConfig
 from services.core.llm_config import create_rewrite_llm
+from services.core.safe_errors import safe_error_summary
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +46,28 @@ _FOLLOW_UP_PATTERN = re.compile(
 )
 # 极短的片段（如“乙型号”“多久”）本身无法独立检索，视为可能的追问。
 _FOLLOW_UP_FRAGMENT_LENGTH = 6
+# 省略主语的短追问（“具体流程是什么”“需要哪些材料”）没有指代词，但离开上文无法检索。
+_SHORT_QUESTION_LENGTH = 15
+# 只描述提问维度、不指明对象的泛化词；短问题去掉它们后几乎不剩字，说明对象在上文里。
+_GENERIC_QUESTION_WORDS = re.compile(
+    r"具体|详细|一下|请问|需要|要求|要|有没有|有哪些|有什么|有|是否|能否|可以|可不可以|会不会|能不能"
+    r"|怎么|怎样|如何|多久|多长时间|多少钱?|几天|几次|什么时候|什么|哪些|哪个|哪里|为什么|谁"
+    r"|流程|步骤|手续|材料|资料|条件|标准|规定|要求|期限|时间|费用|金额|例外|情况|范围|对象"
+    r"|注意事项|区别|审批|申请|办理|提交|是|的|吗|呢|了|么|吧|啊|还"
+    r"|[\s，。？！?!、：:；;]"
+)
+_SUBJECTLESS_RESIDUE_CHARS = 1
 
 
 def _looks_like_follow_up(question: str) -> bool:
-    """根据指代词、承接语气和片段长度判断问题是否可能依赖上文。"""
+    """根据指代词、承接语气、片段长度和省略主语的短问句判断问题是否可能依赖上文。"""
     text = question.strip()
-    return len(text) <= _FOLLOW_UP_FRAGMENT_LENGTH or bool(_FOLLOW_UP_PATTERN.search(text))
+    if len(text) <= _FOLLOW_UP_FRAGMENT_LENGTH or _FOLLOW_UP_PATTERN.search(text):
+        return True
+    if len(text) > _SHORT_QUESTION_LENGTH:
+        return False
+    # 去掉泛化词后剩下的就是问题自带的对象；“如何报销差旅费”剩“报销差旅费”，不算追问。
+    return len(_GENERIC_QUESTION_WORDS.sub("", text)) <= _SUBJECTLESS_RESIDUE_CHARS
 
 
 def _should_rewrite_query(
@@ -106,6 +123,16 @@ def _rewrite_query_from_response(content: Any) -> RetrievalQueryPlan | None:
     )
 
 
+def recent_documents_text(recent_documents: tuple[str, ...] | list[str]) -> str:
+    """把最近引用过的文件名整理成提示里的一行；没有时返回空字符串。"""
+    names = [str(name).strip() for name in recent_documents if str(name).strip()]
+    if not names:
+        return ""
+    return "此前回答引用过的文件（只用于确认追问对象，不是事实来源）：" + "、".join(
+        f"《{name}》" for name in names
+    )
+
+
 def recent_dialogue_text(history: list[tuple[str, str]]) -> str:
     """将最近有效对话压缩成供改写与规划模型理解的文本，并去除引用编号。"""
     recent_history = [
@@ -124,12 +151,15 @@ async def build_retrieval_query_plan(
     history: list[tuple[str, str]],
     model_config: ModelConfig,
     conversation_summary: str = "",
+    *,
+    recent_documents: tuple[str, ...] = (),
 ) -> RetrievalQueryPlan:
     """仅改写追问；模型、超时或解析失败时始终保留用户原问题。"""
     if not _should_rewrite_query(question, history, conversation_summary):
         return original_query_plan(question)
 
     dialogue = recent_dialogue_text(history)
+    documents_line = recent_documents_text(recent_documents)
     messages = [
         SystemMessage(
             content="""你的任务：把企业知识库问答中的“当前问题”改写成一条脱离对话也能看懂的检索问题。你只改写，不回答，也不判断资料里有没有答案。
@@ -141,6 +171,7 @@ async def build_retrieval_query_plan(
 2. 当前问题依赖上文（“X 的呢”“那 Y 呢”“它呢”“这个怎么办”等）：找出最近一轮用户问题所询问的属性、动作、标准、条件、时间范围和比较维度，只替换用户明确改变的对象，其余全部继承。
 3. 最近一轮用户问题的意图优先；更早的对话和摘要只用于确认指代对象，不能改变当前话题。
 4. 助手的回答可以帮你确认指代对象和提问维度，但不是事实来源，不要把回答里的内容写进 query。
+5. 输入里可能列出此前回答引用过的文件名。当前问题省略了对象、且对话里的对象就是某份文件讨论的主题时，可以把文件名里的主题词写进 query（如“差旅费报销办法”里的“差旅费报销”）；不要罗列多个文件名，也不要因为有文件名就改写本已完整的问题。
 
 写 query 的要求：
 - 先用 inherited_focus 概括继承到的提问维度（短语，如“年假天数”），再把该维度明确写进 query。
@@ -163,7 +194,8 @@ async def build_retrieval_query_plan(
                 f"早期对话摘要（可能为空，只用于消解指代）：\n"
                 f"{conversation_summary.strip() or '（无）'}\n\n"
                 f"最近对话（按时间顺序）：\n{dialogue or '（无）'}\n\n"
-                f"当前问题：{question}"
+                + (f"{documents_line}\n\n" if documents_line else "")
+                + f"当前问题：{question}"
             )
         ),
     ]
@@ -178,7 +210,7 @@ async def build_retrieval_query_plan(
             return original_query_plan(question)
         return plan
     except Exception as exc:
-        logger.debug("Query rewrite fallback: %s", exc)
+        logger.debug("Query rewrite fallback: %s", safe_error_summary(exc))
         return original_query_plan(question)
 
 
@@ -245,5 +277,5 @@ async def build_query_variant(query: str, model_config: ModelConfig) -> str:
         )
         return _query_variant_from_response(response.content, query)
     except Exception as exc:
-        logger.debug("Query variant skipped: %s", exc)
+        logger.debug("Query variant skipped: %s", safe_error_summary(exc))
         return ""

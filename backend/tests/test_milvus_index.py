@@ -3,14 +3,18 @@
 import os
 import unittest
 import uuid
+from unittest.mock import patch
 
 from langchain_core.documents import Document
 
-from services.retrieval.chunk_index import build_filter
+from services.retrieval.chunk_index import PublishRolledBackError, build_filter
 from services.retrieval.milvus_index import MilvusChunkIndex, _clip
+from tests.support import fixture_document_id
 
 MILVUS_URI = os.getenv("MILVUS_URI", "")
+
 DIMENSION = 8
+
 
 
 def _vector(axis: int) -> list[float]:
@@ -77,22 +81,39 @@ class MilvusChunkIndexTest(unittest.TestCase):
 
     def test_filter_escapes_quotes_and_backslashes(self):
         source = 'a"b\\c.pdf'
-        self.index.publish_source(
-            self.kb_id, source, [_split("特殊文件名内容", source)], [_vector(0)]
+        self.index.publish_document(
+            self.kb_id,
+            fixture_document_id(self.kb_id, source),
+            [_split("特殊文件名内容", source)],
+            [_vector(0)],
         )
-        self.index.publish_source(
-            self.kb_id, "other.pdf", [_split("别的内容", "other.pdf")], [_vector(1)]
+        self.index.publish_document(
+            self.kb_id,
+            fixture_document_id(self.kb_id, "other.pdf"),
+            [_split("别的内容", "other.pdf")],
+            [_vector(1)],
         )
 
-        hits = self.index.search_dense(self.kb_id, _vector(0), None, [source], 5)
+        document_id = fixture_document_id(self.kb_id, source)
+        hits = self.index.search_dense(self.kb_id, _vector(0), None, [document_id], 5)
 
         self.assertEqual([doc.metadata["source"] for doc in hits], [source])
-        self.assertIn('"a\\"b\\\\c.pdf"', build_filter(self.kb_id, sources=[source]))
+        self.assertIn('"a\\"b\\\\c"', build_filter(self.kb_id, document_ids=['a"b\\c']))
 
     def test_republish_replaces_previous_generation(self):
         source = "制度.pdf"
-        self.index.publish_source(self.kb_id, source, [_split("旧版本报销规则", source)], [_vector(0)])
-        self.index.publish_source(self.kb_id, source, [_split("新版本差旅规则", source)], [_vector(0)])
+        self.index.publish_document(
+            self.kb_id,
+            fixture_document_id(self.kb_id, source),
+            [_split("旧版本报销规则", source)],
+            [_vector(0)],
+        )
+        self.index.publish_document(
+            self.kb_id,
+            fixture_document_id(self.kb_id, source),
+            [_split("新版本差旅规则", source)],
+            [_vector(0)],
+        )
 
         hits = self.index.search_dense(self.kb_id, _vector(0), None, None, 10)
 
@@ -101,14 +122,18 @@ class MilvusChunkIndexTest(unittest.TestCase):
     def test_republish_removes_every_old_row_beyond_one_query_batch(self):
         source = "大文件.pdf"
         old = [_split(f"旧第{i}段", source) for i in range(1200)]
-        self.index.publish_source(self.kb_id, source, old, [_vector(0)] * len(old))
+        self.index.publish_document(
+            self.kb_id, fixture_document_id(self.kb_id, source), old, [_vector(0)] * len(old)
+        )
         new = [_split(f"新第{i}段", source) for i in range(3)]
-        self.index.publish_source(self.kb_id, source, new, [_vector(0)] * len(new))
+        self.index.publish_document(
+            self.kb_id, fixture_document_id(self.kb_id, source), new, [_vector(0)] * len(new)
+        )
 
         client = self.index._get_client()
         rows = client.query(
             self.index._collection,
-            filter=build_filter(self.kb_id, source=source),
+            filter=build_filter(self.kb_id, document_id=fixture_document_id(self.kb_id, source)),
             output_fields=["content"],
             limit=2000,
         )
@@ -116,15 +141,54 @@ class MilvusChunkIndexTest(unittest.TestCase):
 
     def test_failed_publish_keeps_previous_version(self):
         source = "制度.pdf"
-        self.index.publish_source(self.kb_id, source, [_split("旧版本报销规则", source)], [_vector(0)])
+        self.index.publish_document(
+            self.kb_id,
+            fixture_document_id(self.kb_id, source),
+            [_split("旧版本报销规则", source)],
+            [_vector(0)],
+        )
 
         with self.assertRaises(ValueError):
-            self.index.publish_source(
-                self.kb_id, source, [_split("新", source), _split("版", source)], [_vector(0)]
+            self.index.publish_document(
+                self.kb_id,
+                fixture_document_id(self.kb_id, source),
+                [_split("新", source), _split("版", source)],
+                [_vector(0)],
             )
 
         hits = self.index.search_dense(self.kb_id, _vector(0), None, None, 10)
         self.assertEqual([doc.page_content for doc in hits], ["旧版本报销规则"])
+
+    def test_insert_failure_after_a_partial_write_rolls_back_to_the_previous_version(self):
+        source = "大文件.pdf"
+        document_id = fixture_document_id(self.kb_id, source)
+        self.index.publish_document(
+            self.kb_id, document_id, [_split("旧版本报销规则", source)], [_vector(0)]
+        )
+        client = self.index._get_client()
+        real_insert = client.insert
+        calls = []
+
+        def fail_second_batch(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError("insert failed")
+            return real_insert(*args, **kwargs)
+
+        new = [_split(f"新第{i}段", source) for i in range(600)]
+        with patch.object(client, "insert", side_effect=fail_second_batch):
+            with self.assertRaises(PublishRolledBackError):
+                self.index.publish_document(
+                    self.kb_id, document_id, new, [_vector(0)] * len(new)
+                )
+
+        rows = client.query(
+            self.index._collection,
+            filter=build_filter(self.kb_id, document_id=document_id),
+            output_fields=["content"],
+            limit=2000,
+        )
+        self.assertEqual([row["content"] for row in rows], ["旧版本报销规则"])
 
     def test_available_routes_and_neighbors(self):
         source = "手册.pdf"
@@ -134,25 +198,37 @@ class MilvusChunkIndexTest(unittest.TestCase):
             _split("第三段内容", source),
             _split("图片说明", source, route="visual"),
         ]
-        self.index.publish_source(
-            self.kb_id, source, splits, [_vector(index) for index in range(4)]
+        self.index.publish_document(
+            self.kb_id,
+            fixture_document_id(self.kb_id, source),
+            splits,
+            [_vector(index) for index in range(4)],
         )
 
-        self.assertEqual(self.index.available_routes(self.kb_id, [source]), {"fixed", "visual"})
-        self.assertEqual(self.index.available_routes(self.kb_id, ["不存在.pdf"]), set())
-        found = self.index.neighbors(self.kb_id, source, "fixed", 1, 2)
+        document_id = fixture_document_id(self.kb_id, source)
+        self.assertEqual(
+            self.index.available_routes(self.kb_id, [document_id]), {"fixed", "visual"}
+        )
+        missing = fixture_document_id(self.kb_id, "不存在.pdf")
+        self.assertEqual(self.index.available_routes(self.kb_id, [missing]), set())
+        found = self.index.neighbors(
+            self.kb_id, fixture_document_id(self.kb_id, source), "fixed", 1, 2
+        )
         self.assertEqual([doc.page_content for doc in found], ["第二段内容", "第三段内容"])
 
     def test_lexical_and_hybrid_find_chinese_and_model_numbers(self):
         source = "设备.pdf"
-        self.index.publish_source(
+        self.index.publish_document(
             self.kb_id,
-            source,
+            fixture_document_id(self.kb_id, source),
             [_split("设备 AB-123 每月保养一次", source), _split("设备 CD-456 每季度检修", source)],
             [_vector(0), _vector(1)],
         )
-        self.index.publish_source(
-            self.kb_id, "人事.pdf", [_split("年假申请需提前三天审批", "人事.pdf")], [_vector(2)]
+        self.index.publish_document(
+            self.kb_id,
+            fixture_document_id(self.kb_id, "人事.pdf"),
+            [_split("年假申请需提前三天审批", "人事.pdf")],
+            [_vector(2)],
         )
 
         lexical = self.index.search_lexical(self.kb_id, "AB-123", None, None, 3)
@@ -163,22 +239,24 @@ class MilvusChunkIndexTest(unittest.TestCase):
         self.assertEqual(chinese[0].metadata["source"], "人事.pdf")
         self.assertIn("CD-456", hybrid[0].page_content)
 
-    def test_reset_if_empty_rechecks_before_dropping_the_collection(self):
-        self.index.publish_source(
-            self.kb_id, "制度.pdf", [_split("审批规则", "制度.pdf")], [_vector(0)]
-        )
-        answers = iter([False, True])  # 第一次判断为空，拿到锁后已有新文档登记
-
-        self.assertFalse(self.index.reset_if_empty(lambda: next(answers)))
-        self.assertEqual(self.index.available_routes(self.kb_id, None), {"fixed"})
-
     def test_deletes_are_idempotent_and_scoped(self):
-        self.index.publish_source(self.kb_id, "甲.pdf", [_split("甲内容", "甲.pdf")], [_vector(0)])
-        self.index.publish_source(self.kb_id, "乙.pdf", [_split("乙内容", "乙.pdf")], [_vector(1)])
+        self.index.publish_document(
+            self.kb_id,
+            fixture_document_id(self.kb_id, "甲.pdf"),
+            [_split("甲内容", "甲.pdf")],
+            [_vector(0)],
+        )
+        self.index.publish_document(
+            self.kb_id,
+            fixture_document_id(self.kb_id, "乙.pdf"),
+            [_split("乙内容", "乙.pdf")],
+            [_vector(1)],
+        )
 
-        self.index.delete_source(self.kb_id, "甲.pdf")
-        self.index.delete_source(self.kb_id, "甲.pdf")
-        self.assertEqual(self.index.delete_stale_sources(self.kb_id, {"乙.pdf"}), 0)
+        self.index.delete_document(self.kb_id, fixture_document_id(self.kb_id, "甲.pdf"))
+        self.index.delete_document(self.kb_id, fixture_document_id(self.kb_id, "甲.pdf"))
+        kept = {fixture_document_id(self.kb_id, "乙.pdf")}
+        self.assertEqual(self.index.delete_stale_documents(self.kb_id, kept), 0)
         self.assertEqual(self.index.available_routes(self.kb_id, None), {"fixed"})
 
         self.index.delete_kb(self.kb_id)

@@ -20,7 +20,7 @@
               v-model="selectedKb"
               class="appearance-none bg-white border border-[#d8e4e4] text-[#385154] py-2 px-3 pr-8 rounded-md leading-tight focus:outline-none focus:border-[#68aaa7] text-sm"
             >
-              <option v-for="kb in kbs" :key="kb.name" :value="kb.name">{{ kb.name }}</option>
+              <option v-for="kb in kbs" :key="kb.kb_id" :value="kb.kb_id">{{ kb.name }}</option>
             </select>
             <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-gray-500">
               <ChevronDown class="h-4 w-4" />
@@ -89,12 +89,12 @@
                   <span>引用来源 ({{ visibleSources(msg).length }}个文件)</span>
                 </div>
                 <div class="space-y-2">
-                  <div v-for="(src, idx) in visibleSources(msg)" :key="`${src.kb_name || selectedKb}:${src.source}:${src.id || idx}`" @click="openPreview(src)" class="border border-[#dce7e7] rounded-md bg-[#fbfdfd] p-3 text-[13px] hover:border-[#8fc9c4] transition-colors cursor-pointer">
+                  <div v-for="(src, idx) in visibleSources(msg)" :key="`${src.kb_id}:${src.document_id || src.url}:${src.id || idx}`" @click="openPreview(src)" class="border border-[#dce7e7] rounded-md bg-[#fbfdfd] p-3 text-[13px] hover:border-[#8fc9c4] transition-colors cursor-pointer">
                     <div class="flex items-center justify-between mb-1">
                       <div class="flex min-w-0 items-center gap-2 text-blue-600 font-medium w-3/4 hover:underline">
                         <span class="truncate">[{{ sourceCitationLabel(src) }}] {{ src.source }}</span>
                         <span v-if="src.url" class="shrink-0 text-[10px] font-normal text-teal-700">网页</span>
-                        <span v-if="src.kb_name && src.kb_name !== selectedKb" class="shrink-0 text-[10px] font-normal text-teal-700">{{ src.kb_name }}</span>
+                        <span v-if="src.kb_id && src.kb_id !== selectedKb" class="shrink-0 text-[10px] font-normal text-teal-700">{{ kbDisplayName(src.kb_id, src.kb_name_snapshot) }}</span>
                       </div>
                       <div v-if="src.page" class="text-gray-400 text-[11px] whitespace-nowrap bg-gray-50 px-1.5 py-0.5 rounded">{{ src.page }}</div>
                     </div>
@@ -140,14 +140,14 @@
       :filename="previewDoc"
       :url="documentPreviewUrl"
       :evidence="previewEvidence"
-      :context-label="previewKbName && previewKbName !== selectedKb ? previewKbName : ''"
+      :context-label="previewKbId && previewKbId !== selectedKb ? kbDisplayName(previewKbId, previewKbSnapshot) : ''"
       @close="closePreview"
     />
   </div>
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { store } from '../store';
 import { ChevronDown, Link as LinkIcon, SlidersHorizontal, Copy, Download } from 'lucide-vue-next';
 import { sessionMarkdown, exportFilename } from '../chatExport';
@@ -171,7 +171,9 @@ const endRef = ref(null);
 const scrollRef = ref(null);
 
 const kbs = ref([]);
-const selectedKb = ref('通用知识库');
+const selectedKb = ref('');
+/** 知识库当前显示名称；已不可见的知识库退回到回答生成时保存的名称快照。 */
+const kbDisplayName = (kbId, snapshot = '') => kbs.value.find(kb => kb.kb_id === kbId)?.name || snapshot || '';
 const models = ref([]);
 const selectedModel = ref('');
 const modelConfigured = ref(true);
@@ -179,9 +181,9 @@ const modelConfigured = ref(true);
 const webSearchAllowed = computed(() => Boolean(store.user?.menuPermissions?.includes('联网搜索')));
 const webSearch = ref(false);
 const showRetrievalFilters = ref(false);
-const filterOptions = ref({ sources: [], document_types: [], tags: [] });
+const filterOptions = ref({ documents: [], document_types: [], tags: [] });
 const retrievalFilters = ref({
-  source: '',
+  document_id: '',
   document_type: '',
   tag: '',
   effective_date_from: '',
@@ -189,14 +191,16 @@ const retrievalFilters = ref({
 });
 
 const previewDoc = ref(null);
+const previewDocumentId = ref('');
 const previewEvidence = ref(null);
 const previewPage = ref(null);
-const previewKbName = ref('');
+const previewKbId = ref('');
+const previewKbSnapshot = ref('');
 const hasRetrievalFilters = computed(() => Object.values(retrievalFilters.value).some(Boolean));
 const documentPreviewUrl = computed(() => {
   if (!previewDoc.value) return '';
-  const sourceDept = previewKbName.value || selectedKb.value;
-  const baseUrl = `/api/documents/${encodeURIComponent(sourceDept)}/${encodeURIComponent(previewDoc.value)}?preview=true`;
+  const sourceDept = previewKbId.value;
+  const baseUrl = `/api/documents/${encodeURIComponent(sourceDept)}/${encodeURIComponent(previewDocumentId.value)}?preview=true`;
   if (!/\.pdf$/i.test(previewDoc.value) || !previewPage.value) return baseUrl;
   return `${baseUrl}#page=${previewPage.value}`;
 });
@@ -221,7 +225,7 @@ const scrollToBottom = async (force = false) => {
 /** 清空所有文档元数据检索条件。 */
 const resetRetrievalFilters = () => {
   retrievalFilters.value = {
-    source: '',
+    document_id: '',
     document_type: '',
     tag: '',
     effective_date_from: '',
@@ -238,18 +242,18 @@ const loadFilterOptions = async () => {
     const data = await apiGet(`/api/kbs/${encodeURIComponent(selectedKb.value)}/document_filters`);
     if (requestVersion !== filterOptionsRequestVersion) return;
     filterOptions.value = {
-      sources: data.sources || [],
+      documents: data.documents || [],
       document_types: data.document_types || [],
       tags: data.tags || []
     };
   } catch {
     if (requestVersion !== filterOptionsRequestVersion) return;
-    filterOptions.value = { sources: [], document_types: [], tags: [] };
+    filterOptions.value = { documents: [], document_types: [], tags: [] };
   }
 };
 /** 只把用户实际填写的检索条件转换为请求参数。 */
 const retrievalFilterPayload = () => ({
-  ...(retrievalFilters.value.source ? { source: retrievalFilters.value.source } : {}),
+  ...(retrievalFilters.value.document_id ? { document_ids: [retrievalFilters.value.document_id] } : {}),
   ...(retrievalFilters.value.document_type ? { document_type: retrievalFilters.value.document_type } : {}),
   ...(retrievalFilters.value.tag ? { tags: [retrievalFilters.value.tag] } : {}),
   ...(retrievalFilters.value.effective_date_from ? { effective_date_from: retrievalFilters.value.effective_date_from } : {}),
@@ -319,7 +323,7 @@ const downloadSession = () => {
   const title = session?.title || '新会话';
   let url;
   try {
-    const content = sessionMarkdown(messages.value, title, session?.kb_name || selectedKb.value);
+    const content = sessionMarkdown(messages.value, title, session?.kb_name || kbDisplayName(selectedKb.value));
     url = URL.createObjectURL(new Blob([content], { type: 'text/markdown;charset=utf-8' }));
     const link = document.createElement('a');
     link.href = url;
@@ -346,57 +350,76 @@ watch(loadingSession, (isLoading) => {
   if (!isLoading) scrollToBottom(true);
 });
 
+// 异步初始化在组件卸载后不能恢复旧会话或清除新页面的跳转目标。
+let disposed = false;
+onBeforeUnmount(() => {
+  disposed = true;
+  filterOptionsRequestVersion += 1;
+});
+
 onMounted(async () => {
   try {
     const data = await apiGet('/api/kbs');
+    if (disposed) return;
     const filtered = filterKnowledgeBases(data, store.user);
     kbs.value = filtered;
     
-    if (store.chatDefaultKb && filtered.find(k => k.name === store.chatDefaultKb)) {
+    if (store.chatDefaultKb && filtered.find(k => k.kb_id === store.chatDefaultKb)) {
       selectedKb.value = store.chatDefaultKb;
-    } else if (filtered.length > 0 && !filtered.find(k => k.name === selectedKb.value)) {
-      selectedKb.value = filtered[0].name;
+    } else if (filtered.length > 0 && !filtered.find(k => k.kb_id === selectedKb.value)) {
+      selectedKb.value = (filtered.find(k => k.system_key === 'common') || filtered[0]).kb_id;
     }
   } catch (e) {
     console.error("Failed to fetch KBs", e);
   }
 
+  if (disposed) return;
   await loadFilterOptions();
+  if (disposed) return;
     
   await loadSessions();
+  if (disposed) return;
   
   // If we navigated from KnowledgeBase, aggressively override active session
   if (store.chatDefaultKb) {
-    const latestForKb = sessions.value.find(s => s.kb_name === selectedKb.value);
+    const latestForKb = sessions.value.find(s => s.kb_id === selectedKb.value);
     if (latestForKb) {
       await loadSessionMessages(latestForKb.id);
+      if (disposed) return;
     } else {
       handleNewChat();
     }
+    if (disposed) return;
     store.chatDefaultKb = null; // Clear the flag after processing
   } else if (store.activeSessionId) {
     await loadSessionMessages(store.activeSessionId);
+    if (disposed) return;
   } else if (sessions.value.length > 0 && !newSessionPending.value) {
     // Auto-resume latest session if none is active (normal reload)
-    const latestForKb = sessions.value.find(s => s.kb_name === selectedKb.value);
+    const latestForKb = sessions.value.find(s => s.kb_id === selectedKb.value);
     if (latestForKb) {
       await loadSessionMessages(latestForKb.id);
+      if (disposed) return;
     } else {
       await loadSessionMessages(sessions.value[0].id);
+      if (disposed) return;
     }
   }
 
   try {
+    if (disposed) return;
     const data = await apiGet('/api/models');
+    if (disposed) return;
     models.value = data;
     const active = data.find(m => m.is_active);
     if (active) selectedModel.value = active.provider;
     syncModelConfigured();
   } catch {
+    if (disposed) return;
     models.value = [];
     syncModelConfigured();
   } finally {
-    initializing.value = false;
+    if (!disposed) initializing.value = false;
   }
 });
 /** 根据当前选中的模型同步“是否已配置密钥”状态。 */
@@ -412,11 +435,11 @@ watch(selectedKb, async (newKb) => {
   handleStop();
   resetRetrievalFilters();
   await loadFilterOptions();
-  if (!sessions.value.length) return;
+  if (disposed || !sessions.value.length) return;
   const currentSessionInfo = sessions.value.find(s => s.id === store.activeSessionId);
-  if (currentSessionInfo && currentSessionInfo.kb_name === newKb) return;
+  if (currentSessionInfo && currentSessionInfo.kb_id === newKb) return;
   
-  const latestSessionForKb = sessions.value.find(s => s.kb_name === newKb);
+  const latestSessionForKb = sessions.value.find(s => s.kb_id === newKb);
   if (latestSessionForKb) {
     await loadSessionMessages(latestSessionForKb.id);
   } else {
@@ -432,15 +455,15 @@ const citationIdsFromAnswer = (content) => {
 const sourceCitationIds = (source) => (Array.isArray(source?.citation_ids) ? source.citation_ids : []);
 /** 将来源编号整理为界面显示文本。 */
 const sourceCitationLabel = (source) => sourceCitationIds(source).join(', ');
-/** 筛选回答真正引用的来源，并按知识库和文件名合并展示；正文没有引用编号时不展示来源。 */
+/** 筛选回答真正引用的来源，并按知识库和文档 ID 合并展示；正文没有引用编号时不展示来源。 */
 const visibleSources = (message) => {
   const sources = Array.isArray(message?.sources) ? message.sources : [];
   const citedIds = citationIdsFromAnswer(message?.content);
   const selected = sources.filter(source => sourceCitationIds(source).some(id => citedIds.includes(id)));
   const groups = new Map();
 
-  selected.forEach((source, index) => {
-    const key = source.url ? `web::${source.url}` : `${source.kb_name || selectedKb.value}::${source.source || `source-${index}`}`;
+  selected.forEach(source => {
+    const key = source.url ? `web::${source.url}` : `${source.kb_id}::${source.document_id}`;
     const group = groups.get(key) || {
       ...source,
       citation_ids: [],
@@ -469,9 +492,15 @@ const openPreview = (src) => {
     window.open(src.url, '_blank', 'noopener,noreferrer');
     return;
   }
+  if (!src.kb_id || !src.document_id) {
+    toast.error('文档已删除或来源无效');
+    return;
+  }
+  previewDocumentId.value = src.document_id;
   previewEvidence.value = src;
   previewDoc.value = src.source;
-  previewKbName.value = src.kb_name || selectedKb.value;
+  previewKbId.value = src.kb_id;
+  previewKbSnapshot.value = src.kb_name_snapshot || '';
   const pageMatch = String(src.page || '').match(/第\s*(\d+)/);
   previewPage.value = Array.isArray(src.page_numbers)
     ? src.page_numbers.find(page => Number.isInteger(page) && page > 0) || null

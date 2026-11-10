@@ -14,20 +14,31 @@ from services.core.settings import get_settings
 from services.indexing.chunking import chunk_route, contextualized_chunk_text
 
 
-class ChunkIndex(Protocol):
-    """子块的写入、删除与检索。所有方法按 kb_id 隔离，sources 为 None 表示不限文件。"""
+class PublishRolledBackError(RuntimeError):
+    """发布失败且新版本已全部撤销：索引中仍只有该文件发布前的子块。
 
-    def publish_source(
+    其余发布异常不作此保证，索引中可能同时残留新旧两版的部分子块。
+    """
+
+
+class ChunkIndex(Protocol):
+    """子块的写入、删除与检索。所有方法按 kb_id 隔离，document_ids 为 None 表示不限文件。"""
+
+    def publish_document(
         self,
         kb_id: str,
-        source: str,
+        document_id: str,
         splits: list,
         vectors: list[list[float]],
     ) -> None:
-        """先写入一个文件的新版本，成功后再删除旧版本；失败时旧版本保持可用。"""
+        """先写入一个文件的新版本，成功后再删除旧版本。
+
+        写入新版本失败且已撤销时抛出 PublishRolledBackError，旧版本保持可用；
+        删除旧版本失败等其他异常不保证索引中只剩某一个版本。
+        """
         ...
 
-    def delete_source(self, kb_id: str, source: str) -> None:
+    def delete_document(self, kb_id: str, document_id: str) -> None:
         """删除一个文件的全部子块；幂等。"""
         ...
 
@@ -35,16 +46,12 @@ class ChunkIndex(Protocol):
         """删除一个知识库的全部子块；幂等。"""
         ...
 
-    def delete_stale_sources(self, kb_id: str, active_sources: set[str]) -> int:
-        """删除不属于 active_sources 的文件的子块，返回删除数量。"""
+    def delete_stale_documents(self, kb_id: str, active_document_ids: set[str]) -> int:
+        """删除不属于 active_document_ids 的文件的子块，返回删除数量。"""
         ...
 
     def ensure_collection(self) -> None:
         """启动时确认索引存储可用（Milvus 需等待就绪）；幂等。"""
-        ...
-
-    def reset_if_empty(self, has_documents: Callable[[], bool]) -> bool:
-        """系统中不再有任何文档时清空索引存储，返回是否执行了清空。"""
         ...
 
     def check_ready(self, timeout: float) -> str:
@@ -57,7 +64,7 @@ class ChunkIndex(Protocol):
         query: str,
         query_vector: list[float],
         route: str | None,
-        sources: Sequence[str] | None,
+        document_ids: Sequence[str] | None,
         k: int,
     ) -> list[LCDocument]:
         """稠密向量与 BM25 融合检索，由索引内部完成融合排序。"""
@@ -68,7 +75,7 @@ class ChunkIndex(Protocol):
         kb_id: str,
         query_vector: list[float],
         route: str | None,
-        sources: Sequence[str] | None,
+        document_ids: Sequence[str] | None,
         k: int,
     ) -> list[LCDocument]:
         """只做稠密向量检索。评测对照直接调用，混合检索在查询文本为空时也回退到它。"""
@@ -79,20 +86,29 @@ class ChunkIndex(Protocol):
         kb_id: str,
         query: str,
         route: str | None,
-        sources: Sequence[str] | None,
+        document_ids: Sequence[str] | None,
         k: int,
     ) -> list[LCDocument]:
         """只做 BM25 全文检索。"""
         ...
 
-    def available_routes(self, kb_id: str, sources: Sequence[str] | None) -> set[str]:
+    def available_routes(self, kb_id: str, document_ids: Sequence[str] | None) -> set[str]:
         """返回这些文件下实际存在的分块路线；索引不存在时返回空集合。"""
         ...
 
     def neighbors(
-        self, kb_id: str, source: str, route: str, lo: int, hi: int
+        self,
+        kb_id: str,
+        document_id: str,
+        route: str,
+        lo: int,
+        hi: int,
+        generation: str | None = None,
     ) -> list[LCDocument]:
-        """按 chunk_index 闭区间 [lo, hi] 取同一文件同一路线的相邻子块，按序返回。"""
+        """按 chunk_index 闭区间 [lo, hi] 取同一文件同一路线的相邻子块，按序返回。
+
+        generation 不为空时只返回这一发布代的子块。
+        """
         ...
 
 
@@ -104,30 +120,33 @@ def escape_filter_value(value: str) -> str:
 def build_filter(
     kb_id: str,
     *,
-    source: str | None = None,
-    sources: Sequence[str] | None = None,
+    document_id: str | None = None,
+    document_ids: Sequence[str] | None = None,
     route: str | None = None,
     chunk_index_range: tuple[int, int] | None = None,
+    generation: str | None = None,
 ) -> str:
-    """生成 Milvus 过滤表达式。文件名是用户输入，所有字符串值都必须经过转义。"""
+    """生成 Milvus 过滤表达式。所有字符串值都必须经过转义，不依赖调用方已校验格式。"""
     conditions = [f'kb_id == "{escape_filter_value(kb_id)}"']
-    if source is not None:
-        conditions.append(f'source == "{escape_filter_value(source)}"')
-    if sources is not None:
-        quoted = ", ".join(f'"{escape_filter_value(item)}"' for item in sources)
-        conditions.append(f"source in [{quoted}]")
+    if document_id is not None:
+        conditions.append(f'document_id == "{escape_filter_value(document_id)}"')
+    if document_ids is not None:
+        quoted = ", ".join(f'"{escape_filter_value(item)}"' for item in document_ids)
+        conditions.append(f"document_id in [{quoted}]")
     if route:
         conditions.append(f'chunk_route == "{escape_filter_value(route)}"')
     if chunk_index_range is not None:
         lo, hi = int(chunk_index_range[0]), int(chunk_index_range[1])
         conditions.append(f"chunk_index >= {lo} and chunk_index <= {hi}")
+    if generation:
+        conditions.append(f'generation == "{escape_filter_value(generation)}"')
     return " and ".join(conditions)
 
 
-def record_id(kb_id: str, source: str, position: int, split, generation: str) -> str:
+def record_id(kb_id: str, document_id: str, position: int, split, generation: str) -> str:
     """生成包含发布代际的稳定记录 ID。"""
     value = "\x1f".join(
-        (kb_id, source, chunk_route(split), str(position), split.page_content, generation)
+        (kb_id, document_id, chunk_route(split), str(position), split.page_content, generation)
     )
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 

@@ -51,17 +51,39 @@ class CommonKnowledgeBaseInvalidationTest(unittest.TestCase):
 
         from services.retrieval import retriever, source_state
 
-        common = source_state.COMMON_KNOWLEDGE_BASE
+        common = "common-kb-id"
         cache = RetrieverCache[str](8)
-        with patch.object(retriever, "_retriever_cache", cache):
-            retriever.cache_retriever("技术部", "dept", include_common=True)
-            retriever.cache_retriever(common, "common")
-            retriever.drop_cached_retriever("技术部")
-            self.assertIsNone(retriever.get_cached_retriever("技术部", include_common=True))
+        with patch.object(retriever, "_retriever_cache", cache), patch.object(
+            source_state, "common_kb_id", return_value=common
+        ):
+            retriever.cache_retriever("dept-kb-id", "dept", include_common=True, version=retriever.retriever_cache_version())
+            retriever.cache_retriever(common, "common", version=retriever.retriever_cache_version())
+            retriever.drop_cached_retriever("dept-kb-id")
+            self.assertIsNone(retriever.get_cached_retriever("dept-kb-id", include_common=True))
             self.assertEqual(retriever.get_cached_retriever(common), "common")
 
-            retriever.cache_retriever("技术部", "dept", include_common=True)
+            retriever.cache_retriever("dept-kb-id", "dept", include_common=True, version=retriever.retriever_cache_version())
             retriever.drop_cached_retriever(common)
             # 部门库的检索图内含通用知识库的路线计划，也必须失效。
-            self.assertIsNone(retriever.get_cached_retriever("技术部", include_common=True))
+            self.assertIsNone(retriever.get_cached_retriever("dept-kb-id", include_common=True))
             self.assertIsNone(retriever.get_cached_retriever(common))
+
+    def test_retriever_built_across_a_publish_is_not_cached(self):
+        from unittest.mock import patch
+
+        from services.retrieval import retriever, source_state
+
+        cache = RetrieverCache[str](8)
+        with patch.object(retriever, "_retriever_cache", cache), patch.object(
+            source_state, "common_kb_id", return_value="common-kb-id"
+        ):
+            version = retriever.retriever_cache_version()
+            # 构建检索图期间有文档发布，构建结果可能早于发布，不能写入缓存。
+            retriever.drop_cached_retriever("dept-kb-id")
+            retriever.cache_retriever("dept-kb-id", "stale", version=version)
+            self.assertIsNone(retriever.get_cached_retriever("dept-kb-id"))
+
+            retriever.cache_retriever(
+                "dept-kb-id", "fresh", version=retriever.retriever_cache_version()
+            )
+            self.assertEqual(retriever.get_cached_retriever("dept-kb-id"), "fresh")

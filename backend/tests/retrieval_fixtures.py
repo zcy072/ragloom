@@ -3,38 +3,59 @@
 import sqlite3
 
 import app_storage
-from services.core import config as application_config
 from services.retrieval.chunk_index import get_chunk_index
-from tests.support import add_knowledge_bases
+from tests.support import add_knowledge_bases, kb_id_by_name
 
 DEFAULT_VECTOR = [1.0, 0.0]
 
 
-def create_knowledge_base(kb_name: str) -> str:
-    """初始化数据库（幂等）并创建知识库，返回其稳定 kb_id。"""
+def create_knowledge_base(name: str) -> str:
+    """初始化数据库（幂等）并创建知识库，返回其稳定 kb_id。名称重复时返回已有的那个。"""
     app_storage.initialize_database()
-    if not app_storage.knowledge_bases.exists(kb_name):
-        add_knowledge_bases(kb_name)
-    kb_id = app_storage.knowledge_bases.kb_id_for(kb_name)
-    assert kb_id
+    try:
+        return kb_id_by_name(name)
+    except AssertionError:
+        return add_knowledge_bases(name)[0]
+
+
+def common_kb_id() -> str:
+    """返回通用知识库的 kb_id；它由 system_key 标识，写入默认数据时创建。"""
+    app_storage.initialize_database()
+    app_storage.bootstrap_defaults()
+    kb_id = app_storage.knowledge_bases.common_kb_id()
+    assert kb_id is not None
     return kb_id
 
 
-def mark_ready(kb_name: str, source: str) -> None:
-    """为文件写入一条状态为 ready 的文档记录，使其进入检索白名单。"""
-    with sqlite3.connect(app_storage.DB_FILE) as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO documents "
-            "(kb_name, filename, path, size, uploaded_at, status) "
-            "VALUES (?, ?, ?, ?, ?, 'ready')",
-            (kb_name, source, f"/tmp/{source}", 1, application_config.db_now()),
+def _ensure_document(kb_id: str, document_id: str, filename: str = "fixture.pdf") -> None:
+    if not app_storage.documents.document_exists(kb_id, document_id):
+        app_storage.documents.create_document_with_job(
+            kb_id,
+            document_id,
+            filename,
+            size=1,
+            parser_mode="native_text",
+            metadata={},
         )
 
 
-def publish(kb_name: str, source: str, splits: list, vectors: list | None = None) -> str:
-    """把分块写入当前注入的 ChunkIndex，返回 kb_id；默认所有分块使用同一向量。"""
-    kb_id = create_knowledge_base(kb_name)
-    get_chunk_index().publish_source(
-        kb_id, source, splits, vectors or [list(DEFAULT_VECTOR) for _ in splits]
+def mark_ready(kb_id: str, document_id: str) -> None:
+    """将指定夹具 ID 标为 ready；其他夹具需显式持有不同 ID。"""
+    _ensure_document(kb_id, document_id)
+    with sqlite3.connect(app_storage.DB_FILE) as conn:
+        conn.execute(
+            "UPDATE documents SET status = 'ready' WHERE kb_id = ? AND document_id = ?",
+            (kb_id, document_id),
+        )
+
+
+def publish(kb_id: str, document_id: str, splits: list, vectors: list | None = None) -> str:
+    """显式传入文档 ID，文件名仅来自分块展示元数据。返回知识库 ID。"""
+    filename = str(splits[0].metadata.get("source", "fixture.pdf")) if splits else "fixture.pdf"
+    _ensure_document(kb_id, document_id, filename)
+    for split in splits:
+        split.metadata.update(kb_id=kb_id, document_id=document_id)
+    get_chunk_index().publish_document(
+        kb_id, document_id, splits, vectors or [list(DEFAULT_VECTOR) for _ in splits]
     )
     return kb_id

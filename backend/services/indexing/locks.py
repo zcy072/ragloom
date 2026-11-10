@@ -82,9 +82,9 @@ _DOCUMENT_LOCKS = _Registry(threading.Lock)
 
 
 @contextmanager
-def knowledge_base_lock(kb_name: str) -> Iterator[None]:
+def knowledge_base_lock(kb_id: str) -> Iterator[None]:
     """独占一个知识库，等待其中所有单文件操作结束，用于整库变更。"""
-    with _KNOWLEDGE_BASE_LOCKS.borrow(kb_name) as lock:
+    with _KNOWLEDGE_BASE_LOCKS.borrow(kb_id) as lock:
         lock.acquire_exclusive()
         try:
             yield
@@ -93,12 +93,12 @@ def knowledge_base_lock(kb_name: str) -> Iterator[None]:
 
 
 @contextmanager
-def document_lock(kb_name: str, filename: str) -> Iterator[None]:
+def document_lock(kb_id: str, document_id: str) -> Iterator[None]:
     """共享知识库并独占其中一个文件，用于单文件变更。"""
-    with _KNOWLEDGE_BASE_LOCKS.borrow(kb_name) as kb_lock:
+    with _KNOWLEDGE_BASE_LOCKS.borrow(kb_id) as kb_lock:
         kb_lock.acquire_shared()
         try:
-            with _DOCUMENT_LOCKS.borrow((kb_name, filename)) as file_lock, file_lock:
+            with _DOCUMENT_LOCKS.borrow((kb_id, document_id)) as file_lock, file_lock:
                 yield
         finally:
             kb_lock.release_shared()

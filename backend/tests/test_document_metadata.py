@@ -3,25 +3,25 @@ import unittest
 
 import app_storage
 from services.core import config as application_config
-from tests.support import IsolatedStorageTestCase, add_knowledge_bases
+from tests.support import IsolatedStorageTestCase, add_knowledge_bases, fixture_document_id
 
 
 class DocumentMetadataTest(IsolatedStorageTestCase):
     def setUp(self):
         super().setUp()
         app_storage.initialize_database()
-        add_knowledge_bases("研发部")
+        self.kb_id = add_knowledge_bases("研发部")[0]
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             for filename in ("考勤制度.pdf", "费用报告.pdf"):
                 conn.execute(
                     """
-                    INSERT INTO documents (kb_name, filename, path, size, uploaded_at, status)
+                    INSERT INTO documents (document_id, kb_id, filename, size, uploaded_at, status)
                     VALUES (?, ?, ?, ?, ?, 'ready')
                     """,
                     (
-                        "研发部",
+                        fixture_document_id(self.kb_id, filename),
+                        self.kb_id,
                         filename,
-                        f"/tmp/{filename}",
                         1,
                         application_config.db_now(),
                     ),
@@ -29,8 +29,8 @@ class DocumentMetadataTest(IsolatedStorageTestCase):
 
     def test_metadata_is_returned_and_filters_source_files(self):
         app_storage.documents.update_metadata(
-            "研发部",
-            "考勤制度.pdf",
+            self.kb_id,
+            fixture_document_id(self.kb_id, "考勤制度.pdf"),
             {
                 "document_type": "制度",
                 "tags": ["人事", "2026"],
@@ -38,8 +38,8 @@ class DocumentMetadataTest(IsolatedStorageTestCase):
             },
         )
         app_storage.documents.update_metadata(
-            "研发部",
-            "费用报告.pdf",
+            self.kb_id,
+            fixture_document_id(self.kb_id, "费用报告.pdf"),
             {
                 "document_type": "报告",
                 "tags": ["财务"],
@@ -47,42 +47,44 @@ class DocumentMetadataTest(IsolatedStorageTestCase):
             },
         )
 
-        documents = app_storage.documents.list_documents("研发部")
+        documents = app_storage.documents.list_documents(self.kb_id)
         policy = next(document for document in documents if document["filename"] == "考勤制度.pdf")
         self.assertEqual(policy["tags"], ["人事", "2026"])
 
-        sources = app_storage.documents.filtered_sources(
-            "研发部",
+        sources = app_storage.documents.filtered_document_ids(
+            self.kb_id,
             {
                 "document_type": "制度",
                 "tags": ["人事"],
                 "effective_date_from": "2026-01-01",
             },
         )
-        self.assertEqual(sources, ["考勤制度.pdf"])
-        self.assertEqual(app_storage.documents.filtered_sources("研发部", None), None)
+        self.assertEqual(sources, [fixture_document_id(self.kb_id, "考勤制度.pdf")])
+        self.assertEqual(app_storage.documents.filtered_document_ids(self.kb_id, None), None)
 
-        options = app_storage.documents.filter_options("研发部")
+        options = app_storage.documents.filter_options(self.kb_id)
         self.assertCountEqual(options["document_types"], ["报告", "制度"])
         self.assertCountEqual(options["tags"], ["2026", "人事", "财务"])
 
     def test_query_rewrite_setting_defaults_to_enabled_and_can_be_changed(self):
         # per-KB 开关归 KnowledgeBaseSettings，不在 DocumentStore 上。
-        self.assertTrue(app_storage.knowledge_base_settings.query_rewrite_enabled("研发部"))
-        self.assertFalse(app_storage.knowledge_base_settings.set_query_rewrite_enabled("研发部", False))
-        self.assertFalse(app_storage.knowledge_base_settings.query_rewrite_enabled("研发部"))
+        self.assertTrue(app_storage.knowledge_base_settings.query_rewrite_enabled(self.kb_id))
+        self.assertFalse(
+            app_storage.knowledge_base_settings.set_query_rewrite_enabled(self.kb_id, False)
+        )
+        self.assertFalse(app_storage.knowledge_base_settings.query_rewrite_enabled(self.kb_id))
 
     def test_missing_chunk_values_are_mapped_to_named_defaults(self):
         defaults = application_config.default_chunk_config()
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             conn.execute(
                 "UPDATE knowledge_bases SET chunk_size = NULL, chunk_overlap = NULL "
-                "WHERE name = ?",
-                ("研发部",),
+                "WHERE kb_id = ?",
+                (self.kb_id,),
             )
 
         config = app_storage.knowledge_base_settings.chunk_config(
-            "研发部",
+            self.kb_id,
             default_size=defaults.chunk_size,
             default_overlap=defaults.chunk_overlap,
         )
@@ -92,10 +94,10 @@ class DocumentMetadataTest(IsolatedStorageTestCase):
 
     def test_zero_chunk_overlap_is_a_real_setting_not_a_missing_value(self):
         defaults = application_config.default_chunk_config()
-        app_storage.knowledge_base_settings.set_chunk_config("研发部", 600, 0)
+        app_storage.knowledge_base_settings.set_chunk_config(self.kb_id, 600, 0)
 
         config = app_storage.knowledge_base_settings.chunk_config(
-            "研发部",
+            self.kb_id,
             default_size=defaults.chunk_size,
             default_overlap=defaults.chunk_overlap,
         )
@@ -125,30 +127,35 @@ class DocumentMetadataTest(IsolatedStorageTestCase):
 
     def test_pdf_parser_mode_is_persisted_and_returned_with_document(self):
         self.assertEqual(
-            app_storage.documents.parser_modes("研发部")["考勤制度.pdf"], "native_text"
+            app_storage.documents.get_document(
+                self.kb_id, fixture_document_id(self.kb_id, "考勤制度.pdf")
+            )["parser_mode"],
+            "native_text",
         )
-        mode = app_storage.documents.update_parser_mode(
-            "研发部", "考勤制度.pdf", "paddle_ocr"
+        job_id = app_storage.documents.schedule_reindex(
+            self.kb_id, fixture_document_id(self.kb_id, "考勤制度.pdf"), parser_mode="paddle_ocr"
         )
 
-        documents = app_storage.documents.list_documents("研发部")
+        documents = app_storage.documents.list_documents(self.kb_id)
         document = next(item for item in documents if item["filename"] == "考勤制度.pdf")
 
-        self.assertEqual(mode, "paddle_ocr")
-        self.assertEqual(document["parser_mode"], "paddle_ocr")
+        self.assertTrue(job_id)
+        # 新解析方式登记在任务上，发布成功前文档仍记旧版本实际使用的解析方式。
+        self.assertEqual(document["parser_mode"], "native_text")
+        self.assertEqual(app_storage.index_jobs.requested_parser_mode(job_id), "paddle_ocr")
 
     def test_document_list_rows_have_fixed_fields_and_safe_defaults(self):
         document = next(
             item
-            for item in app_storage.documents.list_documents("研发部")
+            for item in app_storage.documents.list_documents(self.kb_id)
             if item["filename"] == "考勤制度.pdf"
         )
 
         self.assertEqual(
             set(document),
             {
+                "document_id",
                 "filename",
-                "path",
                 "size",
                 "uploaded_at",
                 "status",

@@ -23,7 +23,8 @@ def delete_user(
         db_file=database_file(),
         actor_account_id=principal.account_id,
         actor_menu_permissions=principal.menu_permissions,
-        actor_knowledge_base_permissions=principal.knowledge_base_permissions,
+        actor_all_knowledge_bases=principal.all_knowledge_bases,
+        actor_knowledge_base_ids=principal.knowledge_base_ids,
         user_id=user_id,
     )
     return {"status": "success"}
@@ -42,7 +43,8 @@ def update_user_role(
         db_file=database_file(),
         actor_account_id=principal.account_id,
         actor_menu_permissions=principal.menu_permissions,
-        actor_knowledge_base_permissions=principal.knowledge_base_permissions,
+        actor_all_knowledge_bases=principal.all_knowledge_bases,
+        actor_knowledge_base_ids=principal.knowledge_base_ids,
         user_id=user_id,
         role_id=data.role_id,
     )
@@ -62,7 +64,8 @@ def update_user_status(
         db_file=database_file(),
         actor_account_id=principal.account_id,
         actor_menu_permissions=principal.menu_permissions,
-        actor_knowledge_base_permissions=principal.knowledge_base_permissions,
+        actor_all_knowledge_bases=principal.all_knowledge_bases,
+        actor_knowledge_base_ids=principal.knowledge_base_ids,
         user_id=user_id,
         status=data.status,
     )

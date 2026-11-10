@@ -13,10 +13,11 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from services.chat.rewrite import recent_dialogue_text
+from services.chat.rewrite import recent_dialogue_text, recent_documents_text
 from services.core import config as application_config
 from services.core.contracts import ModelConfig
 from services.core.llm_config import create_planner_llm
+from services.core.safe_errors import safe_error_summary
 
 logger = logging.getLogger(__name__)
 
@@ -167,8 +168,11 @@ async def plan_retrieval(
     history: list[tuple[str, str]],
     model_config: ModelConfig,
     conversation_summary: str = "",
+    *,
+    recent_documents: tuple[str, ...] = (),
 ) -> RetrievalDecision | None:
     """让模型决定是否检索；返回 None 表示决策不可用，调用方应回退到强制检索。"""
+    documents_line = recent_documents_text(recent_documents)
     messages = [
         SystemMessage(content=_PLANNER_SYSTEM_PROMPT),
         HumanMessage(
@@ -176,7 +180,8 @@ async def plan_retrieval(
                 f"早期对话摘要（可能为空，只用于消解指代）：\n"
                 f"{conversation_summary.strip() or '（无）'}\n\n"
                 f"最近对话（按时间顺序）：\n{recent_dialogue_text(history) or '（无）'}\n\n"
-                f"当前问题：{question}"
+                + (f"{documents_line}\n\n" if documents_line else "")
+                + f"当前问题：{question}"
             )
         ),
     ]
@@ -191,6 +196,6 @@ async def plan_retrieval(
             timeout=application_config.CHAT_QUERY_MODEL_TIMEOUT_SECONDS,
         )
     except Exception as exc:
-        logger.debug("Retrieval planning unavailable: %s", exc)
+        logger.debug("Retrieval planning unavailable: %s", safe_error_summary(exc))
         return None
     return _decision_from_response(response, question)

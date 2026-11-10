@@ -15,9 +15,9 @@ class ChatMemoryTest(IsolatedStorageTestCase):
     def setUp(self):
         super().setUp()
         app_storage.initialize_database()
-        add_knowledge_bases("技术部")
+        self.tech_id = add_knowledge_bases("技术部")[0]
         self.session_id = chat_sessions.resolve_session(
-            None, SessionOwner(1, "alice"), "技术部"
+            None, SessionOwner(1, "alice"), self.tech_id
         ).session_id
 
     def _insert_messages(self, count: int) -> None:
@@ -133,6 +133,65 @@ class ChatMemoryTest(IsolatedStorageTestCase):
 
         self.assertEqual(memory.recent_history, (("user", "最新消息内容"),))
 
+    def test_long_assistant_answer_keeps_its_tail_in_recent_history(self):
+        limit = application_config.CHAT_MEMORY_RECENT_MESSAGE_MAX_CHARS
+        answer = "开头" + "中" * (limit * 2) + "第5点结尾"
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.executemany(
+                "INSERT INTO chat_messages (session_id, role, content, sources, created_at) "
+                "VALUES (?, ?, ?, '[]', ?)",
+                [
+                    (self.session_id, "user", "问" * (limit * 2), application_config.db_now()),
+                    (self.session_id, "assistant", answer, application_config.db_now()),
+                ],
+            )
+
+        memory = chat_sessions.load_conversation_memory(self.session_id, 12, 6000)
+
+        clipped_answer, clipped_question = memory.recent_history[0][1], memory.recent_history[1][1]
+        self.assertTrue(clipped_answer.startswith("开头"))
+        self.assertTrue(clipped_answer.endswith("第5点结尾"))
+        self.assertEqual(len(clipped_answer), limit)
+        self.assertEqual(clipped_question, "问" * limit)
+
+    def test_memory_lists_recently_cited_knowledge_base_files(self):
+        import json
+
+        def sources(*items):
+            return json.dumps(list(items), ensure_ascii=False)
+
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.executemany(
+                "INSERT INTO chat_messages (session_id, role, content, sources, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [
+                    (self.session_id, "user", "问1", "[]", application_config.db_now()),
+                    (
+                        self.session_id,
+                        "assistant",
+                        "答1",
+                        sources({"source": "旧制度.pdf", "kb_id": self.tech_id}),
+                        application_config.db_now(),
+                    ),
+                    (self.session_id, "user", "问2", "[]", application_config.db_now()),
+                    (
+                        self.session_id,
+                        "assistant",
+                        "答2",
+                        sources(
+                            {"source": "差旅办法.pdf", "kb_id": self.tech_id},
+                            {"source": "某网页", "url": "https://example.com"},
+                            {"source": "旧制度.pdf", "kb_id": self.tech_id},
+                        ),
+                        application_config.db_now(),
+                    ),
+                ],
+            )
+
+        memory = chat_sessions.load_conversation_memory(self.session_id, 12, 6000)
+
+        self.assertEqual(memory.recent_documents, ("差旅办法.pdf", "旧制度.pdf"))
+
     def test_unsummarized_backlog_temporarily_expands_recent_message_window(self):
         """摘要失败积压时仍应在字符预算内读取超过常规上限的原文。"""
         self._insert_messages(14)
@@ -192,7 +251,10 @@ class ChatMemoryTest(IsolatedStorageTestCase):
             )
 
         self.assertFalse(refreshed)
-        self.assertIn("摘要服务不可用", "\n".join(logs.output))
+        # 告警可见，但只记录异常类型，不写入上游返回的原文。
+        output = "\n".join(logs.output)
+        self.assertIn("RuntimeError", output)
+        self.assertNotIn("摘要服务不可用", output)
 
     def test_summary_cannot_recreate_memory_after_session_deletion(self):
         deleted_session_id = self.session_id

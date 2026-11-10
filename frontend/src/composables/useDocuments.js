@@ -9,7 +9,7 @@ const MAX_UPLOAD_FILENAME_BYTES = 200;
 const POLL_BASE_MS = 2000;
 const POLL_MAX_MS = 16000;
 /** 判断文档是否还在后端索引中；重建中的文档旧版本仍可检索，但同样需要轮询。 */
-const isProcessing = document => document.status === 'processing' || document.status === 'rebuilding';
+const isProcessing = document => ['processing', 'rebuilding', 'publishing'].includes(document.status);
 /** 返回知识库默认的分块长度和重叠长度。 */
 const defaultChunkConfig = () => ({ chunk_size: 800, chunk_overlap: 150 });
 // 上传时优先选择 MinerU；能力探测失败时回退到本地文本解析。
@@ -122,14 +122,14 @@ export function useDocuments({ onKnowledgeBasesChanged, onDocumentDeleted } = {}
    * 避免写操作之前发出的旧响应覆盖新数据。返回本次请求是否成功。
    */
   const fetchDocuments = async ({ poll = false } = {}) => {
-    const kbName = manageKb.value?.name;
-    if (!kbName) return true;
+    const kbId = manageKb.value?.kb_id;
+    if (!kbId) return true;
     if (poll && documentRequestInFlight) return true;
     const requestVersion = ++documentRequestVersion;
     documentRequestInFlight = true;
     try {
-      const data = await apiGet(`/api/documents/${encodeURIComponent(kbName)}`);
-      if (requestVersion === documentRequestVersion && manageKb.value?.name === kbName) {
+      const data = await apiGet(`/api/documents/${encodeURIComponent(kbId)}`);
+      if (requestVersion === documentRequestVersion && manageKb.value?.kb_id === kbId) {
         documents.value = data;
       }
       return true;
@@ -142,7 +142,10 @@ export function useDocuments({ onKnowledgeBasesChanged, onDocumentDeleted } = {}
   };
   /** 切换当前管理的知识库，并加载其分块与检索配置。 */
   const setManageKnowledgeBase = (knowledgeBase) => {
+    if (knowledgeBase?.state === 'deleting') return;
     manageKb.value = knowledgeBase;
+    editingMetadataDoc.value = null;
+    editingParserDoc.value = null;
     documentRequestVersion += 1;
     documentRequestInFlight = false;
     if (!knowledgeBase) {
@@ -152,9 +155,9 @@ export function useDocuments({ onKnowledgeBasesChanged, onDocumentDeleted } = {}
     }
 
     fetchDocuments();
-    apiGet(`/api/kbs/${encodeURIComponent(knowledgeBase.name)}/chunk_config`)
+    apiGet(`/api/kbs/${encodeURIComponent(knowledgeBase.kb_id)}/chunk_config`)
       .then(data => {
-        if (manageKb.value?.name !== knowledgeBase.name) return;
+        if (manageKb.value?.kb_id !== knowledgeBase.kb_id) return;
         chunkConfig.value = {
           chunk_size: data.chunk_size,
           chunk_overlap: data.chunk_overlap,
@@ -162,9 +165,9 @@ export function useDocuments({ onKnowledgeBasesChanged, onDocumentDeleted } = {}
         };
       })
       .catch(() => {});
-    apiGet(`/api/kbs/${encodeURIComponent(knowledgeBase.name)}/retrieval_config`)
+    apiGet(`/api/kbs/${encodeURIComponent(knowledgeBase.kb_id)}/retrieval_config`)
       .then(data => {
-        if (manageKb.value?.name === knowledgeBase.name) {
+        if (manageKb.value?.kb_id === knowledgeBase.kb_id) {
           retrievalConfig.value = { query_rewrite_enabled: Boolean(data.query_rewrite_enabled) };
         }
       })
@@ -215,7 +218,7 @@ export function useDocuments({ onKnowledgeBasesChanged, onDocumentDeleted } = {}
     const failures = [];
     let uploaded = 0;
     try {
-      const kbName = encodeURIComponent(manageKb.value.name);
+      const kbId = encodeURIComponent(manageKb.value.kb_id);
       const metadata = JSON.stringify(metadataPayload(uploadMetadata.value));
       for (const file of files) {
         const rejected = precheckUpload(file);
@@ -228,7 +231,7 @@ export function useDocuments({ onKnowledgeBasesChanged, onDocumentDeleted } = {}
         formData.append('metadata', metadata);
         formData.append('parser_mode', parserModeForFile(file.name));
         try {
-          await apiRequest(`/api/documents/${kbName}`, { method: 'POST', body: formData });
+          await apiRequest(`/api/documents/${kbId}`, { method: 'POST', body: formData });
           uploaded += 1;
         } catch (error) {
           failures.push(`${file.name}：${error.message || '上传失败'}`);
@@ -263,7 +266,7 @@ export function useDocuments({ onKnowledgeBasesChanged, onDocumentDeleted } = {}
     if (!manageKb.value) return;
     savingChunk.value = true;
     try {
-      await apiPut(`/api/kbs/${encodeURIComponent(manageKb.value.name)}/chunk_config`, {
+      await apiPut(`/api/kbs/${encodeURIComponent(manageKb.value.kb_id)}/chunk_config`, {
         chunk_size: Number(chunkConfig.value.chunk_size),
         chunk_overlap: Number(chunkConfig.value.chunk_overlap)
       });
@@ -282,7 +285,7 @@ export function useDocuments({ onKnowledgeBasesChanged, onDocumentDeleted } = {}
     if (!manageKb.value || rebuildingIndex.value) return;
     rebuildingIndex.value = true;
     try {
-      await apiPost(`/api/kbs/${encodeURIComponent(manageKb.value.name)}/rebuild`);
+      await apiPost(`/api/kbs/${encodeURIComponent(manageKb.value.kb_id)}/rebuild`);
       chunkConfig.value.index_needs_rebuild = false;
       await fetchDocuments();
       toast.success('索引重建已开始');
@@ -297,7 +300,7 @@ export function useDocuments({ onKnowledgeBasesChanged, onDocumentDeleted } = {}
     if (!manageKb.value) return;
     const enabled = retrievalConfig.value.query_rewrite_enabled;
     try {
-      await apiPut(`/api/kbs/${encodeURIComponent(manageKb.value.name)}/retrieval_config`, {
+      await apiPut(`/api/kbs/${encodeURIComponent(manageKb.value.kb_id)}/retrieval_config`, {
         query_rewrite_enabled: enabled
       });
     } catch (_) {
@@ -334,14 +337,16 @@ export function useDocuments({ onKnowledgeBasesChanged, onDocumentDeleted } = {}
   /** 保存由业务数据库维护的文档筛选元数据。 */
   const saveDocumentMetadata = async () => {
     if (!manageKb.value || !editingMetadataDoc.value || savingMetadata.value) return;
+    const kbId = manageKb.value.kb_id;
+    const documentId = editingMetadataDoc.value.document_id;
     savingMetadata.value = true;
     try {
       await apiPut(
-        `/api/documents/${encodeURIComponent(manageKb.value.name)}/${encodeURIComponent(editingMetadataDoc.value.filename)}/metadata`,
+        `/api/documents/${encodeURIComponent(kbId)}/${encodeURIComponent(documentId)}/metadata`,
         metadataPayload(editingMetadata.value)
       );
-      editingMetadataDoc.value = null;
-      await fetchDocuments();
+      if (editingMetadataDoc.value?.document_id === documentId && manageKb.value?.kb_id === kbId) editingMetadataDoc.value = null;
+      if (manageKb.value?.kb_id === kbId) await fetchDocuments();
       toast.success('文档元数据已保存');
     } catch (error) {
       toast.error(error.message || '文档元数据保存失败');
@@ -362,14 +367,16 @@ export function useDocuments({ onKnowledgeBasesChanged, onDocumentDeleted } = {}
   /** 保存新的解析方式，并触发后端重新解析和索引该文档。 */
   const saveDocumentParser = async () => {
     if (!manageKb.value || !editingParserDoc.value || savingParser.value) return;
+    const kbId = manageKb.value.kb_id;
+    const documentId = editingParserDoc.value.document_id;
     savingParser.value = true;
     try {
       await apiPut(
-        `/api/documents/${encodeURIComponent(manageKb.value.name)}/${encodeURIComponent(editingParserDoc.value.filename)}/parser`,
+        `/api/documents/${encodeURIComponent(kbId)}/${encodeURIComponent(documentId)}/parser`,
         { parser_mode: editingParserMode.value }
       );
-      editingParserDoc.value = null;
-      await fetchDocuments();
+      if (editingParserDoc.value?.document_id === documentId && manageKb.value?.kb_id === kbId) editingParserDoc.value = null;
+      if (manageKb.value?.kb_id === kbId) await fetchDocuments();
       toast.success('已提交重新解析任务');
     } catch (error) {
       toast.error(error.message || '重新解析失败');
@@ -378,30 +385,44 @@ export function useDocuments({ onKnowledgeBasesChanged, onDocumentDeleted } = {}
     }
   };
   /** 文档记录已删除后，索引清理在后台执行；失败时提醒用户，服务重启后会自动重试。 */
-  const reportIndexCleanupFailure = async (kbName, filename, jobId) => {
-    const job = await waitForIndexJob(kbName, jobId);
+  const reportIndexCleanupFailure = async (kbId, filename, jobId) => {
+    const job = await waitForIndexJob(kbId, jobId);
     if (isFailedIndexJob(job)) {
       toast.error(`文档「${filename}」已删除，但索引清理失败，重启服务后会自动重试`);
     }
   };
   /** 删除当前知识库中的文档，并同步刷新相关统计。 */
-  const deleteDocument = async (filename) => {
-    if (!manageKb.value || deletingDocumentId.value === filename) return false;
-    deletingDocumentId.value = filename;
+  const deleteDocument = async (documentId) => {
+    if (!manageKb.value || deletingDocumentId.value === documentId) return false;
+    deletingDocumentId.value = documentId;
     try {
-      const kbName = manageKb.value.name;
-      const result = await apiDelete(`/api/documents/${encodeURIComponent(kbName)}/${encodeURIComponent(filename)}`);
-      onDocumentDeleted?.(filename);
+      const kbId = manageKb.value.kb_id;
+      const filename = documents.value.find(doc => doc.document_id === documentId)?.filename || '文档';
+      const result = await apiDelete(`/api/documents/${encodeURIComponent(kbId)}/${encodeURIComponent(documentId)}`);
+      onDocumentDeleted?.(documentId);
       await fetchDocuments();
       await onKnowledgeBasesChanged?.();
       toast.success('删除成功');
-      if (result?.job_id) reportIndexCleanupFailure(kbName, filename, result.job_id);
+      if (result?.job_id) reportIndexCleanupFailure(kbId, filename, result.job_id);
       return true;
     } catch (_) {
       toast.error('删除失败');
       return false;
     } finally {
       deletingDocumentId.value = null;
+    }
+  };
+
+  /** 对已有文档重试索引，保留原文件和文档身份。 */
+  const reindexDocument = async documentId => {
+    if (!manageKb.value) return;
+    const kbId = manageKb.value.kb_id;
+    try {
+      await apiPost(`/api/documents/${encodeURIComponent(kbId)}/${encodeURIComponent(documentId)}/reindex`);
+      if (manageKb.value?.kb_id === kbId) await fetchDocuments();
+      toast.success('已提交重新索引任务');
+    } catch (error) {
+      toast.error(error.message || '重新索引失败');
     }
   };
 
@@ -446,6 +467,7 @@ export function useDocuments({ onKnowledgeBasesChanged, onDocumentDeleted } = {}
     startParserEdit,
     cancelParserEdit,
     saveDocumentParser,
-    deleteDocument
+    deleteDocument,
+    reindexDocument
   };
 }

@@ -18,7 +18,8 @@ class IndexJob(TypedDict):
     """Task fields required by the indexing worker dispatcher."""
 
     id: str
-    kb_name: str
+    kb_id: str
+    document_id: str | None
     filename: str | None
     operation: IndexJobOperation
     status: IndexJobStatus
@@ -28,6 +29,7 @@ class IndexJobSummary(TypedDict):
     """Public task history fields returned by the knowledge-base API."""
 
     id: str
+    document_id: str | None
     filename: str | None
     operation: IndexJobOperation
     status: IndexJobStatus
@@ -38,6 +40,10 @@ class IndexJobSummary(TypedDict):
 
 
 class CrossKnowledgeBaseJobSummary(IndexJobSummary):
-    """Task summary that also names its knowledge base, for the ops view."""
+    """Task summary that identifies its knowledge base, for the ops view.
 
+    `kb_name` is the current display name; `kb_id` is the identity.
+    """
+
+    kb_id: str
     kb_name: str

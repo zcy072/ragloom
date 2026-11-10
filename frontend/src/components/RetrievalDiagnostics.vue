@@ -16,7 +16,7 @@
     </div>
     <div v-if="diagnostics.context_sources?.length" class="mt-3">
       <div class="font-medium">送给模型的证据</div>
-      <div v-for="source in diagnostics.context_sources" :key="source.id">[来源 {{ source.id }}] {{ source.kb_name }} / {{ source.source }} {{ source.page }} {{ source.routes?.join(", ") }}</div>
+      <div v-for="source in diagnostics.context_sources" :key="source.id">[来源 {{ source.id }}] {{ source.kb_name_snapshot }} / {{ source.source }} {{ source.page }} {{ source.routes?.join(", ") }}</div>
     </div>
   </details>
 </template>

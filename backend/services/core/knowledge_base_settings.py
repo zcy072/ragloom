@@ -17,45 +17,48 @@ class KnowledgeBaseSettings:
     def __init__(
         self,
         db_file: Callable[[], str],
-        validate_kb_name: Callable[[str], str],
+        validate_kb_id: Callable[[str], str],
     ) -> None:
-        """保存延迟解析的数据库路径和名称校验依赖。"""
+        """保存延迟解析的数据库路径和 kb_id 校验依赖。"""
         self._db_file = db_file
-        self._validate_kb_name = validate_kb_name
+        self._validate_kb_id = validate_kb_id
 
-    def query_rewrite_enabled(self, kb_name: str) -> bool:
+    def query_rewrite_enabled(self, kb_id: str) -> bool:
         """返回指定知识库是否启用追问查询改写。"""
-        kb_name = self._validate_kb_name(kb_name)
+        kb_id = self._validate_kb_id(kb_id)
         with application_db.connect(self._db_file()) as conn:
             row = conn.execute(
-                "SELECT query_rewrite_enabled FROM knowledge_bases WHERE name = ?",
-                (kb_name,),
+                "SELECT query_rewrite_enabled FROM knowledge_bases "
+                "WHERE kb_id = ? AND state = 'active'",
+                (kb_id,),
             ).fetchone()
         if not row:
             raise ValueError("知识库不存在")
         return bool(row[0])
 
-    def set_query_rewrite_enabled(self, kb_name: str, enabled: bool) -> bool:
+    def set_query_rewrite_enabled(self, kb_id: str, enabled: bool) -> bool:
         """持久化指定知识库的查询改写开关。"""
-        kb_name = self._validate_kb_name(kb_name)
+        kb_id = self._validate_kb_id(kb_id)
         with application_db.connect(self._db_file()) as conn:
             cursor = conn.execute(
-                "UPDATE knowledge_bases SET query_rewrite_enabled = ? WHERE name = ?",
-                (1 if enabled else 0, kb_name),
+                "UPDATE knowledge_bases SET query_rewrite_enabled = ? "
+                "WHERE kb_id = ? AND state = 'active'",
+                (1 if enabled else 0, kb_id),
             )
         if cursor.rowcount != 1:
             raise ValueError("知识库不存在")
         return bool(enabled)
 
     def chunk_config(
-        self, kb_name: str, *, default_size: int, default_overlap: int
+        self, kb_id: str, *, default_size: int, default_overlap: int
     ) -> KnowledgeBaseConfig:
         """返回指定知识库当前生效的文档分块配置。"""
-        kb_name = self._validate_kb_name(kb_name)
+        kb_id = self._validate_kb_id(kb_id)
         with application_db.connect(self._db_file()) as conn:
             row = conn.execute(
-                "SELECT chunk_size, chunk_overlap FROM knowledge_bases WHERE name = ?",
-                (kb_name,),
+                "SELECT chunk_size, chunk_overlap FROM knowledge_bases "
+                "WHERE kb_id = ? AND state = 'active'",
+                (kb_id,),
             ).fetchone()
         if not row:
             raise ValueError("知识库不存在")
@@ -65,13 +68,14 @@ class KnowledgeBaseSettings:
             cast(int, row[1]) if row[1] is not None else default_overlap,
         )
 
-    def set_chunk_config(self, kb_name: str, chunk_size: int, chunk_overlap: int) -> None:
+    def set_chunk_config(self, kb_id: str, chunk_size: int, chunk_overlap: int) -> None:
         """保存指定知识库的文档分块设置。"""
-        kb_name = self._validate_kb_name(kb_name)
+        kb_id = self._validate_kb_id(kb_id)
         with application_db.connect(self._db_file()) as conn:
             cursor = conn.execute(
-                "UPDATE knowledge_bases SET chunk_size = ?, chunk_overlap = ? WHERE name = ?",
-                (chunk_size, chunk_overlap, kb_name),
+                "UPDATE knowledge_bases SET chunk_size = ?, chunk_overlap = ? "
+                "WHERE kb_id = ? AND state = 'active'",
+                (chunk_size, chunk_overlap, kb_id),
             )
         if cursor.rowcount != 1:
             raise ValueError("知识库不存在")

@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { prepareAuthenticatedPage } from './fixtures.js';
+import { DOCUMENT_ID, prepareAuthenticatedPage } from './fixtures.js';
 
 test('initialization blocks sending until history and models are ready', async ({ page }) => {
   await prepareAuthenticatedPage(page);
@@ -105,8 +105,8 @@ test('Markdown citations and session export preserve evidence', async ({ page })
   await prepareAuthenticatedPage(page);
   await page.route('**/api/chat/sessions/session-1', route => route.fulfill({
     json: [{ role: 'assistant', content: '**结论** [来源 2]\n\n| 项目 | 值 |\n| --- | --- |\n| A | B |', sources: [{
-      id: 2, citation_ids: [2], source: '制度.pdf', page: '第 8 页', content: '证据二',
-      evidence: [{ id: 2, source: '制度.pdf', kb_name: '通用知识库', page: '第 8 页', page_numbers: [8], content: '证据二' }]
+      id: 2, citation_ids: [2], document_id: DOCUMENT_ID, kb_id: '11111111-1111-4111-8111-111111111111', source: '制度.pdf', page: '第 8 页', content: '证据二',
+      evidence: [{ id: 2, document_id: DOCUMENT_ID, source: '制度.pdf', kb_id: '11111111-1111-4111-8111-111111111111', kb_name_snapshot: '通用知识库', page: '第 8 页', page_numbers: [8], content: '证据二' }]
     }] }]
   }));
   await page.reload();

@@ -134,7 +134,7 @@ export function useChatStream({
     try {
       const payload = {
         question: questionText,
-        kb_name: selectedKb.value,
+        kb_id: selectedKb.value,
         ...(chatStore.activeSessionId ? { session_id: chatStore.activeSessionId } : {}),
         ...(newSessionPending.value ? { new_session: true } : {}),
         ...(imageBase64 ? { image_base64: imageBase64, image_mime: imageMime } : {}),
@@ -153,10 +153,11 @@ export function useChatStream({
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
         if (!isCurrent()) return;
-        const defaultMessage = response.status === 412
+        const notConfigured = errorData.code === 'model_not_configured';
+        const defaultMessage = notConfigured
           ? '尚未配置大模型 API Key，请管理员前往「模型管理」页面配置后再使用。'
           : '请求失败，请稍后重试。';
-        if (response.status === 412) modelConfigured.value = false;
+        if (notConfigured) modelConfigured.value = false;
         // FastAPI 校验失败时 detail 是错误对象数组，不能直接展示。
         const detail = typeof errorData.detail === 'string' && errorData.detail
           ? errorData.detail
@@ -284,7 +285,7 @@ export function useChatStream({
         return;
       }
       if (error.name === 'AbortError' || !isCurrent()) return;
-      // 401/412/422 等响应在前面按状态码处理；能走到这里的只剩网络层异常。
+      // 401/422/503 等响应在前面按状态码处理；能走到这里的只剩网络层异常。
       messages.value.push({ role: 'assistant', content: '⚠️ 请求失败，请稍后重试。' });
     } finally {
       if (abortController === controller) {

@@ -1,17 +1,17 @@
 import asyncio
-import base64
+import concurrent.futures
 import hashlib
-import hmac
-import json
 import sqlite3
 import threading
+import time
 import unittest
+from http.cookies import SimpleCookie
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
-from fastapi import HTTPException
-from fastapi.security import HTTPAuthorizationCredentials
+from fastapi import HTTPException, Response
+from starlette.requests import Request
 
 import api
 import app_storage
@@ -23,229 +23,258 @@ from services.core import config as application_config
 from services.core.errors import (
     AccessDeniedError,
     AuthenticationError,
+    ConflictError,
     InvalidRequestError,
+    InvalidStateError,
     RateLimitedError,
 )
+from services.identity import accounts, rate_limit, sessions
 from services.identity import auth as auth_service
-from services.identity import rate_limit
 from services.identity import use_cases as identity_use_cases
-from tests.support import (
-    IsolatedStorageTestCase,
-    add_knowledge_bases,
-    bearer_headers,
-)
+from tests.support import WRITE_HEADERS, IsolatedStorageTestCase, add_knowledge_bases, api_client
+
+ADMIN = application_config.INITIAL_ADMIN_USERNAME
 
 
-class AuthTest(IsolatedStorageTestCase):
+def fake_request(token: str | None = None, path: str = "/api/login") -> Request:
+    """构造一个可选携带会话 Cookie 的请求对象，供直接调用路由函数的测试使用。"""
+    headers = []
+    if token is not None:
+        headers.append((b"cookie", f"{sessions.COOKIE_NAME}={token}".encode("latin-1")))
+    return Request({"type": "http", "method": "POST", "path": path, "headers": headers})
+
+
+def cookie_token(response) -> str:
+    """从响应的 Set-Cookie 中取出会话令牌原值。"""
+    jar = SimpleCookie()
+    jar.load(response.headers["set-cookie"])
+    return jar[sessions.COOKIE_NAME].value
+
+
+def set_cookie_attributes(header: str) -> dict[str, str]:
+    """把一个 Set-Cookie 头拆成小写属性名到值的映射（无值属性映射为空串）。"""
+    attributes = {}
+    for part in header.split(";")[1:]:
+        name, _, value = part.strip().partition("=")
+        attributes[name.lower()] = value
+    return attributes
+
+
+def run(coroutine_factory):
+    return asyncio.run(coroutine_factory())
+
+
+class AuthTestBase(IsolatedStorageTestCase):
     def setUp(self):
         super().setUp()
         app_storage.initialize_database()
         app_storage.bootstrap_defaults()
 
-    def _login_admin(self):
-        return auth.login(
+    def _login(self, username=ADMIN, password=None, token=None):
+        """直接调用登录路由，返回 (响应 JSON, 新会话令牌)。"""
+        response = Response()
+        result = auth.login(
             schemas.LoginRequest(
-                username=application_config.INITIAL_ADMIN_USERNAME,
-                password=application_config.initial_admin_password(),
+                username=username,
+                password=password or application_config.initial_admin_password(),
+            ),
+            fake_request(token),
+            response,
+        )
+        return result, cookie_token(response)
+
+    def _login_admin(self):
+        return self._login()[0]
+
+    def _principal(self, username, password):
+        _result, token = self._login(username, password)
+        return auth_service.current_principal(fake_request(token, "/api/me"))
+
+    def _admin_principal(self):
+        return self._principal(ADMIN, application_config.initial_admin_password())
+
+    def _add_user(self, username, password="user-password", status="正常", role_id=None):
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            cursor = conn.execute(
+                "INSERT INTO accounts (username, name, password, status, role_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    username,
+                    f"{username} 姓名",
+                    application_config.hash_password(password),
+                    status,
+                    role_id,
+                    application_config.db_now(),
+                ),
             )
+            return int(cursor.lastrowid or 0)
+
+    def _session_rows(self, account_id=None):
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            if account_id is None:
+                return conn.execute("SELECT token_hash, account_id FROM auth_sessions").fetchall()
+            return conn.execute(
+                "SELECT token_hash, account_id FROM auth_sessions WHERE account_id = ?",
+                (account_id,),
+            ).fetchall()
+
+    def _stored_password(self, username=ADMIN):
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            return conn.execute(
+                "SELECT password FROM accounts WHERE username = ?", (username,)
+            ).fetchone()[0]
+
+    def _admin_id(self):
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            return conn.execute("SELECT id FROM accounts WHERE username = ?", (ADMIN,)).fetchone()[0]
+
+    @staticmethod
+    async def _http_login(client, username=ADMIN, password=None):
+        return await client.post(
+            "/api/login",
+            json={
+                "username": username,
+                "password": password or application_config.initial_admin_password(),
+            },
         )
 
+
+class AuthTest(AuthTestBase):
     def test_unified_login_resolves_super_administrator_permissions(self):
         result = self._login_admin()
-        principal = auth_service.current_principal(
-            HTTPAuthorizationCredentials(
-                scheme="Bearer", credentials=result["access_token"]
-            )
-        )
+        principal = self._admin_principal()
 
         self.assertEqual(result["status"], "success")
+        self.assertNotIn("access_token", result)
+        self.assertNotIn("token_type", result)
         self.assertEqual(principal.role, "超级管理员")
         self.assertIn("用户管理", principal.menu_permissions)
-        self.assertEqual(principal.knowledge_base_permissions, ("全公司",))
+        self.assertTrue(principal.all_knowledge_bases)
 
     def test_password_hash_is_salted_and_database_value_cannot_be_replayed(self):
         first = application_config.hash_password("same-password")
         second = application_config.hash_password("same-password")
         self.assertNotEqual(first, second)
+        self.assertTrue(first.startswith("$2b$12$"))
         self.assertTrue(application_config.verify_password("same-password", first))
 
-        with sqlite3.connect(app_storage.DB_FILE) as conn:
-            stored = conn.execute(
-                "SELECT password FROM accounts WHERE username = 'admin'"
-            ).fetchone()[0]
         with self.assertRaises(AuthenticationError) as error:
-            auth.login(schemas.LoginRequest(username="admin", password=stored))
+            self._login(ADMIN, self._stored_password())
         self.assertEqual(error.exception.code, "invalid_credentials")
 
-    def test_tampered_access_token_is_rejected(self):
-        token = self._login_admin()["access_token"]
-        tampered = f"{token[:-1]}{'a' if token[-1] != 'a' else 'b'}"
-        with self.assertRaises(HTTPException) as error:
-            auth_service.current_principal(
-                HTTPAuthorizationCredentials(scheme="Bearer", credentials=tampered)
-            )
-        self.assertEqual(error.exception.status_code, 401)
-
-    def test_signed_non_object_access_token_is_rejected(self):
-        body = base64.urlsafe_b64encode(b"[]").rstrip(b"=").decode("ascii")
-        signature = hmac.new(
-            auth_service._signing_key(), body.encode("ascii"), hashlib.sha256
-        ).digest()
-        encoded_signature = base64.urlsafe_b64encode(signature).rstrip(b"=").decode("ascii")
-        with self.assertRaises(HTTPException) as error:
-            auth_service.current_principal(
-                HTTPAuthorizationCredentials(
-                    scheme="Bearer", credentials=f"{body}.{encoded_signature}"
-                )
-            )
-        self.assertEqual(error.exception.status_code, 401)
-
-    def test_concurrent_first_requests_agree_on_one_generated_signing_key(self):
-        with sqlite3.connect(app_storage.DB_FILE) as conn:
-            conn.execute("DELETE FROM app_settings WHERE key = 'auth_signing_key'")
-        auth_service._signing_key_cache.clear()
-        start = threading.Barrier(8)
-        keys: list[bytes] = []
-        errors: list[Exception] = []
-
-        def first_request():
-            try:
-                start.wait()
-                keys.append(auth_service._signing_key())
-            except Exception as exc:  # 竞争失败（IntegrityError 等）会落在这里
-                errors.append(exc)
-
-        with patch.dict("os.environ", {"AUTH_SECRET_KEY": ""}):
-            threads = [threading.Thread(target=first_request) for _ in range(8)]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
-
-        self.assertEqual(errors, [])
-        self.assertEqual(len(set(keys)), 1)
-        with sqlite3.connect(app_storage.DB_FILE) as conn:
-            (stored,) = conn.execute(
-                "SELECT value FROM app_settings WHERE key = 'auth_signing_key'"
-            ).fetchone()
-        self.assertEqual(keys[0], stored.encode("utf-8"))
-
-    def test_new_access_tokens_read_the_current_ttl_setting(self):
-        with patch.object(
-            auth_service,
-            "get_settings",
-            return_value=SimpleNamespace(
-                auth_secret_key="test-signing-key", auth_token_ttl_seconds=120
-            ),
-        ):
-            token = auth_service.issue_access_token(1, "admin", "credential")
-
-        payload = json.loads(auth_service._urlsafe_decode(token.split(".", 1)[0]))
-        self.assertEqual(payload["exp"] - payload["iat"], 120)
-
     def test_http_endpoints_use_one_login_route(self):
-        async def exercise_api():
-            transport = httpx.ASGITransport(app=api.app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async def exercise():
+            async with api_client() as client:
                 missing = await client.post(
                     "/api/login/admin", json={"username": "admin", "password": "x"}
                 )
-                login = await client.post(
-                    "/api/login",
-                    json={
-                        "username": "admin",
-                        "password": application_config.initial_admin_password(),
-                    },
-                )
-                kbs = await client.get(
-                    "/api/kbs",
-                    headers=bearer_headers(login),
-                )
-                return missing, login, kbs
+                login = await self._http_login(client)
+                return missing, login, await client.get("/api/kbs")
 
-        missing, login, kbs = asyncio.run(exercise_api())
+        missing, login, kbs = run(exercise)
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(login.status_code, 200)
         self.assertEqual(kbs.status_code, 200)
 
     def test_account_permissions_filter_knowledge_bases(self):
-        add_knowledge_bases("研发知识库", "财务知识库")
+        dev_id, finance_id = add_knowledge_bases("研发知识库", "财务知识库")
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             conn.execute(
-                "INSERT INTO roles (name, description, menu_permissions, knowledge_base_permissions, created_at) VALUES ('研发成员', '', '[\"问答对话\"]', '[\"研发知识库\"]', ?)",
+                "INSERT INTO roles (name, description, menu_permissions, all_knowledge_bases, created_at) VALUES ('研发成员', '', '[\"问答对话\"]', 0, ?)",
                 (application_config.db_now(),),
             )
             role_id = conn.execute("SELECT id FROM roles WHERE name = '研发成员'").fetchone()[0]
             conn.execute(
-                "INSERT INTO accounts (name, phone, status, role_id, created_at, password, username) VALUES ('研发用户', '', '正常', ?, ?, ?, 'developer')",
-                (role_id, application_config.db_now(), application_config.hash_password("user-password")),
+                "INSERT INTO role_knowledge_bases (role_id, kb_id) VALUES (?, ?)",
+                (role_id, dev_id),
             )
+        self._add_user("developer", role_id=role_id)
 
-        async def exercise_permissions():
-            transport = httpx.ASGITransport(app=api.app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-                login = await client.post(
-                    "/api/login", json={"username": "developer", "password": "user-password"}
-                )
-                headers = bearer_headers(login)
+        async def exercise():
+            async with api_client() as client:
+                await self._http_login(client, "developer", "user-password")
                 return (
-                    await client.get("/api/kbs", headers=headers),
-                    await client.get("/api/documents/研发知识库", headers=headers),
-                    await client.get("/api/documents/财务知识库", headers=headers),
-                    await client.get("/api/users", headers=headers),
+                    await client.get("/api/kbs"),
+                    await client.get(f"/api/documents/{dev_id}"),
+                    await client.get(f"/api/documents/{finance_id}"),
+                    await client.get("/api/users"),
                 )
 
-        listing, allowed, forbidden, users = asyncio.run(exercise_permissions())
+        listing, allowed, forbidden, users = run(exercise)
         self.assertEqual([item["name"] for item in listing.json()], ["研发知识库"])
         self.assertEqual(allowed.status_code, 200)
         self.assertEqual(forbidden.status_code, 403)
         self.assertEqual(users.status_code, 403)
 
-    def test_me_returns_live_permissions_instead_of_login_time_snapshot(self):
-        login = self._login_admin()
-        headers = {"Authorization": f"Bearer {login['access_token']}"}
+    def test_me_returns_live_permissions_and_the_same_projection_as_login(self):
+        async def exercise():
+            async with api_client() as client:
+                login = await self._http_login(client)
+                me = await client.get("/api/me")
+            async with api_client() as anonymous:
+                return login, me, await anonymous.get("/api/me")
 
-        async def fetch_me():
-            transport = httpx.ASGITransport(app=api.app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-                return await client.get("/api/me", headers=headers), await client.get("/api/me")
-
-        me, anonymous = asyncio.run(fetch_me())
+        login, me, anonymous = run(exercise)
         self.assertEqual(me.status_code, 200)
-        self.assertEqual(me.json()["username"], "admin")
-        self.assertEqual(me.json()["menuPermissions"], login["user"]["menuPermissions"])
+        self.assertEqual(me.json(), login.json()["user"])
+        self.assertEqual(me.json()["id"], self._admin_id())
+        self.assertEqual(me.json()["username"], ADMIN)
+        self.assertIn("name", me.json())
+        self.assertEqual(
+            set(me.json()),
+            {"id", "username", "name", "role", "menuPermissions", "allKnowledgeBases", "knowledgeBaseIds"},
+        )
+        self.assertEqual(me.headers["cache-control"], "no-store")
+        self.assertEqual(login.headers["cache-control"], "no-store")
         self.assertEqual(anonymous.status_code, 401)
+
+    def test_role_change_is_visible_on_the_next_request_without_new_login(self):
+        user_id = self._add_user("member")
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.execute(
+                "INSERT INTO roles (name, description, menu_permissions, all_knowledge_bases, created_at) VALUES ('问答', '', '[\"问答对话\"]', 0, ?)",
+                (application_config.db_now(),),
+            )
+
+        async def exercise():
+            async with api_client() as client:
+                await self._http_login(client, "member", "user-password")
+                before = await client.get("/api/me")
+                with sqlite3.connect(app_storage.DB_FILE) as conn:
+                    conn.execute(
+                        "UPDATE accounts SET role_id = (SELECT id FROM roles WHERE name = '问答') WHERE id = ?",
+                        (user_id,),
+                    )
+                return before, await client.get("/api/me")
+
+        before, after = run(exercise)
+        self.assertEqual((before.json()["role"], before.json()["menuPermissions"]), ("未分配", []))
+        self.assertEqual((after.json()["role"], after.json()["menuPermissions"]), ("问答", ["问答对话"]))
 
     def test_short_password_is_rejected_on_register_and_change(self):
         with self.assertRaises(InvalidRequestError) as registered:
             auth.register_user(
                 schemas.RegistrationRequest(
                     username="shortpw", name="短密码", phone="", password="1234567"
-                )
+                ),
+                Response(),
             )
         self.assertIn("至少", str(registered.exception))
 
-        login = self._login_admin()
-        principal = auth_service.current_principal(
-            HTTPAuthorizationCredentials(scheme="Bearer", credentials=login["access_token"])
-        )
+        _result, token = self._login()
         with self.assertRaises(InvalidRequestError):
             auth.change_password(
                 schemas.PasswordChangeRequest(
                     old_password=application_config.initial_admin_password(),
                     new_password="1234567",
                 ),
-                principal,
+                fake_request(token),
+                Response(),
+                auth_service.current_principal(fake_request(token)),
             )
-        # 被拒绝的改密不能让原密码失效。
-        self.assertEqual(
-            auth.login(
-                schemas.LoginRequest(
-                    username="admin", password=application_config.initial_admin_password()
-                )
-            )["status"],
-            "success",
-        )
+        # 被拒绝的改密不能让原密码失效，也不撤销会话。
+        self.assertEqual(self._login_admin()["status"], "success")
+        auth_service.current_principal(fake_request(token))
 
     def test_registration_rejects_malformed_username_and_phone(self):
         for username, phone in (("带 空格", ""), ("tab\tname", ""), ("good", "不是号码")):
@@ -254,76 +283,86 @@ class AuthTest(IsolatedStorageTestCase):
                     auth.register_user(
                         schemas.RegistrationRequest(
                             username=username, name="姓名", phone=phone, password="password-1"
-                        )
+                        ),
+                        Response(),
                     )
         auth.register_user(
             schemas.RegistrationRequest(
                 username="张三.li@dev-1", name="张三", phone="+86 138-0000-0000",
                 password="password-1",
-            )
+            ),
+            Response(),
         )
 
-    def test_password_over_bcrypt_limit_is_a_client_error_not_a_server_crash(self):
-        # bcrypt 只接受 72 字节；30 个汉字是 90 字节。注册和改密都应返回可读的 422，而不是 500。
-        too_long = "密" * 30
-        with self.assertRaises(InvalidRequestError) as registered:
+    def test_password_byte_limit_is_72_utf8_bytes(self):
+        accepted = {"ascii72": "a" * 72, "cjk72": "密" * 24}
+        rejected = {"ascii73": "a" * 73, "cjk75": "密" * 25}
+        for username, password in accepted.items():
             auth.register_user(
-                schemas.RegistrationRequest(
-                    username="longpw", name="长密码", phone="13800000000", password=too_long
-                )
+                schemas.RegistrationRequest(username=username, name="n", phone="", password=password),
+                Response(),
             )
-        self.assertIn("72", str(registered.exception))
+        for username, password in rejected.items():
+            with self.subTest(username=username), self.assertRaises(InvalidRequestError) as error:
+                auth.register_user(
+                    schemas.RegistrationRequest(
+                        username=username, name="n", phone="", password=password
+                    ),
+                    Response(),
+                )
+            self.assertIn("72", str(error.exception))
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.execute("UPDATE accounts SET status = '正常' WHERE username IN ('ascii72', 'cjk72')")
+        self.assertEqual(self._login("ascii72", "a" * 72)[0]["status"], "success")
+        self.assertEqual(self._login("cjk72", "密" * 24)[0]["status"], "success")
+        # 超长的登录密码按凭证错误处理，不能抛出 500。
+        with self.assertRaises(AuthenticationError):
+            self._login("ascii72", "a" * 73)
 
-        login = self._login_admin()
-        principal = auth_service.current_principal(
-            HTTPAuthorizationCredentials(scheme="Bearer", credentials=login["access_token"])
-        )
+        _result, token = self._login()
         with self.assertRaises(InvalidRequestError):
             auth.change_password(
                 schemas.PasswordChangeRequest(
                     old_password=application_config.initial_admin_password(),
-                    new_password=too_long,
+                    new_password="密" * 30,
                 ),
-                principal,
+                fake_request(token),
+                Response(),
+                auth_service.current_principal(fake_request(token)),
             )
-        # 失败的改密不能让原密码失效。
-        self.assertEqual(
-            auth.login(
-                schemas.LoginRequest(
-                    username="admin", password=application_config.initial_admin_password()
-                )
-            )["status"],
-            "success",
-        )
+        self.assertEqual(self._login_admin()["status"], "success")
 
-    def test_password_change_invalidates_existing_access_token(self):
-        login = self._login_admin()
-        principal = auth_service.current_principal(
-            HTTPAuthorizationCredentials(scheme="Bearer", credentials=login["access_token"])
+    def test_password_whitespace_is_preserved_while_username_is_trimmed(self):
+        password = "  spaced pass  "
+        auth.register_user(
+            schemas.RegistrationRequest(username="  spacey ", name=" 名 ", phone="", password=password),
+            Response(),
         )
-        auth.change_password(
-            schemas.PasswordChangeRequest(
-                old_password=application_config.initial_admin_password(),
-                new_password="replacement-password",
-            ),
-            principal,
-        )
-        with self.assertRaises(HTTPException) as error:
-            auth_service.current_principal(
-                HTTPAuthorizationCredentials(scheme="Bearer", credentials=login["access_token"])
-            )
-        self.assertEqual(error.exception.status_code, 401)
-        self.assertEqual(
-            auth.login(schemas.LoginRequest(username="admin", password="replacement-password"))["status"],
-            "success",
-        )
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            name = conn.execute("SELECT name FROM accounts WHERE username = 'spacey'").fetchone()[0]
+            conn.execute("UPDATE accounts SET status = '正常' WHERE username = 'spacey'")
+        self.assertEqual(name, "名")
+        self.assertEqual(self._login("spacey", password)[0]["status"], "success")
+        with self.assertRaises(AuthenticationError):
+            self._login("spacey", password.strip())
+
+    def test_initial_admin_password_is_validated_only_when_the_account_is_created(self):
+        # 已有账号库：残留的短引导密码不影响启动。
+        with patch.dict("os.environ", {"INITIAL_ADMIN_PASSWORD": "short"}):
+            app_storage.bootstrap_defaults()
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.execute("DELETE FROM accounts")
+        with patch.dict("os.environ", {"INITIAL_ADMIN_PASSWORD": "short"}), self.assertRaises(
+            ValueError
+        ):
+            app_storage.bootstrap_defaults()
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0], 0)
+        app_storage.bootstrap_defaults()
+        self.assertEqual(self._login_admin()["status"], "success")
 
     def test_account_cannot_change_its_own_role_status_or_delete_itself(self):
-        principal = auth_service.current_principal(
-            HTTPAuthorizationCredentials(
-                scheme="Bearer", credentials=self._login_admin()["access_token"]
-            )
-        )
+        principal = self._admin_principal()
         for operation in (
             lambda: user_router.update_user_role(
                 principal.account_id, schemas.UserRoleRequest(role_id=principal.role_id), principal
@@ -338,18 +377,15 @@ class AuthTest(IsolatedStorageTestCase):
             self.assertIn("不能", error.exception.public_message)
 
     def test_account_cannot_edit_its_current_role(self):
-        principal = auth_service.current_principal(
-            HTTPAuthorizationCredentials(
-                scheme="Bearer", credentials=self._login_admin()["access_token"]
-            )
-        )
+        principal = self._admin_principal()
         assert principal.role_id is not None
         with self.assertRaises(AccessDeniedError) as error:
             role_router.update_role(
                 principal.role_id,
                 schemas.RolePermissionsRequest(
                     menu_permissions=list(principal.menu_permissions),
-                    knowledge_base_permissions=list(principal.knowledge_base_permissions),
+                    all_knowledge_bases=principal.all_knowledge_bases,
+                    knowledge_base_ids=list(principal.knowledge_base_ids),
                 ),
                 principal,
             )
@@ -358,14 +394,14 @@ class AuthTest(IsolatedStorageTestCase):
     def test_limited_manager_cannot_grant_permissions_it_does_not_have(self):
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             conn.execute(
-                "INSERT INTO roles (name, description, menu_permissions, knowledge_base_permissions, created_at) VALUES ('局部管理员', '', '[\"用户管理\", \"角色管理\"]', '[]', ?)",
+                "INSERT INTO roles (name, description, menu_permissions, all_knowledge_bases, created_at) VALUES ('局部管理员', '', '[\"用户管理\", \"角色管理\"]', 0, ?)",
                 (application_config.db_now(),),
             )
             limited_role_id = conn.execute(
                 "SELECT id FROM roles WHERE name = '局部管理员'"
             ).fetchone()[0]
             conn.execute(
-                "INSERT INTO roles (name, description, menu_permissions, knowledge_base_permissions, created_at) VALUES ('目标角色', '', '[]', '[]', ?)",
+                "INSERT INTO roles (name, description, menu_permissions, all_knowledge_bases, created_at) VALUES ('目标角色', '', '[]', 0, ?)",
                 (application_config.db_now(),),
             )
             target_role_id = conn.execute(
@@ -375,14 +411,7 @@ class AuthTest(IsolatedStorageTestCase):
                 "INSERT INTO accounts (username, name, password, status, role_id, created_at) VALUES ('manager', '局部管理员', ?, '正常', ?, ?)",
                 (application_config.hash_password("password"), limited_role_id, application_config.db_now()),
             )
-        manager = auth_service.current_principal(
-            HTTPAuthorizationCredentials(
-                scheme="Bearer",
-                credentials=auth.login(
-                    schemas.LoginRequest(username="manager", password="password")
-                )["access_token"],
-            )
-        )
+        manager = self._principal("manager", "password")
         with self.assertRaises(AccessDeniedError) as error:
             role_router.update_role(
                 target_role_id,
@@ -396,7 +425,7 @@ class AuthTest(IsolatedStorageTestCase):
         """建一个只有用户管理和角色管理菜单、没有知识库权限的账号，返回其主体。"""
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             conn.execute(
-                "INSERT INTO roles (name, description, menu_permissions, knowledge_base_permissions, created_at) VALUES ('局部管理员', '', '[\"用户管理\", \"角色管理\"]', '[]', ?)",
+                "INSERT INTO roles (name, description, menu_permissions, all_knowledge_bases, created_at) VALUES ('局部管理员', '', '[\"用户管理\", \"角色管理\"]', 0, ?)",
                 (application_config.db_now(),),
             )
             role_id = conn.execute("SELECT id FROM roles WHERE name = '局部管理员'").fetchone()[0]
@@ -404,20 +433,13 @@ class AuthTest(IsolatedStorageTestCase):
                 "INSERT INTO accounts (username, name, password, status, role_id, created_at) VALUES ('manager', '局部管理员', ?, '正常', ?, ?)",
                 (application_config.hash_password("password"), role_id, application_config.db_now()),
             )
-        return auth_service.current_principal(
-            HTTPAuthorizationCredentials(
-                scheme="Bearer",
-                credentials=auth.login(
-                    schemas.LoginRequest(username="manager", password="password")
-                )["access_token"],
-            )
-        )
+        return self._principal("manager", "password")
 
     def test_limited_manager_cannot_shrink_a_role_with_more_permissions(self):
         manager = self._limited_role_manager()
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             conn.execute(
-                "INSERT INTO roles (name, description, menu_permissions, knowledge_base_permissions, created_at) VALUES ('平级角色', '', '[\"用户管理\", \"模型配置\"]', '[]', ?)",
+                "INSERT INTO roles (name, description, menu_permissions, all_knowledge_bases, created_at) VALUES ('平级角色', '', '[\"用户管理\", \"模型配置\"]', 0, ?)",
                 (application_config.db_now(),),
             )
             peer_role_id = conn.execute("SELECT id FROM roles WHERE name = '平级角色'").fetchone()[0]
@@ -448,7 +470,7 @@ class AuthTest(IsolatedStorageTestCase):
         manager = self._limited_role_manager()
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             conn.execute(
-                "INSERT INTO roles (name, description, menu_permissions, knowledge_base_permissions, created_at) VALUES ('下级角色', '', '[\"用户管理\"]', '[]', ?)",
+                "INSERT INTO roles (name, description, menu_permissions, all_knowledge_bases, created_at) VALUES ('下级角色', '', '[\"用户管理\"]', 0, ?)",
                 (application_config.db_now(),),
             )
             role_id = conn.execute("SELECT id FROM roles WHERE name = '下级角色'").fetchone()[0]
@@ -476,7 +498,7 @@ class AuthTest(IsolatedStorageTestCase):
         """建一个只有用户管理权限的账号，返回其主体。"""
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             conn.execute(
-                "INSERT INTO roles (name, description, menu_permissions, knowledge_base_permissions, created_at) VALUES ('用户管理员', '', '[\"用户管理\"]', '[]', ?)",
+                "INSERT INTO roles (name, description, menu_permissions, all_knowledge_bases, created_at) VALUES ('用户管理员', '', '[\"用户管理\"]', 0, ?)",
                 (application_config.db_now(),),
             )
             role_id = conn.execute("SELECT id FROM roles WHERE name = '用户管理员'").fetchone()[0]
@@ -489,14 +511,7 @@ class AuthTest(IsolatedStorageTestCase):
                 (application_config.hash_password("password"), application_config.db_now()),
             )
             plain_id = conn.execute("SELECT id FROM accounts WHERE username = 'plain'").fetchone()[0]
-        manager = auth_service.current_principal(
-            HTTPAuthorizationCredentials(
-                scheme="Bearer",
-                credentials=auth.login(
-                    schemas.LoginRequest(username="usermgr", password="password")
-                )["access_token"],
-            )
-        )
+        manager = self._principal("usermgr", "password")
         return manager, plain_id
 
     def test_limited_manager_cannot_manage_an_account_with_more_permissions(self):
@@ -612,6 +627,650 @@ class AuthTest(IsolatedStorageTestCase):
         self.assertEqual(decode_permission_list('["用户管理", 3]'), ["用户管理"])
         self.assertEqual(decode_permission_list(None), [])
 
+
+
+class SessionLifecycleTest(AuthTestBase):
+    def test_raw_token_is_never_stored_and_each_login_gets_a_new_one(self):
+        _first, token_a = self._login()
+        _second, token_b = self._login()
+
+        self.assertNotEqual(token_a, token_b)
+        self.assertEqual(len(token_a), 43)
+        stored = {row[0] for row in self._session_rows()}
+        self.assertEqual(
+            stored, {hashlib.sha256(token.encode()).hexdigest() for token in (token_a, token_b)}
+        )
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            dump = "\n".join(conn.iterdump())
+        self.assertNotIn(token_a, dump)
+        self.assertNotIn(token_b, dump)
+
+    def test_stored_digest_cannot_be_replayed_as_a_cookie(self):
+        self._login()
+        (digest, _account), = self._session_rows()
+        # 64 位十六进制摘要连格式都不符；截成 43 位也只会被再摘要一次而查不到。
+        for forged in (digest, digest[:43]):
+            with self.subTest(forged=forged), self.assertRaises(HTTPException) as error:
+                auth_service.current_principal(fake_request(forged))
+            self.assertEqual(error.exception.status_code, 401)
+
+    def test_session_expiry_uses_the_server_clock_even_without_pruning(self):
+        start = 1_900_000_000
+        env = patch.dict("os.environ", {"AUTH_SESSION_TTL_SECONDS": "120"})
+        env.start()
+        self.addCleanup(env.stop)
+        with patch.object(sessions, "now", return_value=start):
+            _result, token = self._login()
+        for moment, valid in ((start + 119, True), (start + 120, False), (start + 500, False)):
+            with self.subTest(moment=moment), patch.object(sessions, "now", return_value=moment):
+                if valid:
+                    auth_service.current_principal(fake_request(token))
+                else:
+                    with self.assertRaises(HTTPException) as error:
+                        auth_service.current_principal(fake_request(token))
+                    self.assertEqual(error.exception.status_code, 401)
+        # 过期行仍在库中，说明拒绝不依赖清理任务。
+        self.assertEqual(len(self._session_rows()), 1)
+        with patch.object(sessions, "now", return_value=start + 500):
+            self.assertEqual(sessions.prune_expired(app_storage.DB_FILE), 1)
+
+    def test_active_sessions_slide_up_to_the_absolute_cap(self):
+        start = 1_900_000_000
+        env = {"AUTH_SESSION_TTL_SECONDS": "3600", "AUTH_SESSION_MAX_AGE_SECONDS": "7200"}
+        with patch.dict("os.environ", env):
+            with patch.object(sessions, "now", return_value=start):
+                _result, token = self._login()
+            # 不足续期间隔时不写库。
+            with patch.object(sessions, "now", return_value=start + 60):
+                auth_service.current_principal(fake_request(token))
+            self.assertEqual(self._expiry(), (start + 3600, start + 7200))
+            # 空闲时限内有请求就向后滑动。
+            with patch.object(sessions, "now", return_value=start + 3000):
+                auth_service.current_principal(fake_request(token))
+            self.assertEqual(self._expiry()[0], start + 6600)
+            # 再滑动也不超过绝对上限，到点即失效。
+            with patch.object(sessions, "now", return_value=start + 6000):
+                auth_service.current_principal(fake_request(token))
+            self.assertEqual(self._expiry()[0], start + 7200)
+            with patch.object(sessions, "now", return_value=start + 7200), self.assertRaises(
+                HTTPException
+            ):
+                auth_service.current_principal(fake_request(token))
+
+    def test_renewal_failure_does_not_fail_the_request(self):
+        start = 1_900_000_000
+        with patch.object(sessions, "now", return_value=start):
+            _result, token = self._login()
+        real_connect = sessions.application_db.connect
+
+        def connect(db_file, **kwargs):
+            # 只让续期用的短超时连接失败，读取主体的连接照常。
+            if kwargs.get("timeout") == 1.0:
+                raise sqlite3.OperationalError("database is locked")
+            return real_connect(db_file, **kwargs)
+
+        with patch.object(sessions, "now", return_value=start + 3000), patch.object(
+            sessions.application_db, "connect", side_effect=connect
+        ), self.assertLogs(sessions.logger, "WARNING"):
+            self.assertEqual(auth_service.current_principal(fake_request(token)).username, ADMIN)
+        self.assertEqual(self._expiry()[0], start + 28800)
+
+    def test_each_account_keeps_at_most_the_configured_number_of_sessions(self):
+        tokens = []
+        with patch.dict("os.environ", {"AUTH_MAX_SESSIONS_PER_ACCOUNT": "2"}):
+            for moment in (1_900_000_000, 1_900_000_001, 1_900_000_002):
+                with patch.object(sessions, "now", return_value=moment):
+                    tokens.append(self._login()[1])
+        self.assertEqual(len(self._session_rows()), 2)
+        with self.assertRaises(HTTPException):
+            auth_service.current_principal(fake_request(tokens[0]))
+        for token in tokens[1:]:
+            with patch.object(sessions, "now", return_value=1_900_000_003):
+                auth_service.current_principal(fake_request(token))
+
+    def _expiry(self):
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            return conn.execute(
+                "SELECT expires_at, absolute_expires_at FROM auth_sessions"
+            ).fetchone()
+
+    def test_session_ttl_setting_has_a_60_second_floor(self):
+        with patch.object(sessions, "now", return_value=1_000), patch.dict(
+            "os.environ", {"AUTH_SESSION_TTL_SECONDS": "5"}
+        ):
+            self._login()
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            created, expires = conn.execute(
+                "SELECT created_at, expires_at FROM auth_sessions"
+            ).fetchone()
+        self.assertEqual(expires - created, 60)
+
+    def test_sessions_survive_a_process_restart(self):
+        _result, token = self._login()
+        from services.core import container as application_container
+
+        application_container._default_container = None
+        app_storage.initialize_database()
+        self.assertEqual(auth_service.current_principal(fake_request(token)).username, ADMIN)
+
+    def test_logout_deletes_the_session_and_a_copied_cookie_stops_working(self):
+        async def exercise():
+            async with api_client() as browser, api_client() as other_browser:
+                login = await self._http_login(browser)
+                token = cookie_token(login)
+                await self._http_login(other_browser)
+                logout = await browser.post("/api/logout")
+                again = await browser.post("/api/logout")
+                async with api_client(cookies={sessions.COOKIE_NAME: token}) as copied:
+                    replay = await copied.get("/api/me")
+                return logout, again, replay, await other_browser.get("/api/me")
+
+        logout, again, replay, other = run(exercise)
+        self.assertEqual(logout.status_code, 204)
+        self.assertEqual(logout.headers["cache-control"], "no-store")
+        attributes = set_cookie_attributes(logout.headers["set-cookie"])
+        self.assertEqual(attributes["max-age"], "0")
+        self.assertEqual(attributes["path"], "/api")
+        self.assertIn("httponly", attributes)
+        self.assertEqual(attributes["samesite"].lower(), "lax")
+        self.assertEqual(again.status_code, 204)
+        self.assertEqual(replay.status_code, 401)
+        # 另一个浏览器的独立会话不受影响。
+        self.assertEqual(other.status_code, 200)
+        self.assertEqual(len(self._session_rows()), 1)
+
+    def test_logout_without_or_with_malformed_or_expired_cookie_is_204(self):
+        start = 1_900_000_000
+        with patch.object(sessions, "now", return_value=start):
+            _result, token = self._login()
+
+        async def exercise():
+            responses = []
+            for cookies in ({}, {sessions.COOKIE_NAME: "bad!"}, {sessions.COOKIE_NAME: token}):
+                async with api_client(cookies=cookies) as client:
+                    responses.append(await client.post("/api/logout"))
+            return responses
+
+        with patch.object(sessions, "now", return_value=start + 10**6):
+            responses = run(exercise)
+        self.assertEqual([response.status_code for response in responses], [204, 204, 204])
+        self.assertEqual(self._session_rows(), [])
+
+    def test_login_replaces_the_session_presented_by_the_same_browser(self):
+        user_id = self._add_user("second")
+        _result, admin_token = self._login()
+        _result, new_token = self._login("second", "user-password", token=admin_token)
+
+        self.assertEqual([row[1] for row in self._session_rows()], [user_id])
+        with self.assertRaises(HTTPException):
+            auth_service.current_principal(fake_request(admin_token))
+        self.assertEqual(
+            auth_service.current_principal(fake_request(new_token)).username, "second"
+        )
+
+    def test_failed_login_keeps_the_existing_session(self):
+        _result, token = self._login()
+        with self.assertRaises(AuthenticationError):
+            self._login(ADMIN, "wrong-password", token=token)
+        self.assertEqual(auth_service.current_principal(fake_request(token)).username, ADMIN)
+
+    def test_malformed_or_oversized_cookies_are_401_without_clearing_the_cookie(self):
+        cookies = ("", "short", "x" * 43 + "!", "a" * 44, "a" * 5000, "a" * 43, "é" * 43)
+
+        async def exercise():
+            responses = []
+            for value in cookies:
+                headers = {"cookie": f"{sessions.COOKIE_NAME}={value}".encode()}
+                async with api_client(headers=headers) as client:
+                    responses.append(await client.get("/api/me"))
+            async with api_client() as client:
+                responses.append(await client.get("/api/me"))
+            return responses
+
+        for response in run(exercise):
+            self.assertEqual(response.status_code, 401, response.text)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            self.assertNotIn("set-cookie", response.headers)
+
+    def test_bearer_header_is_not_accepted(self):
+        _result, token = self._login()
+
+        async def exercise():
+            async with api_client(headers={"Authorization": f"Bearer {token}"}) as client:
+                return await client.get("/api/me")
+
+        self.assertEqual(run(exercise).status_code, 401)
+
+    def test_database_errors_are_not_reported_as_unauthenticated(self):
+        _result, token = self._login()
+        with patch.object(
+            auth_service.application_db,
+            "connect",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ), self.assertRaises(sqlite3.OperationalError):
+            auth_service.current_principal(fake_request(token))
+
+    def test_session_cookie_attributes(self):
+        async def exercise():
+            async with api_client() as client:
+                return await self._http_login(client)
+
+        with patch.dict("os.environ", {"AUTH_SESSION_TTL_SECONDS": "3600"}):
+            default = run(exercise)
+        with patch.dict("os.environ", {"AUTH_COOKIE_SECURE": "true"}):
+            secure = run(exercise)
+
+        self.assertNotIn("access_token", default.json())
+        header = default.headers["set-cookie"]
+        self.assertTrue(header.startswith(f"{sessions.COOKIE_NAME}="))
+        attributes = set_cookie_attributes(header)
+        self.assertIn("httponly", attributes)
+        self.assertEqual(attributes["samesite"].lower(), "lax")
+        self.assertEqual(attributes["path"], "/api")
+        # Cookie 活到绝对上限（默认 7 天），空闲过期由服务端判断。
+        self.assertEqual(attributes["max-age"], "604800")
+        self.assertNotIn("domain", attributes)
+        self.assertNotIn("secure", attributes)
+        self.assertIn("secure", set_cookie_attributes(secure.headers["set-cookie"]))
+
+
+class CredentialRevocationTest(AuthTestBase):
+    def _change_password(self, token, old, new):
+        principal = auth_service.current_principal(fake_request(token))
+        response = Response()
+        result = auth.change_password(
+            schemas.PasswordChangeRequest(old_password=old, new_password=new),
+            fake_request(token),
+            response,
+            principal,
+        )
+        return result, response
+
+    def test_password_change_revokes_every_session_and_clears_the_cookie(self):
+        async def exercise():
+            async with api_client() as browser, api_client() as phone:
+                await self._http_login(browser)
+                await self._http_login(phone)
+                changed = await browser.post(
+                    "/api/change_password",
+                    json={
+                        "old_password": application_config.initial_admin_password(),
+                        "new_password": "replacement-password",
+                    },
+                )
+                return changed, await browser.get("/api/me"), await phone.get("/api/me")
+
+        changed, browser_me, phone_me = run(exercise)
+        self.assertEqual(changed.status_code, 200, changed.text)
+        self.assertEqual(changed.json()["status"], "success")
+        self.assertEqual(changed.headers["cache-control"], "no-store")
+        self.assertEqual(set_cookie_attributes(changed.headers["set-cookie"])["max-age"], "0")
+        self.assertEqual((browser_me.status_code, phone_me.status_code), (401, 401))
+        self.assertEqual(self._session_rows(), [])
+        self.assertEqual(self._login(ADMIN, "replacement-password")[0]["status"], "success")
+        with self.assertRaises(AuthenticationError):
+            self._login_admin()
+
+    def test_wrong_old_password_changes_nothing_and_keeps_the_cookie(self):
+        _result, token = self._login()
+        before = self._stored_password()
+
+        async def exercise():
+            async with api_client(cookies={sessions.COOKIE_NAME: token}) as client:
+                return await client.post(
+                    "/api/change_password",
+                    json={"old_password": "wrong-password", "new_password": "replacement-password"},
+                )
+
+        response = run(exercise)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["code"], "invalid_current_password")
+        self.assertNotIn("set-cookie", response.headers)
+        self.assertEqual(self._stored_password(), before)
+        self.assertEqual(len(self._session_rows()), 1)
+
+    def test_failure_while_revoking_sessions_rolls_back_the_password(self):
+        _result, token = self._login()
+        before = self._stored_password()
+        with patch.object(
+            sessions, "delete_for_account", side_effect=sqlite3.OperationalError("disk full")
+        ), self.assertRaises(sqlite3.OperationalError):
+            self._change_password(
+                token, application_config.initial_admin_password(), "replacement-password"
+            )
+        self.assertEqual(self._stored_password(), before)
+        self.assertEqual(auth_service.current_principal(fake_request(token)).username, ADMIN)
+
+    def test_conditional_update_refuses_a_password_changed_meanwhile(self):
+        _result, token = self._login()
+        digest = sessions.token_hash(token)
+        assert digest is not None
+        old_hash = self._stored_password()
+        concurrent_hash = application_config.hash_password("concurrent-password")
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.execute("UPDATE accounts SET password = ? WHERE username = ?", (concurrent_hash, ADMIN))
+
+        self.assertFalse(
+            accounts.replace_password(
+                app_storage.DB_FILE,
+                account_id=self._admin_id(),
+                session_digest=digest,
+                expected_hash=old_hash,
+                new_hash=application_config.hash_password("late-password"),
+            )
+        )
+        self.assertEqual(self._stored_password(), concurrent_hash)
+        self.assertEqual(len(self._session_rows()), 1)
+
+    def test_concurrent_password_changes_do_not_overwrite_each_other(self):
+        tokens = [self._login()[1] for _ in range(2)]
+        real_hash = application_config.hash_password
+        # 两个请求都在事务外校验过原密码并算好新哈希后，才同时进入写事务。
+        both_hashed = threading.Barrier(2, timeout=30)
+
+        def hash_then_wait(password):
+            hashed = real_hash(password)
+            both_hashed.wait()
+            return hashed
+
+        outcomes: dict[str, object] = {}
+
+        def change(token, new_password):
+            try:
+                self._change_password(
+                    token, application_config.initial_admin_password(), new_password
+                )
+                outcomes[new_password] = "ok"
+            except Exception as exc:
+                outcomes[new_password] = exc
+
+        with patch.object(application_config, "hash_password", side_effect=hash_then_wait):
+            threads = [
+                threading.Thread(target=change, args=(token, f"new-password-{index}"))
+                for index, token in enumerate(tokens)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        winners = [password for password, outcome in outcomes.items() if outcome == "ok"]
+        losers = [outcome for outcome in outcomes.values() if outcome != "ok"]
+        self.assertEqual(len(winners), 1, outcomes)
+        self.assertEqual(len(losers), 1)
+        self.assertIsInstance(losers[0], ConflictError)
+        self.assertEqual(losers[0].code, "credentials_changed")  # type: ignore[attr-defined]
+        self.assertTrue(application_config.verify_password(winners[0], self._stored_password()))
+        self.assertEqual(self._session_rows(), [])
+
+    def test_login_that_races_a_password_change_does_not_create_a_session(self):
+        real_create = sessions.create
+        _result, token = self._login()
+
+        def change_then_create(*args, **kwargs):
+            # bcrypt 已用旧密码通过，写事务开始前密码被改。
+            self._change_password(
+                token, application_config.initial_admin_password(), "replacement-password"
+            )
+            return real_create(*args, **kwargs)
+
+        with patch.object(sessions, "create", side_effect=change_then_create), self.assertRaises(
+            AuthenticationError
+        ) as error:
+            self._login_admin()
+        self.assertEqual(error.exception.code, "invalid_credentials")
+        self.assertEqual(self._session_rows(), [])
+
+    def test_login_that_races_a_disable_does_not_create_a_session(self):
+        user_id = self._add_user("member")
+        real_create = sessions.create
+
+        def disable_then_create(*args, **kwargs):
+            accounts.update_user_status(app_storage.DB_FILE, user_id, "停用")
+            return real_create(*args, **kwargs)
+
+        with patch.object(sessions, "create", side_effect=disable_then_create), self.assertRaises(
+            AuthenticationError
+        ):
+            self._login("member", "user-password")
+        self.assertEqual(self._session_rows(), [])
+
+    def test_disabling_revokes_sessions_and_reenabling_does_not_revive_them(self):
+        user_id = self._add_user("member")
+        _result, token = self._login("member", "user-password")
+        admin = self._admin_principal()
+
+        user_router.update_user_status(user_id, schemas.UserStatusRequest(status="停用"), admin)
+        self.assertEqual(self._session_rows(user_id), [])
+        user_router.update_user_status(user_id, schemas.UserStatusRequest(status="正常"), admin)
+
+        with self.assertRaises(HTTPException) as error:
+            auth_service.current_principal(fake_request(token))
+        self.assertEqual(error.exception.status_code, 401)
+        # 管理员自己的会话不受影响。
+        self.assertEqual(len(self._session_rows(self._admin_id())), 1)
+
+    def test_moving_back_to_review_also_revokes_sessions(self):
+        user_id = self._add_user("member")
+        self._login("member", "user-password")
+        accounts.update_user_status(app_storage.DB_FILE, user_id, "审核中")
+        self.assertEqual(self._session_rows(user_id), [])
+
+    def test_deleting_an_account_cascades_to_its_sessions(self):
+        user_id = self._add_user("member")
+        _result, token = self._login("member", "user-password")
+        user_router.delete_user(user_id, self._admin_principal())
+
+        self.assertEqual(self._session_rows(user_id), [])
+        # 同名新账号不能继承旧会话。
+        self._add_user("member")
+        with self.assertRaises(HTTPException):
+            auth_service.current_principal(fake_request(token))
+
+
+class PasswordChangeRateLimitTest(AuthTestBase):
+    def setUp(self):
+        super().setUp()
+        self.now = 1000.0
+        self.limiter = rate_limit.AuthRateLimiter(
+            login_failures=3,
+            login_window_seconds=600,
+            client_failures=100,
+            client_window_seconds=600,
+            register_attempts=10,
+            register_window_seconds=600,
+            clock=lambda: self.now,
+        )
+        patcher = patch.object(rate_limit, "_limiter", self.limiter)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.token = self._login()[1]
+
+    def _change(self, old, new="replacement-password"):
+        return auth.change_password(
+            schemas.PasswordChangeRequest(old_password=old, new_password=new),
+            fake_request(self.token),
+            Response(),
+            auth_service.current_principal(fake_request(self.token)),
+        )
+
+    def test_five_wrong_old_passwords_block_the_account_for_15_minutes(self):
+        for _ in range(5):
+            with self.assertRaises(InvalidStateError):
+                self._change("wrong-password")
+        with patch.object(application_config, "verify_password") as verify, self.assertRaises(
+            RateLimitedError
+        ) as locked:
+            self._change(application_config.initial_admin_password())
+        verify.assert_not_called()
+        self.assertEqual(locked.exception.code, "password_change_rate_limited")
+        self.assertEqual(locked.exception.retry_after_seconds, 900)
+        # 与登录窗口互相独立：改密被锁不影响登录。
+        self.assertEqual(self._login_admin()["status"], "success")
+
+        self.now += 901
+        self.assertEqual(self._change(application_config.initial_admin_password())["status"], "success")
+
+    def test_success_clears_the_failure_count_and_login_failures_do_not_count(self):
+        for _ in range(3):
+            with self.assertRaises(AuthenticationError):
+                self._login(ADMIN, "wrong-password")
+        for _ in range(4):
+            with self.assertRaises(InvalidStateError):
+                self._change("wrong-password")
+        self.now += 601  # 登录窗口过期，改密窗口仍在
+        self._change(application_config.initial_admin_password(), "second-password-1")
+        self.token = self._login(ADMIN, "second-password-1")[1]
+        for _ in range(4):
+            with self.assertRaises(InvalidStateError):
+                self._change("wrong-password")
+        self.assertEqual(self._change("second-password-1", "third-password-1")["status"], "success")
+
+    def test_http_response_is_429_with_retry_after(self):
+        async def exercise():
+            async with api_client(cookies={sessions.COOKIE_NAME: self.token}) as client:
+                for _ in range(6):
+                    response = await client.post(
+                        "/api/change_password",
+                        json={"old_password": "wrong-pass", "new_password": "replacement-password"},
+                    )
+                return response
+
+        response = run(exercise)
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["retry-after"], "900")
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertNotIn("set-cookie", response.headers)
+
+
+class WriteHeaderTest(AuthTestBase):
+    def _write_routes(self):
+        """从 OpenAPI 文档枚举全部 /api 写路由，新增路由自动纳入检查。"""
+        for path, operations in api.app.openapi()["paths"].items():
+            if not path.startswith("/api"):
+                continue
+            for method in sorted(operations):
+                if method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+                    yield method.upper(), path
+
+    def test_every_write_route_rejects_requests_without_the_header(self):
+        routes = list(self._write_routes())
+        paths = {path for _method, path in routes}
+        for required in ("/api/login", "/api/register", "/api/logout", "/api/change_password"):
+            self.assertIn(required, paths)
+        _result, token = self._login()
+        before = self._stored_password()
+
+        async def exercise():
+            responses = []
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=api.app),
+                base_url="http://test",
+                cookies={sessions.COOKIE_NAME: token},
+            ) as client:
+                for method, path in routes:
+                    concrete = path
+                    for name in ("kb_id", "document_id", "session_id", "provider", "job_id"):
+                        concrete = concrete.replace("{" + name + "}", "x")
+                    concrete = concrete.replace("{user_id}", "1").replace("{role_id}", "1")
+                    concrete = concrete.replace("{message_id}", "1")
+                    response = await client.request(
+                        method,
+                        concrete,
+                        json={
+                            "username": ADMIN,
+                            "password": application_config.initial_admin_password(),
+                        },
+                        headers={"X-RAGLoom-Request": "0"} if path == "/api/logout" else None,
+                    )
+                    responses.append((method, path, response))
+            return responses
+
+        for method, path, response in run(exercise):
+            with self.subTest(method=method, path=path):
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(
+                    response.json(), {"detail": response.json()["detail"], "code": "csrf_rejected"}
+                )
+        # 被拒绝的写请求没有任何副作用：会话、密码都还在。
+        self.assertEqual(len(self._session_rows()), 1)
+        self.assertEqual(self._stored_password(), before)
+
+    def test_safe_methods_and_correct_header_pass(self):
+        async def exercise():
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=api.app), base_url="http://test"
+            ) as client:
+                health = await client.get("/api/health")
+                options = await client.options("/api/login")
+                login = await client.post(
+                    "/api/login",
+                    json={"username": ADMIN, "password": application_config.initial_admin_password()},
+                    headers=WRITE_HEADERS,
+                )
+                return health, options, login, await client.get("/api/me")
+
+        health, options, login, me = run(exercise)
+        self.assertEqual(health.status_code, 200)
+        self.assertNotEqual(options.status_code, 403)
+        self.assertNotIn("access-control-allow-origin", options.headers)
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(me.status_code, 200)
+
+
+class ValidationErrorOutputTest(AuthTestBase):
+    SECRET = "SECRET-MARKER-9f2c"
+
+    def _post(self, path, payload):
+        async def exercise():
+            async with api_client() as client:
+                await self._http_login(client)
+                return await client.post(path, json=payload)
+
+        return run(exercise)
+
+    def test_auth_and_model_validation_errors_never_echo_the_input(self):
+        cases = [
+            ("/api/login", {"username": "admin", "password": self.SECRET * 40}),
+            ("/api/login", {"username": "admin", "password": self.SECRET, "extra": self.SECRET}),
+            ("/api/register", {"username": "u", "name": "n", "phone": self.SECRET * 3, "password": self.SECRET}),
+            ("/api/change_password", {"old_password": self.SECRET, "new_password": self.SECRET * 40}),
+            (
+                "/api/models",
+                {"provider": "p", "api_key": self.SECRET * 400, "base_url": "https://x.test", "default_model": "m"},
+            ),
+        ]
+        for path, payload in cases:
+            with self.subTest(path=path):
+                response = self._post(path, payload)
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertNotIn(self.SECRET, response.text)
+                for item in response.json()["detail"]:
+                    self.assertLessEqual(set(item), {"loc", "type", "msg", "ctx"})
+                    self.assertLessEqual(set(item.get("ctx", {})), {"min_length", "max_length"})
+
+        too_long = self._post("/api/login", {"username": "admin", "password": "p" * 300})
+        self.assertEqual(too_long.json()["detail"][0]["ctx"], {"max_length": 256})
+        self.assertEqual(too_long.headers["cache-control"], "no-store")
+
+    def test_other_routes_keep_the_default_validation_output(self):
+        response = self._post("/api/chat", {"question": self.SECRET})
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIn("input", response.json()["detail"][0])
+
+    def test_failed_login_responses_are_not_cacheable(self):
+        async def exercise():
+            async with api_client() as client:
+                return await client.post(
+                    "/api/login", json={"username": ADMIN, "password": "wrong-password"}
+                )
+
+        response = run(exercise)
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertNotIn("set-cookie", response.headers)
+
+
 class EventWindowTest(unittest.TestCase):
     def setUp(self):
         self.now = 1000.0
@@ -652,6 +1311,17 @@ class EventWindowTest(unittest.TestCase):
             window.record("alice")
 
         self.assertEqual(window.retry_after("alice"), 30)
+
+    def test_reserve_checks_and_counts_atomically_and_release_returns_the_slot(self):
+        window = self._window()
+        slots = [window.reserve("alice") for _ in range(4)]
+
+        self.assertEqual([wait for _slot, wait in slots], [0, 0, 0, 60])
+        self.assertIsNone(slots[3][0])
+        window.release("alice", slots[0][0])
+        self.assertEqual(window.retry_after("alice"), 0)
+        window.release("alice", None)
+        window.release("missing", 1.0)
 
     def test_zero_limit_or_window_disables_the_check(self):
         for window in (self._window(max_events=0), self._window(window=0)):
@@ -699,7 +1369,10 @@ class LoginRateLimitTest(IsolatedStorageTestCase):
 
     def _login(self, password, username="admin", client="10.0.0.1"):
         return auth.login(
-            schemas.LoginRequest(username=username, password=password), client
+            schemas.LoginRequest(username=username, password=password),
+            fake_request(),
+            Response(),
+            client,
         )
 
     def _admin_password(self):
@@ -731,6 +1404,35 @@ class LoginRateLimitTest(IsolatedStorageTestCase):
         self.now += 601
 
         self.assertEqual(self._login(self._admin_password())["status"], "success")
+
+    def test_concurrent_wrong_passwords_cannot_exceed_the_limit(self):
+        started = threading.Barrier(8)
+        real_verify = application_config.verify_password
+
+        def slow_verify(*args, **kwargs):
+            # 慢速的 bcrypt：所有请求都会在任何一个记录失败之前通过检查（修复前）。
+            time.sleep(0.05)
+            return real_verify(*args, **kwargs)
+
+        def attempt():
+            started.wait()
+            try:
+                self._login("wrong")
+            except (AuthenticationError, RateLimitedError) as exc:
+                return type(exc)
+
+        with patch.object(application_config, "verify_password", side_effect=slow_verify):
+            with concurrent.futures.ThreadPoolExecutor(8) as pool:
+                results = list(pool.map(lambda _: attempt(), range(8)))
+
+        self.assertEqual(results.count(AuthenticationError), 3)
+        self.assertEqual(results.count(RateLimitedError), 5)
+
+    def test_correct_password_returns_the_reserved_client_slot(self):
+        for _ in range(10):
+            self._login(self._admin_password())
+
+        self.assertEqual(self.limiter._by_client.retry_after("10.0.0.1"), 0)
 
     def test_successful_login_resets_the_username_failure_count(self):
         for _ in range(2):
@@ -788,6 +1490,7 @@ class LoginRateLimitTest(IsolatedStorageTestCase):
             schemas.RegistrationRequest(
                 username="pending", name="待审核", phone="", password="pending-pass-1"
             ),
+            Response(),
             "10.0.0.5",
         )
         for _ in range(5):
@@ -800,6 +1503,7 @@ class LoginRateLimitTest(IsolatedStorageTestCase):
                 schemas.RegistrationRequest(
                     username=f"new-{index}", name="新用户", phone="", password="new-pass-123"
                 ),
+                Response(),
                 "10.0.0.7",
             )
 
@@ -808,6 +1512,7 @@ class LoginRateLimitTest(IsolatedStorageTestCase):
                 schemas.RegistrationRequest(
                     username="new-3", name="新用户", phone="", password="new-pass-123"
                 ),
+                Response(),
                 "10.0.0.7",
             )
         self.assertEqual(locked.exception.code, "registration_rate_limited")
@@ -815,6 +1520,7 @@ class LoginRateLimitTest(IsolatedStorageTestCase):
             schemas.RegistrationRequest(
                 username="other", name="其他", phone="", password="new-pass-123"
             ),
+            Response(),
             "10.0.0.8",
         )
 
@@ -825,10 +1531,7 @@ class LoginRateLimitTest(IsolatedStorageTestCase):
 
     def test_http_response_is_429_with_retry_after_header(self):
         async def exercise():
-            transport = httpx.ASGITransport(app=api.app)
-            async with httpx.AsyncClient(
-                transport=transport, base_url="http://test"
-            ) as client:
+            async with api_client() as client:
                 for _ in range(4):
                     response = await client.post(
                         "/api/login", json={"username": "admin", "password": "wrong"}
@@ -865,10 +1568,6 @@ class ClientAddressTest(unittest.TestCase):
         with patch.dict("os.environ", {"AUTH_TRUST_X_REAL_IP": "true"}):
             self.assertEqual(auth.client_address(self._request()), "172.18.0.5")
             self.assertEqual(auth.client_address(self._request(host=None)), "")
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class ChatRequestLimiterTest(unittest.TestCase):
@@ -920,7 +1619,7 @@ class ChatRateLimitHttpTest(IsolatedStorageTestCase):
         super().setUp()
         app_storage.initialize_database()
         app_storage.bootstrap_defaults()
-        add_knowledge_bases("技术部")
+        self.kb_id = add_knowledge_bases("技术部")[0]
 
     def _chat(self, count):
         async def events():
@@ -930,19 +1629,17 @@ class ChatRateLimitHttpTest(IsolatedStorageTestCase):
             return SimpleNamespace(events=events(), refresh_summary=lambda: asyncio.sleep(0))
 
         async def run():
-            transport = httpx.ASGITransport(app=api.app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-                login = await client.post(
+            async with api_client() as client:
+                await client.post(
                     "/api/login",
                     json={
                         "username": application_config.INITIAL_ADMIN_USERNAME,
                         "password": application_config.initial_admin_password(),
                     },
                 )
-                headers = bearer_headers(login)
                 return [
                     await client.post(
-                        "/api/chat", json={"question": "问题", "kb_name": "技术部"}, headers=headers
+                        "/api/chat", json={"question": "问题", "kb_id": self.kb_id}
                     )
                     for _ in range(count)
                 ]
@@ -958,3 +1655,7 @@ class ChatRateLimitHttpTest(IsolatedStorageTestCase):
         self.assertEqual([response.status_code for response in responses], [200, 200, 429])
         self.assertEqual(responses[2].json()["code"], "chat_rate_limited")
         self.assertIn("Retry-After", responses[2].headers)
+
+
+if __name__ == "__main__":
+    unittest.main()

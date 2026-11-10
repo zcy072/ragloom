@@ -1,5 +1,7 @@
 """Framework-independent input contracts for the chat use case."""
 
+from typing import NotRequired
+
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 from typing_extensions import TypedDict
 
@@ -16,7 +18,9 @@ class RankingDiagnostic(TypedDict):
 class ContextDiagnostic(TypedDict):
     id: int
     source: str
-    kb_name: str
+    document_id: NotRequired[str]
+    kb_id: str
+    kb_name_snapshot: str
     page: str
     routes: list[str]
 
@@ -45,7 +49,7 @@ class ChatRequest(BaseModel):
     )
 
     question: str = Field(max_length=4000)
-    kb_name: str
+    kb_id: str
     session_id: str | None = None
     new_session: StrictBool = False
     image_base64: str | None = None

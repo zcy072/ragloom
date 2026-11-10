@@ -1,8 +1,24 @@
 <template>
   <div id="app-root">
-    <div v-if="!store.user">
+    <div v-if="authState === 'loading'" class="min-h-screen flex items-center justify-center text-[#6f8587]" aria-live="polite">
+      <LoaderCircle class="h-5 w-5 animate-spin" />
+      <span class="ml-2 text-sm">正在确认登录状态...</span>
+    </div>
+
+    <div v-else-if="authState === 'error'" class="min-h-screen flex flex-col items-center justify-center gap-4 text-[#4e6265]" role="alert">
+      <p class="text-sm">{{ authError }}</p>
+      <button
+        type="button"
+        @click="loadIdentity"
+        class="px-4 py-2 text-sm text-white bg-[#176d70] hover:bg-[#10585c] rounded-md transition-colors shadow-sm"
+      >
+        重试
+      </button>
+    </div>
+
+    <div v-else-if="!store.user">
       <ToastContainer />
-      <LoginView @login="onLogin" />
+      <LoginView />
     </div>
 
     <div v-else class="app-shell flex h-screen text-slate-900 overflow-hidden">
@@ -70,6 +86,7 @@
             </button>
             <button
               @click="logout"
+              :disabled="loggingOut"
               class="app-icon-button flex items-center justify-center hover:text-red-600 hover:bg-red-50 hover:border-red-200"
               title="退出登录"
             >
@@ -79,7 +96,7 @@
         </header>
 
         <main class="app-content flex-1 overflow-hidden flex bg-white">
-          <Suspense>
+          <Suspense :key="activePage.id">
             <template #default>
               <div class="contents">
                 <component :is="activePage.component" v-bind="activePage.props" />
@@ -108,7 +125,7 @@
             </div>
             <div class="space-y-1.5">
               <label class="text-xs font-medium text-gray-500 ml-1">新密码</label>
-              <PasswordInput v-model="newPwd" required placeholder="请输入新密码" />
+              <PasswordInput v-model="newPwd" required placeholder="至少 8 个字符，最多 72 字节" />
             </div>
             <div class="space-y-1.5">
               <label class="text-xs font-medium text-gray-500 ml-1">确认新密码</label>
@@ -132,8 +149,9 @@ import LoginView from './views/LoginView.vue';
 import ToastContainer from './components/ToastContainer.vue';
 import PasswordInput from './components/PasswordInput.vue';
 import { toast } from './toast';
-import { apiGet, apiPost } from './apiClient';
-import { AUTH_STORAGE_KEY, clearAuthSession, loadAuthSession, saveAuthSession } from './authSession';
+import { ApiError, apiGet, apiPost, reloadForAuthChange } from './apiClient';
+import { AUTH_EVENT_STORAGE_KEY, finishAuthChange, openAuthChannel } from './authSession';
+import { existingPasswordProblem, newPasswordProblem } from './passwordPolicy';
 import { canManageKnowledgeBases, canOpenKnowledgeBase } from './knowledgeAccess';
 import { LayoutDashboard, FolderOpen, MessageCircle, Settings, Users, UserCog, LogOut, Key, Database, Menu, LoaderCircle, Activity, BarChart3 } from 'lucide-vue-next';
 
@@ -146,8 +164,10 @@ const RoleManagement = defineAsyncComponent(() => import('./views/RoleManagement
 const OpsMonitor = defineAsyncComponent(() => import('./views/OpsMonitor.vue'));
 const UserAnalytics = defineAsyncComponent(() => import('./views/UserAnalytics.vue'));
 
-// 与后端 services/core/config.py 的 MIN_PASSWORD_LENGTH 保持一致。
-const MIN_PASSWORD_LENGTH = 8;
+// loading：启动时等待 /me；ready：已确定登录或未登录；error：网络或服务异常，可重试。
+const authState = ref('loading');
+const authError = ref('');
+const loggingOut = ref(false);
 const showPwdModal = ref(false);
 const oldPwd = ref('');
 const newPwd = ref('');
@@ -181,62 +201,83 @@ const activePage = computed(() => {
     || menus.value[0]
     || allMenus[0];
   return {
+    id: menu.id,
     component: menu.component,
     props: menu.id === '知识库' ? { readonly: knowledgeBaseReadonly.value } : {}
   };
 });
-/** 登录成功后把用户信息写入全局状态。 */
-const onLogin = (userData) => {
-  store.user = userData;
+/** 启动时向 /me 确认身份；只有 401 视为未登录，网络或服务错误显示可重试页面。 */
+const loadIdentity = async () => {
+  authState.value = 'loading';
+  try {
+    store.user = await apiGet('/api/me', { authReload: false });
+    authState.value = 'ready';
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      store.user = null;
+      authState.value = 'ready';
+      return;
+    }
+    authError.value = err instanceof ApiError
+      ? `服务暂时不可用（${err.status}），请稍后重试`
+      : '无法连接服务器，请检查网络后重试';
+    authState.value = 'error';
+  }
 };
-/** 清除登录信息和当前聊天会话，返回登录页。 */
-const logout = () => {
-  clearAuthSession();
-  store.user = null;
-  store.activeSessionId = null;
-  store.activeMenu = '问答对话';
-  store.targetKb = null;
-  store.chatDefaultKb = null;
-};
-
-/** 其他标签页登出、换账号或令牌被清除时，本标签页同步回到登录页。 */
-const syncAuthAcrossTabs = (event) => {
-  if (event.key !== AUTH_STORAGE_KEY && event.key !== null) return;
-  const session = loadAuthSession();
-  if (!session) {
-    if (store.user) logout();
-  } else if (store.user && session.user?.username !== store.user.username) {
-    // 另一个标签页换了账号登录：重新载入，避免继续用旧账号的界面状态操作新令牌。
-    window.location.reload();
+/** 服务端退出成功后通知其他标签页并重载；失败时保留当前页面。 */
+const logout = async () => {
+  if (loggingOut.value) return;
+  loggingOut.value = true;
+  try {
+    await apiPost('/api/logout');
+    finishAuthChange();
+  } catch (_) {
+    toast.error('退出未完成，请重试');
+    loggingOut.value = false;
   }
 };
 
-/** 重新读取实时权限；管理员改了角色后，已登录用户无需等令牌过期就能看到新菜单。 */
+/** 其他标签页登录、退出或改密后会写入随机标记，本标签页随之重载。 */
+const syncAuthAcrossTabs = (event) => {
+  if (event.key === AUTH_EVENT_STORAGE_KEY) reloadForAuthChange();
+};
+
+// 同一时间只保留一个 /me 刷新请求。
+let refreshingIdentity = false;
+/** 重新读取实时权限；同一账号更新菜单，账号已变化则重载，401 由请求封装统一重载。 */
 const refreshPermissions = async () => {
-  if (!store.user) return;
+  if (!store.user || refreshingIdentity) return;
+  refreshingIdentity = true;
   try {
     const fresh = await apiGet('/api/me');
-    if (!store.user || fresh.username !== store.user.username) return;
+    if (!store.user) return;
+    if (fresh.id !== store.user.id) {
+      reloadForAuthChange();
+      return;
+    }
     store.user = { ...store.user, ...fresh };
-    const session = loadAuthSession();
-    if (session) saveAuthSession(session.token, store.user);
   } catch (_) {
-    // 401 已由 apiClient 统一处理；网络波动时保留当前菜单，下次获得焦点再试。
+    // 403、网络波动或 5xx 时保留当前菜单，下次获得焦点再试。
+  } finally {
+    refreshingIdentity = false;
   }
 };
 const refreshOnFocus = () => {
   if (document.visibilityState === 'visible') refreshPermissions();
 };
 
+let authChannel = null;
 onMounted(() => {
-  window.addEventListener('auth-expired', logout);
   window.addEventListener('storage', syncAuthAcrossTabs);
+  authChannel = openAuthChannel();
+  if (authChannel) authChannel.onmessage = reloadForAuthChange;
   document.addEventListener('visibilitychange', refreshOnFocus);
-  refreshPermissions();
+  loadIdentity();
 });
 onUnmounted(() => {
-  window.removeEventListener('auth-expired', logout);
   window.removeEventListener('storage', syncAuthAcrossTabs);
+  authChannel?.close();
+  authChannel = null;
   document.removeEventListener('visibilitychange', refreshOnFocus);
 });
 /** 切换主菜单，并在移动端同时收起侧边栏。 */
@@ -252,15 +293,16 @@ const closePwdModal = () => {
   newPwd.value = '';
   confirmPwd.value = '';
 };
-/** 校验两次新密码后提交改密，成功时强制重新登录。 */
+/** 校验两次新密码后提交改密，成功后重载页面并重新登录。 */
 const handlePwdChange = async () => {
   if (changingPwd.value) return;
   if (newPwd.value !== confirmPwd.value) {
     toast.error('两次输入的新密码不一致');
     return;
   }
-  if (newPwd.value.length < MIN_PASSWORD_LENGTH) {
-    toast.error(`新密码至少需要 ${MIN_PASSWORD_LENGTH} 个字符`);
+  const problem = existingPasswordProblem(oldPwd.value, '原密码') || newPasswordProblem(newPwd.value, '新密码');
+  if (problem) {
+    toast.error(problem);
     return;
   }
   changingPwd.value = true;
@@ -269,15 +311,11 @@ const handlePwdChange = async () => {
         old_password: oldPwd.value,
         new_password: newPwd.value
     });
-    toast.success(data.message || '修改成功');
-    showPwdModal.value = false;
-    oldPwd.value = '';
-    newPwd.value = '';
-    confirmPwd.value = '';
-    logout();
+    // 服务端已撤销全部会话并清除 Cookie；保持提交中状态直到页面重载。
+    toast.success(data?.message || '修改成功，请重新登录');
+    finishAuthChange();
   } catch (err) {
     toast.error(err.message || '网络错误，修改失败');
-  } finally {
     changingPwd.value = false;
   }
 };
