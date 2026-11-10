@@ -357,7 +357,7 @@ export async function installApiMocks(page, { authenticated = false, onAdminLogi
       return json(route, paginate(sorted, request.url(), ['username', 'name']));
     }
     if (path === '/api/user-analytics/users/1' && method === 'GET') return json(route, analyticsDetail);
-    if (path === '/api/user-analytics/users/1/sessions/session-9' && method === 'GET') {
+    if (path === '/api/user-analytics/users/1/sessions/session-9/view' && method === 'POST') {
       auditRecords.unshift({
         id: auditRecords.length + 1,
         created_at: '2026-07-23T09:00:00+00:00',
