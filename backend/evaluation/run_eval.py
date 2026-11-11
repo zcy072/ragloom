@@ -226,6 +226,11 @@ async def evaluate_question(
     def ranked_of(documents: list) -> list[str]:
         return ranked_labels(document_ids_of(documents), labels)
 
+    def fresh_query_vector() -> None:
+        # 进程级查询向量缓存会让后跑的配置复用 vector_only 算好的向量，耗时漏掉嵌入调用。
+        # 线上每个请求都要嵌入一次问题，所以每个含向量检索的配置计时前都清空缓存。
+        retrieval._query_vector_cache.clear()
+
     def record(name: str, ranked: list[str], started: float) -> None:
         outputs[name] = {
             "ranked": ranked,
@@ -250,6 +255,7 @@ async def evaluate_question(
         )
         record("fts_only", ranked_of(lexical_docs), started)
 
+        fresh_query_vector()
         started = time.perf_counter()
         query_vector = embeddings.embed_query(question)
         vector_docs = interleave(
@@ -260,11 +266,13 @@ async def evaluate_question(
         )
         record("vector_only", ranked_of(vector_docs), started)
 
+        fresh_query_vector()
         started = time.perf_counter()
         ensemble = retrieval.build_retriever(kb_id, container=container)
         hybrid_docs = await asyncio.to_thread(ensemble.invoke, question) if ensemble else []
         record("hybrid", ranked_of(hybrid_docs), started)
 
+    fresh_query_vector()
     started = time.perf_counter()
     candidates = await chat_query.retrieve_rerank_candidates(
         kb_id, question, False, None, container=container
