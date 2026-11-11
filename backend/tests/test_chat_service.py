@@ -643,7 +643,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 _, _, headers = chat_ranking._rerank_endpoint(container)
             self.assertEqual(headers["Authorization"], "Bearer local-key")
 
-    def test_rerank_drops_candidates_below_min_score(self):
+    def test_rerank_keeps_low_scores_when_top_score_passes(self):
         documents = [
             Document(page_content=f"候选内容 {index}", metadata={"source": "手册.pdf"})
             for index in range(3)
@@ -665,18 +665,26 @@ class ChatServiceTest(IsolatedStorageTestCase):
             patch.object(model_config, "get_siliconflow_api_key", return_value="test-key"),
         ):
             ranked = asyncio.run(chat_service.rerank("问题", documents, diagnostics=diagnostics))
-        self.assertEqual([doc.page_content for doc in ranked], ["候选内容 0", "候选内容 1"])
+        self.assertEqual(
+            [doc.page_content for doc in ranked], ["候选内容 0", "候选内容 1", "候选内容 2"]
+        )
         self.assertEqual(diagnostics.counts["rerank_returned"], 3)
-        self.assertEqual(diagnostics.counts["rerank_below_threshold"], 1)
+        self.assertEqual(diagnostics.counts["rerank_below_threshold"], 0)
+        self.assertTrue(all(doc["kept"] for doc in diagnostics.rerank_results))
         self.assertEqual(len(diagnostics.ranking), 3)
 
     def test_rerank_returns_nothing_when_all_scores_below_min_score(self):
-        documents = [Document(page_content="无关内容", metadata={"source": "手册.pdf"})]
+        documents = [
+            Document(page_content=f"无关内容 {index}", metadata={"source": "手册.pdf"})
+            for index in range(2)
+        ]
+        diagnostics = chat_ranking.RetrievalDiagnostics("年假几天")
         response = SimpleNamespace(
             status_code=200,
             json=lambda: {
                 "results": [
-                    {"index": 0, "relevance_score": 0.0001},
+                    {"index": 0, "relevance_score": RETRIEVAL_RERANK_MIN_SCORE / 2},
+                    {"index": 1, "relevance_score": 0.0001},
                 ]
             },
         )
@@ -685,8 +693,10 @@ class ChatServiceTest(IsolatedStorageTestCase):
             patch.object(chat_ranking, "_get_rerank_client", new=AsyncMock(return_value=client)),
             patch.object(model_config, "get_siliconflow_api_key", return_value="test-key"),
         ):
-            ranked = asyncio.run(chat_service.rerank("年假几天", documents))
+            ranked = asyncio.run(chat_service.rerank("年假几天", documents, diagnostics=diagnostics))
         self.assertEqual(ranked, [])
+        self.assertEqual(diagnostics.counts["rerank_below_threshold"], 2)
+        self.assertFalse(any(doc["kept"] for doc in diagnostics.rerank_results))
 
     def test_rerank_empty_response_keeps_bounded_candidates(self):
         self._assert_empty_rerank_fallback()

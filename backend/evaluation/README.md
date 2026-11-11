@@ -71,7 +71,8 @@ docker compose run --rm --no-deps -v "$PWD/backend:/app" \
 
 | 文件 | 内容 |
 | --- | --- |
-| `crud_rag_report_top20_agentic.json` | 当前线上配置（`RERANK_TOP_N = 20`），另含补充检索对照（`--agentic`）和重排覆盖诊断，根目录 README 的表格取自这份 |
+| `crud_rag_report_rerank_gate.json` | 当前线上配置（2026-11-10，`RERANK_TOP_N = 20`，重排下限 0.05 只用于拒答），根目录 README 的表格取自这份 |
+| `crud_rag_report_top20_agentic.json` | 2026-10-28，`RERANK_TOP_N = 20`，早于重排下限；另含补充检索对照（`--agentic`） |
 | `crud_rag_report.json` | 切换到 Milvus 后的首轮结果，当时 `RERANK_TOP_N = 10` |
 | `crud_rag_report_chroma_fts5_baseline.json` | 切换前 Chroma + SQLite FTS5 的基线 |
 
@@ -80,4 +81,6 @@ docker compose run --rm --no-deps -v "$PWD/backend:/app" \
 - 重排保留数从 10 提到 20 的依据：top_n=10 时重排后 full@10 从 0.845 降到 0.775，丢失的 14 题全部是重排只返回 10 个切片、去重后不足 10 篇文档，属于截断造成的覆盖损失；top_n=20 时丢失数为 0。
 - 补充检索在这份数据上 hit@1、MRR 与关闭时相同，最终上下文 full@10 从 0.835 降到 0.820，P50 延迟从 414 ms 升到 1354 ms，因此默认关闭。
 - Milvus BM25 的 MRR 高于旧 FTS5（0.896 对 0.826）。两次运行之间还改过其他环节，差异不能全部归因于检索库。
+- 重排下限（`RETRIEVAL_RERANK_MIN_SCORE = 0.05`）只决定拒答的依据：曾经逐条丢弃低于 0.05 的切片，重排 full@10 为 0.765，有 15 题因此丢掉部分标准文档；改为只看最高分后 full@10 为 0.850，与不设下限（0.845）持平。仍有 4 题因最高分低于 0.05 被拒答，所以重排的 hit@5 为 0.965，低于不设下限时的 0.980。
+- 自 2026-10-29 起查询向量有进程级缓存，`hybrid` 及之后的配置复用 `vector_only` 已算好的向量，耗时不含嵌入调用，不能与 10-28 报告的耗时直接比较。
 - 200 题的抽样误差约 4 到 6 个百分点（二项分布 95% 区间粗估，没有重复运行），混合与仅向量、重排与不重排之间的 MRR 差异都在这个范围内。

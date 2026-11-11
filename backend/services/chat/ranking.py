@@ -209,10 +209,10 @@ async def rerank(
         if not ranked:
             logger.warning("Reranking results were all invalid")
             return candidates[:RERANK_TOP_N]
-        # 重排成功后才按分数过滤；全部低于下限时返回空列表，由调用方按"未找到依据"处理。
-        relevant = [
-            doc for doc in ranked if doc.metadata["relevance_score"] >= RETRIEVAL_RERANK_MIN_SCORE
-        ]
+        # 下限只决定是否拒答：最高分达到下限时保留全部 top-N（多文档综合题的次要证据分数常常很低），
+        # 最高分也低于下限时返回空列表，由调用方按"未找到依据"处理。重排失败时不做这一步。
+        passed = ranked[0].metadata["relevance_score"] >= RETRIEVAL_RERANK_MIN_SCORE
+        relevant = ranked if passed else []
         if diagnostics is not None:
             diagnostics.rerank_status = "success"
             diagnostics.counts["rerank_returned"] = len(ranked)
@@ -230,7 +230,7 @@ async def rerank(
                 {
                     **document_summary(doc, index),
                     "score": doc.metadata["relevance_score"],
-                    "kept": doc.metadata["relevance_score"] >= RETRIEVAL_RERANK_MIN_SCORE,
+                    "kept": passed,
                 }
                 for index, doc in enumerate(ranked, 1)
             ]
