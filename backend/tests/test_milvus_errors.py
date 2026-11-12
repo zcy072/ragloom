@@ -44,6 +44,18 @@ class MilvusUnavailableTest(unittest.TestCase):
                     call()
                 self.assertEqual(raised.exception.code, "retrieval_index_unavailable")
 
+    def test_delete_paths_raise_instead_of_treating_down_milvus_as_deleted(self):
+        """Milvus 不可达时删除必须抛出，由调用方中止或重试，不能当作已经删除。"""
+        calls = {
+            "document": lambda: self.index.delete_document("kb", "doc"),
+            "kb": lambda: self.index.delete_kb("kb"),
+            "stale": lambda: self.index.delete_stale_documents("kb", {"doc"}),
+        }
+        for name, call in calls.items():
+            with self.subTest(name):
+                with self.assertRaises(MilvusException):
+                    call()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,7 @@ exec docker compose run --rm --no-deps \
   -v "$PWD/backend:/app" \
   -v "$EVAL_DIR:/eval" \
   -e SILICONFLOW_API_KEY \
+  -e EVAL_AGENTIC_API_KEY -e EVAL_AGENTIC_BASE_URL -e EVAL_AGENTIC_MODEL \
   -e MILVUS_COLLECTION_PREFIX="${MILVUS_COLLECTION_PREFIX:-ragloom_eval_}" \
   -e PYTHONPYCACHEPREFIX=/tmp/pymodel-pycache \
   backend python evaluation/run_eval.py \

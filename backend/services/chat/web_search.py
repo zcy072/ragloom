@@ -18,7 +18,7 @@ import httpx
 from langchain_core.documents import Document as LCDocument
 
 from services.core import model_api_keys
-from services.core.container import ApplicationContainer, get_application_container
+from services.core.container import ApplicationContainer
 from services.core.safe_errors import safe_error_summary
 from services.core.settings import get_settings
 from services.retrieval.context import ContextSpan
@@ -185,10 +185,10 @@ class DeepSeekSearchProvider:
 
 
 def configured_provider(
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> WebSearchProvider | None:
     """复用模型配置中 DeepSeek 的密钥；未配置时返回 None，密文无法解密时抛出安全错误。"""
-    encrypted_key = (container or get_application_container()).model_providers.api_key(
+    encrypted_key = container.model_providers.api_key(
         DEEPSEEK_PROVIDER_NAME
     )
     if not encrypted_key:
@@ -279,7 +279,7 @@ async def search_web(
     query: str,
     question: str,
     account_id: int,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
     provider: WebSearchProvider | None = None,
 ) -> WebSearchOutcome:
     """执行一次网页搜索；任何失败都降级为没有网页结果，并给出原因。"""
@@ -300,6 +300,10 @@ async def search_web(
         return outcome([], rejected)
     try:
         results = await provider.search(query, ori_question=question, count=WEB_SEARCH_COUNT)
+    except asyncio.CancelledError:
+        # 检索阶段出错或用户取消时搜索任务被取消，没有拿到结果，同样退回额度。
+        budget.refund(account_id)
+        raise
     except WebSearchError as exc:
         budget.refund(account_id)
         return outcome([], exc.reason)
@@ -321,7 +325,6 @@ def web_context_spans(documents: list[LCDocument]) -> list[ContextSpan]:
                 source=str(metadata.get("source") or metadata["url"]),
                 content=document.page_content[:WEB_RESULT_MAX_CHARS],
                 pages=(),
-                page_unit="页",
                 rank=rank,
                 contextual_titles=tuple(label for label in labels if label),
                 chunk_routes=(WEB_CHUNK_ROUTE,),

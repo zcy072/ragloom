@@ -42,7 +42,7 @@ docker compose run --rm --no-deps -v "$PWD/backend:/app" \
 
 索引完成后再次运行会复用已建好的库。`evaluation_document_ids.json` 保存语料标签到上传返回 document_id 的映射；重跑按 ID 复用就绪文档，对 error 文档发起原 ID 的重新索引。映射缺失或含未登记文档时需重建隔离评测存储，不按文件名猜测身份。加 `--limit 20` 可先小规模试跑。
 
-可选参数：`--rerank-top-n N` 只在本次评测里覆盖重排保留数；`--context-spans N`、`--context-chars N` 覆盖最终上下文的段数和字符上限；`--agentic` 额外评测补充检索（`CHAT_AGENTIC_RETRIEVAL`），会调用对话模型，默认用 `Qwen/Qwen2.5-7B-Instruct`，可用环境变量 `EVAL_AGENTIC_MODEL` 改。
+可选参数：`--rerank-top-n N` 只在本次评测里覆盖重排保留数；`--context-spans N`、`--context-chars N` 覆盖最终上下文的段数和字符上限；`--agentic` 额外评测补充检索（`CHAT_AGENTIC_RETRIEVAL`），会调用对话模型，默认用 SiliconFlow 的 `Qwen/Qwen2.5-7B-Instruct`；`EVAL_AGENTIC_MODEL` 改模型名，`EVAL_AGENTIC_BASE_URL` 和 `EVAL_AGENTIC_API_KEY` 改用其他 OpenAI 兼容服务商。
 
 ## 对比的配置
 
@@ -74,6 +74,7 @@ docker compose run --rm --no-deps -v "$PWD/backend:/app" \
 | `crud_rag_report_full_latency.json` | 当前线上配置（2026-11-11，`RERANK_TOP_N = 20`，重排下限 0.05 只用于拒答，重新建库，耗时含查询嵌入），根目录 README 的表格取自这份 |
 | `crud_rag_report_rerank_gate.json` | 2026-11-10，同一配置，但耗时受查询向量缓存影响（见下）；重排下限对照取自这次运行 |
 | `crud_rag_report_top20_agentic.json` | 2026-10-28，`RERANK_TOP_N = 20`，早于重排下限；另含补充检索对照（`--agentic`） |
+| `crud_rag_report_agentic_deepseek.json` | 2026-11-12，补充检索对照改用 DeepSeek `deepseek-flash` 作判断模型，重新建库 |
 | `crud_rag_report.json` | 切换到 Milvus 后的首轮结果，当时 `RERANK_TOP_N = 10` |
 | `crud_rag_report_chroma_fts5_baseline.json` | 切换前 Chroma + SQLite FTS5 的基线 |
 

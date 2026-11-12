@@ -2,7 +2,7 @@
 
 from typing import NotRequired
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from typing_extensions import TypedDict
 
 from services.core.contracts import RetrievalFilters
@@ -50,18 +50,11 @@ class ChatRequest(BaseModel):
 
     question: str = Field(max_length=4000)
     kb_id: str
+    # 不带时新建会话。
     session_id: str | None = None
-    new_session: StrictBool = False
     image_base64: str | None = None
     image_mime: str | None = None
     model_provider: str | None = None
     filters: RetrievalFilters | None = None
     # 同时搜索网页；需要角色有“联网搜索”权限。
     web_search: StrictBool = False
-
-    @model_validator(mode="after")
-    def validate_session_choice(self):
-        """Reject ambiguous requests that select and create a session together."""
-        if self.new_session and self.session_id:
-            raise ValueError("新会话请求不能同时指定已有会话 ID")
-        return self

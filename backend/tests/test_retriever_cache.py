@@ -1,5 +1,6 @@
 import unittest
 
+from services.core.container import get_application_container
 from services.retrieval.cache import RetrieverCache
 
 
@@ -58,12 +59,12 @@ class CommonKnowledgeBaseInvalidationTest(unittest.TestCase):
         ):
             retriever.cache_retriever("dept-kb-id", "dept", include_common=True, version=retriever.retriever_cache_version())
             retriever.cache_retriever(common, "common", version=retriever.retriever_cache_version())
-            retriever.drop_cached_retriever("dept-kb-id")
+            retriever.drop_cached_retriever("dept-kb-id", container=get_application_container())
             self.assertIsNone(retriever.get_cached_retriever("dept-kb-id", include_common=True))
             self.assertEqual(retriever.get_cached_retriever(common), "common")
 
             retriever.cache_retriever("dept-kb-id", "dept", include_common=True, version=retriever.retriever_cache_version())
-            retriever.drop_cached_retriever(common)
+            retriever.drop_cached_retriever(common, container=get_application_container())
             # 部门库的检索图内含通用知识库的路线计划，也必须失效。
             self.assertIsNone(retriever.get_cached_retriever("dept-kb-id", include_common=True))
             self.assertIsNone(retriever.get_cached_retriever(common))
@@ -79,7 +80,7 @@ class CommonKnowledgeBaseInvalidationTest(unittest.TestCase):
         ):
             version = retriever.retriever_cache_version()
             # 构建检索图期间有文档发布，构建结果可能早于发布，不能写入缓存。
-            retriever.drop_cached_retriever("dept-kb-id")
+            retriever.drop_cached_retriever("dept-kb-id", container=get_application_container())
             retriever.cache_retriever("dept-kb-id", "stale", version=version)
             self.assertIsNone(retriever.get_cached_retriever("dept-kb-id"))
 

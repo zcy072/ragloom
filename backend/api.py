@@ -28,6 +28,7 @@ from routers import (
 from services.chat import ranking as chat_ranking
 from services.chat import web_search as chat_web_search
 from services.core import readiness
+from services.core.container import get_application_container
 from services.core.errors import (
     AccessDeniedError,
     ApplicationError,
@@ -86,7 +87,7 @@ async def lifespan(_app: FastAPI):
     await asyncio.to_thread(kb_use_cases.resume_pending_deletions)
     chat_ranking.start_rerank_client()
     index_worker.start()
-    retriever.start_retriever_cache_warmup()
+    retriever.start_retriever_cache_warmup(get_application_container())
     prune_task = asyncio.create_task(
         _prune_history_periodically(HISTORY_PRUNE_INTERVAL_SECONDS)
     )

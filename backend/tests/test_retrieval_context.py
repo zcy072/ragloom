@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from langchain_core.documents import Document
 
+from services.core.container import get_application_container
 from services.indexing import chunking
 from services.retrieval import context as context_builder
 from services.retrieval import parent_store, retriever
@@ -665,7 +666,7 @@ class RetrievalContextTest(IsolatedStorageTestCase):
         )
         mark_ready(kb_id, fixture_document_id(kb_id, source))
 
-        candidates = retriever.retrieve_lexical_candidates(kb_id, "胰岛素的种类", per_route=1)
+        candidates = retriever.retrieve_lexical_candidates(kb_id, "胰岛素的种类", per_route=1, container=get_application_container())
 
         self.assertEqual(
             {candidate.metadata["chunk_route"] for candidate in candidates},
@@ -692,7 +693,7 @@ class RetrievalContextTest(IsolatedStorageTestCase):
             ],
         )
 
-        self.assertEqual(retriever.retrieve_lexical_candidates(kb_id, "审批流程"), [])
+        self.assertEqual(retriever.retrieve_lexical_candidates(kb_id, "审批流程", container=get_application_container()), [])
 
     def test_lexical_candidates_failure_is_logged_not_raised(self):
         kb_id = create_knowledge_base("研发部")
@@ -702,7 +703,7 @@ class RetrievalContextTest(IsolatedStorageTestCase):
         with patch.object(
             get_chunk_index(), "search_lexical", side_effect=RuntimeError("milvus down")
         ):
-            self.assertEqual(retriever.retrieve_lexical_candidates(kb_id, "审批"), [])
+            self.assertEqual(retriever.retrieve_lexical_candidates(kb_id, "审批", container=get_application_container()), [])
 
 
 if __name__ == "__main__":

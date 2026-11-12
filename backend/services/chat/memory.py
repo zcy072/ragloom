@@ -11,7 +11,6 @@ from services.chat.sources import CITATION_PATTERN
 from services.core import config as application_config
 from services.core.container import ApplicationContainer
 from services.core.contracts import ModelConfig
-from services.core.llm_config import create_summary_llm
 from services.core.safe_errors import safe_error_summary
 
 logger = logging.getLogger(__name__)
@@ -93,9 +92,28 @@ def _bounded_transcript(
 async def refresh_conversation_summary(
     session_id: str,
     model_config: ModelConfig,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> bool:
-    """在未摘要消息超过阈值时增量更新会话摘要，失败时返回 False。"""
+    """在未摘要消息超过阈值时增量更新会话摘要，有任何一轮写入成功时返回 True。
+
+    单轮输入受 CHAT_MEMORY_SUMMARY_MAX_INPUT_CHARS 限制；积压超过这个量时一轮吸收不完，
+    剩下的消息既不在摘要里也不在最近窗口里，所以连续摘要直到没有待并入的消息。
+    轮数有上限，某一轮失败就停，留给下次回答后再试。
+    """
+    refreshed = False
+    for _ in range(application_config.CHAT_MEMORY_SUMMARY_MAX_ROUNDS):
+        if not await _refresh_summary_once(session_id, model_config, container):
+            break
+        refreshed = True
+    return refreshed
+
+
+async def _refresh_summary_once(
+    session_id: str,
+    model_config: ModelConfig,
+    container: ApplicationContainer,
+) -> bool:
+    """并入一批待摘要消息；没有待并入的消息或失败时返回 False。"""
     batch = await asyncio.to_thread(
         chat_sessions.load_summary_batch,
         session_id,
@@ -122,17 +140,19 @@ async def refresh_conversation_summary(
         ),
     ]
     try:
-        llm = (
-            container.create_summary_llm(model_config)
-            if container is not None
-            else create_summary_llm(model_config)
-        )
+        llm = container.create_summary_llm(model_config)
         response = await asyncio.wait_for(
             llm.ainvoke(messages),
             timeout=application_config.CHAT_MEMORY_SUMMARY_TIMEOUT_SECONDS,
         )
         summary = _response_text(response.content)
         if not summary:
+            # 推理模型把额度全用在思考上时正文为空，记下 finish_reason 便于排查。
+            logger.warning(
+                "Conversation summary for %s was empty (finish_reason=%s)",
+                session_id,
+                (getattr(response, "response_metadata", None) or {}).get("finish_reason"),
+            )
             return False
         summary = _truncate_summary(summary, application_config.CHAT_MEMORY_SUMMARY_MAX_CHARS)
         return await asyncio.to_thread(

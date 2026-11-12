@@ -8,6 +8,8 @@ from services.chat import memory as chat_memory
 from services.chat import sessions as chat_sessions
 from services.chat.sessions import SessionOwner
 from services.core import config as application_config
+from services.core import llm_config
+from services.core.container import get_application_container
 from tests.support import IsolatedStorageTestCase, add_knowledge_bases
 
 
@@ -17,7 +19,7 @@ class ChatMemoryTest(IsolatedStorageTestCase):
         app_storage.initialize_database()
         self.tech_id = add_knowledge_bases("技术部")[0]
         self.session_id = chat_sessions.resolve_session(
-            None, SessionOwner(1, "alice"), self.tech_id
+            None, SessionOwner(1, "alice"), self.tech_id, container=get_application_container()
         ).session_id
 
     def _insert_messages(self, count: int) -> None:
@@ -48,7 +50,7 @@ class ChatMemoryTest(IsolatedStorageTestCase):
                 return SimpleNamespace(content="- 用户正在持续讨论技术部制度。")
 
         model = FakeSummaryModel()
-        with patch.object(chat_memory, "create_summary_llm", return_value=model):
+        with patch.object(llm_config, "create_summary_llm", return_value=model):
             refreshed = asyncio.run(
                 chat_memory.refresh_conversation_summary(
                     self.session_id,
@@ -56,7 +58,7 @@ class ChatMemoryTest(IsolatedStorageTestCase):
                         "api_key": "test-key",
                         "base_url": "https://example.test/v1",
                         "model": "test-model",
-                    },
+                    }, container=get_application_container(),
                 )
             )
 
@@ -64,7 +66,7 @@ class ChatMemoryTest(IsolatedStorageTestCase):
         memory = chat_sessions.load_conversation_memory(
             self.session_id,
             application_config.CHAT_MEMORY_KEEP_RECENT_MESSAGE_COUNT,
-            application_config.CHAT_MEMORY_RECENT_MAX_CHARS,
+            application_config.CHAT_MEMORY_RECENT_MAX_CHARS, container=get_application_container(),
         )
         self.assertEqual(memory.summary, "- 用户正在持续讨论技术部制度。")
         self.assertEqual(len(memory.recent_history), 8)
@@ -74,12 +76,78 @@ class ChatMemoryTest(IsolatedStorageTestCase):
         self.assertIn("第 6 条消息", model.messages[-1].content)
         self.assertNotIn("第 7 条消息", model.messages[-1].content)
 
+    def test_summary_refresh_absorbs_backlog_larger_than_one_round(self):
+        """被挤出最近窗口的积压超过单轮输入上限时连续摘要，不留下既不在摘要也不在窗口里的消息。"""
+        self._insert_messages(14)
+
+        class CountingSummaryModel:
+            def __init__(self):
+                self.transcripts = []
+
+            async def ainvoke(self, messages):
+                self.transcripts.append(messages[-1].content)
+                return SimpleNamespace(content=f"- 第 {len(self.transcripts)} 轮摘要")
+
+        model = CountingSummaryModel()
+        # 窗口只放得下最近两轮，较早的 10 条都要并入摘要；每轮输入只够 3 条左右。
+        with patch.object(
+            application_config, "CHAT_MEMORY_SUMMARY_MAX_INPUT_CHARS", 35
+        ), patch.object(application_config, "CHAT_MEMORY_RECENT_MAX_CHARS", 30), patch.object(
+            application_config, "CHAT_MEMORY_SUMMARY_MAX_ROUNDS", 10
+        ), patch.object(llm_config, "create_summary_llm", return_value=model):
+            refreshed = asyncio.run(
+                chat_memory.refresh_conversation_summary(
+                    self.session_id, {"api_key": "k", "base_url": "u", "model": "m"}, container=get_application_container()
+                )
+            )
+            memory = chat_sessions.load_conversation_memory(
+                self.session_id,
+                application_config.CHAT_MEMORY_RECENT_MESSAGE_LIMIT,
+                application_config.CHAT_MEMORY_RECENT_MAX_CHARS, container=get_application_container(),
+            )
+
+        self.assertTrue(refreshed)
+        self.assertGreater(len(model.transcripts), 1)
+        # 后一轮在前一轮摘要的基础上继续合并。
+        self.assertIn("- 第 1 轮摘要", model.transcripts[1])
+        summarized = "\n".join(model.transcripts)
+        in_window = {text for _, text in memory.recent_history}
+        for index in range(1, 15):
+            text = f"第 {index} 条消息"
+            with self.subTest(text):
+                self.assertTrue(text in summarized or text in in_window)
+        self.assertEqual(memory.summary, f"- 第 {len(model.transcripts)} 轮摘要")
+
+    def test_summary_refresh_stops_after_round_limit(self):
+        self._insert_messages(14)
+
+        class CountingSummaryModel:
+            calls = 0
+
+            async def ainvoke(self, messages):
+                CountingSummaryModel.calls += 1
+                return SimpleNamespace(content="- 摘要")
+
+        with patch.object(
+            application_config, "CHAT_MEMORY_SUMMARY_MAX_INPUT_CHARS", 12
+        ), patch.object(application_config, "CHAT_MEMORY_SUMMARY_MAX_ROUNDS", 2), patch.object(
+            llm_config, "create_summary_llm", return_value=CountingSummaryModel()
+        ):
+            refreshed = asyncio.run(
+                chat_memory.refresh_conversation_summary(
+                    self.session_id, {"api_key": "k", "base_url": "u", "model": "m"}, container=get_application_container()
+                )
+            )
+
+        self.assertTrue(refreshed)
+        self.assertEqual(CountingSummaryModel.calls, 2)
+
     def test_summary_refresh_below_threshold_does_not_create_model_client(self):
         self._insert_messages(
             application_config.CHAT_MEMORY_SUMMARY_TRIGGER_MESSAGE_COUNT
         )
 
-        with patch.object(chat_memory, "create_summary_llm") as model_factory:
+        with patch.object(llm_config, "create_summary_llm") as model_factory:
             refreshed = asyncio.run(
                 chat_memory.refresh_conversation_summary(
                     self.session_id,
@@ -87,7 +155,7 @@ class ChatMemoryTest(IsolatedStorageTestCase):
                         "api_key": "test-key",
                         "base_url": "https://example.test/v1",
                         "model": "test-model",
-                    },
+                    }, container=get_application_container(),
                 )
             )
 
@@ -96,7 +164,7 @@ class ChatMemoryTest(IsolatedStorageTestCase):
 
     def test_stale_summary_update_cannot_overwrite_newer_memory(self):
         self._insert_messages(14)
-        batch = chat_sessions.load_summary_batch(self.session_id, 12, 8)
+        batch = chat_sessions.load_summary_batch(self.session_id, 12, 8, container=get_application_container())
         self.assertIsNotNone(batch)
         first_message_id = batch.messages[-1][0]
         self.assertTrue(
@@ -104,7 +172,7 @@ class ChatMemoryTest(IsolatedStorageTestCase):
                 self.session_id,
                 "较新的摘要",
                 expected_message_id=0,
-                through_message_id=first_message_id,
+                through_message_id=first_message_id, container=get_application_container(),
             )
         )
         self.assertFalse(
@@ -112,10 +180,10 @@ class ChatMemoryTest(IsolatedStorageTestCase):
                 self.session_id,
                 "过期摘要",
                 expected_message_id=0,
-                through_message_id=first_message_id,
+                through_message_id=first_message_id, container=get_application_container(),
             )
         )
-        memory = chat_sessions.load_conversation_memory(self.session_id, 8, 6000)
+        memory = chat_sessions.load_conversation_memory(self.session_id, 8, 6000, container=get_application_container())
         self.assertEqual(memory.summary, "较新的摘要")
 
     def test_recent_history_respects_character_budget_from_newest_message(self):
@@ -129,30 +197,59 @@ class ChatMemoryTest(IsolatedStorageTestCase):
                 ],
             )
 
-        memory = chat_sessions.load_conversation_memory(self.session_id, 12, 6)
+        memory = chat_sessions.load_conversation_memory(self.session_id, 12, 6, container=get_application_container())
 
         self.assertEqual(memory.recent_history, (("user", "最新消息内容"),))
 
     def test_long_assistant_answer_keeps_its_tail_in_recent_history(self):
+        """较早的长回答按单条上限保留首尾；最近一轮回答可用满整个预算，供翻译、总结上一条。"""
         limit = application_config.CHAT_MEMORY_RECENT_MESSAGE_MAX_CHARS
-        answer = "开头" + "中" * (limit * 2) + "第5点结尾"
+        older_answer = "开头" + "中" * (limit * 2) + "第5点结尾"
+        latest_answer = "最新" + "答" * (limit * 2) + "结尾"
+        now = application_config.db_now()
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             conn.executemany(
                 "INSERT INTO chat_messages (session_id, role, content, sources, created_at) "
                 "VALUES (?, ?, ?, '[]', ?)",
                 [
-                    (self.session_id, "user", "问" * (limit * 2), application_config.db_now()),
-                    (self.session_id, "assistant", answer, application_config.db_now()),
+                    (self.session_id, "user", "旧问", now),
+                    (self.session_id, "assistant", older_answer, now),
+                    (self.session_id, "user", "新问", now),
+                    (self.session_id, "assistant", latest_answer, now),
                 ],
             )
 
-        memory = chat_sessions.load_conversation_memory(self.session_id, 12, 6000)
+        memory = chat_sessions.load_conversation_memory(self.session_id, 12, 6000, container=get_application_container())
 
-        clipped_answer, clipped_question = memory.recent_history[0][1], memory.recent_history[1][1]
+        self.assertEqual(memory.recent_history[0], ("assistant", latest_answer))
+        self.assertEqual(memory.recent_history[1], ("user", "新问"))
+        clipped_older = memory.recent_history[2][1]
+        self.assertTrue(clipped_older.startswith("开头"))
+        self.assertTrue(clipped_older.endswith("第5点结尾"))
+        self.assertEqual(len(clipped_older), limit)
+        self.assertEqual(memory.recent_history[3], ("user", "旧问"))
+
+    def test_latest_turn_over_the_budget_keeps_the_question_and_both_ends_of_the_answer(self):
+        limit = 6000
+        answer = "开头" + "中" * limit + "结尾"
+        now = application_config.db_now()
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.executemany(
+                "INSERT INTO chat_messages (session_id, role, content, sources, created_at) "
+                "VALUES (?, ?, ?, '[]', ?)",
+                [
+                    (self.session_id, "user", "把上面翻译成英文", now),
+                    (self.session_id, "assistant", answer, now),
+                ],
+            )
+
+        memory = chat_sessions.load_conversation_memory(self.session_id, 12, limit, container=get_application_container())
+
+        clipped_answer, question = memory.recent_history[0][1], memory.recent_history[1][1]
+        self.assertEqual(question, "把上面翻译成英文")
         self.assertTrue(clipped_answer.startswith("开头"))
-        self.assertTrue(clipped_answer.endswith("第5点结尾"))
-        self.assertEqual(len(clipped_answer), limit)
-        self.assertEqual(clipped_question, "问" * limit)
+        self.assertTrue(clipped_answer.endswith("结尾"))
+        self.assertEqual(len(clipped_answer) + len(question), limit)
 
     def test_memory_lists_recently_cited_knowledge_base_files(self):
         import json
@@ -188,7 +285,7 @@ class ChatMemoryTest(IsolatedStorageTestCase):
                 ],
             )
 
-        memory = chat_sessions.load_conversation_memory(self.session_id, 12, 6000)
+        memory = chat_sessions.load_conversation_memory(self.session_id, 12, 6000, container=get_application_container())
 
         self.assertEqual(memory.recent_documents, ("差旅办法.pdf", "旧制度.pdf"))
 
@@ -196,7 +293,7 @@ class ChatMemoryTest(IsolatedStorageTestCase):
         """摘要失败积压时仍应在字符预算内读取超过常规上限的原文。"""
         self._insert_messages(14)
 
-        memory = chat_sessions.load_conversation_memory(self.session_id, 12, 6000)
+        memory = chat_sessions.load_conversation_memory(self.session_id, 12, 6000, container=get_application_container())
 
         self.assertEqual(len(memory.recent_history), 14)
         self.assertEqual(memory.recent_history[-1][1], "第 1 条消息")
@@ -213,7 +310,7 @@ class ChatMemoryTest(IsolatedStorageTestCase):
                 ],
             )
 
-        memory = chat_sessions.load_conversation_memory(self.session_id, 12, 6)
+        memory = chat_sessions.load_conversation_memory(self.session_id, 12, 6, container=get_application_container())
 
         self.assertEqual(memory.recent_history[-1], ("user", "用户问题"))
         self.assertEqual(sum(len(text) for _, text in memory.recent_history), 6)
@@ -241,12 +338,12 @@ class ChatMemoryTest(IsolatedStorageTestCase):
                 raise RuntimeError("摘要服务不可用")
 
         with patch.object(
-            chat_memory, "create_summary_llm", return_value=FailingSummaryModel()
+            llm_config, "create_summary_llm", return_value=FailingSummaryModel()
         ), self.assertLogs(chat_memory.logger, level="WARNING") as logs:
             refreshed = asyncio.run(
                 chat_memory.refresh_conversation_summary(
                     self.session_id,
-                    {"api_key": "key", "base_url": "url", "model": "model"},
+                    {"api_key": "key", "base_url": "url", "model": "model"}, container=get_application_container(),
                 )
             )
 
@@ -259,14 +356,14 @@ class ChatMemoryTest(IsolatedStorageTestCase):
     def test_summary_cannot_recreate_memory_after_session_deletion(self):
         deleted_session_id = self.session_id
         chat_sessions.delete_owned_session(
-            deleted_session_id, SessionOwner(1, "alice")
+            deleted_session_id, SessionOwner(1, "alice"), container=get_application_container()
         )
 
         saved = chat_sessions.save_conversation_summary(
             deleted_session_id,
             "不应保存的摘要",
             expected_message_id=0,
-            through_message_id=1,
+            through_message_id=1, container=get_application_container(),
         )
 
         self.assertFalse(saved)
@@ -307,7 +404,7 @@ class ChatMemoryTest(IsolatedStorageTestCase):
         # 5 轮 = 10 条，未超过 12 条的触发阈值。
         self._insert_long_turns(5)
 
-        batch = chat_sessions.load_summary_batch(self.session_id, 12, 8)
+        batch = chat_sessions.load_summary_batch(self.session_id, 12, 8, container=get_application_container())
 
         self.assertIsNotNone(batch)
         questions = [c for _, role, c in batch.messages if role == "user"]
@@ -316,27 +413,27 @@ class ChatMemoryTest(IsolatedStorageTestCase):
     def test_no_early_summary_when_recent_window_holds_everything(self):
         self._insert_messages(8)
 
-        self.assertIsNone(chat_sessions.load_summary_batch(self.session_id, 12, 8))
+        self.assertIsNone(chat_sessions.load_summary_batch(self.session_id, 12, 8, container=get_application_container()))
 
     def test_summary_batch_ends_exactly_where_recent_window_begins(self):
         """摘要吸收的消息与近期原文窗口首尾相接，不重叠也不留缺口。"""
         self._insert_long_turns(5)
-        batch = chat_sessions.load_summary_batch(self.session_id, 12, 8)
+        batch = chat_sessions.load_summary_batch(self.session_id, 12, 8, container=get_application_container())
         self.assertIsNotNone(batch)
         chat_sessions.save_conversation_summary(
             self.session_id,
             "摘要",
             expected_message_id=0,
-            through_message_id=batch.messages[-1][0],
+            through_message_id=batch.messages[-1][0], container=get_application_container(),
         )
 
-        memory = chat_sessions.load_conversation_memory(self.session_id, 12, 6000)
+        memory = chat_sessions.load_conversation_memory(self.session_id, 12, 6000, container=get_application_container())
 
         summarized = [c for _, role, c in batch.messages if role == "user"]
         recent = [c for role, c in memory.recent_history if role == "user"]
         self.assertEqual(summarized + recent[::-1], [f"问题{i}" for i in range(1, 6)])
         # 摘要已覆盖被挤出的轮次，窗口放得下剩余部分，不再触发新的摘要。
-        self.assertIsNone(chat_sessions.load_summary_batch(self.session_id, 12, 8))
+        self.assertIsNone(chat_sessions.load_summary_batch(self.session_id, 12, 8, container=get_application_container()))
 
     def test_summary_transcript_drops_citation_markers(self):
         transcript, _ = chat_memory._bounded_transcript(

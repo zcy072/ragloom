@@ -29,15 +29,20 @@ def _query_phrases(question: str) -> list[str]:
     return phrases
 
 
-def _source_preview(content: str, question: str, limit: int = SOURCE_PREVIEW_MAX_CHARS) -> str:
-    """截取最接近问题关键词的原文片段，用于前端来源卡片预览。"""
+def _source_preview(
+    content: str, phrases: list[str], limit: int = SOURCE_PREVIEW_MAX_CHARS
+) -> str:
+    """截取最接近问题关键词的原文片段，用于前端来源卡片预览。
+
+    ``phrases`` 由 ``_query_phrases`` 按问题算一次，所有片段共用。
+    """
     normalized = " ".join(str(content or "").split())
     if len(normalized) <= limit:
         return normalized
 
     fragment = ""
     position = -1
-    for candidate in _query_phrases(question):
+    for candidate in phrases:
         found_at = normalized.find(candidate)
         if found_at >= 0:
             fragment = candidate
@@ -57,10 +62,10 @@ def _source_preview(content: str, question: str, limit: int = SOURCE_PREVIEW_MAX
     return prefix + normalized[start:end].strip() + suffix
 
 
-def _web_source(index: int, span: context_builder.ContextSpan, question: str) -> ChatSource:
+def _web_source(index: int, span: context_builder.ContextSpan, phrases: list[str]) -> ChatSource:
     """网页来源：标题作来源名，站点和日期作位置，带原始地址供前端打开。"""
     label = " · ".join(span.contextual_titles)
-    content = _source_preview(span.content, question)
+    content = _source_preview(span.content, phrases)
     return {
         "id": index,
         "citation_ids": [index],
@@ -93,10 +98,11 @@ def build_source_catalog(
     ``kb_names`` 把知识库 ID 映射为当前显示名称，作为来源的名称快照保存；身份始终是 ``kb_id``。
     """
     kb_names = kb_names or {}
+    phrases = _query_phrases(question)
     sources: list[ChatSource] = []
     for index, span in enumerate(spans, start=1):
         if span.url:
-            sources.append(_web_source(index, span, question))
+            sources.append(_web_source(index, span, phrases))
             continue
         source = span.source.replace("\\", "/").split("/")[-1] or "未知文档"
         item: ChatSource = {
@@ -105,7 +111,7 @@ def build_source_catalog(
             "source": source,
             "page": context_builder.context_span_page_label(span),
             "context_title": " / ".join(span.contextual_titles[:3]),
-            "content": _source_preview(span.content, question),
+            "content": _source_preview(span.content, phrases),
         }
         if span.kb_id:
             item["document_id"] = span.document_id

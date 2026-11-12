@@ -61,7 +61,7 @@ class DocumentIdentityTest(IsolatedStorageTestCase):
         with patch.object(worker, "enqueue", return_value=False):
             deletion = use_cases.delete_document(self.kb_id, first.document_id)
         self.assertFalse(app_storage.documents.document_exists(self.kb_id, first.document_id))
-        pipeline.run_delete_job(deletion.job_id, self.kb_id, first.document_id)
+        pipeline.run_delete_job(deletion.job_id, self.kb_id, first.document_id, container=get_application_container())
         self.assertFalse(
             Path(app_storage.documents.document_directory(self.kb_id, first.document_id)).exists()
         )
@@ -185,11 +185,11 @@ use_cases.upload_document(os.environ['TEST_KB_ID'], 'same.txt', io.BytesIO(b'new
         with patch.object(
             get_chunk_index(), "delete_document", side_effect=RuntimeError("unavailable")
         ):
-            pipeline.run_delete_job(job_id, self.kb_id, result.document_id)
+            pipeline.run_delete_job(job_id, self.kb_id, result.document_id, container=get_application_container())
         app_storage.index_jobs.prune_history(retention_days=1, max_per_kb=1)
         self.assertEqual(app_storage.index_jobs.get(job_id)["document_id"], result.document_id)
         app_storage.index_jobs.recover_interrupted()
-        pipeline.run_delete_job(job_id, self.kb_id, result.document_id)
+        pipeline.run_delete_job(job_id, self.kb_id, result.document_id, container=get_application_container())
         self.assertEqual(app_storage.index_jobs.get(job_id)["status"], "completed")
         with application_db.connect(app_storage.DB_FILE) as conn:
             self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])

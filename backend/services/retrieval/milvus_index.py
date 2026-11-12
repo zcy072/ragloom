@@ -228,7 +228,7 @@ class MilvusChunkIndex:
             "source": _clip(meta.get("source", ""), 512),
             "chunk_route": chunk_route(split),
             "chunk_index": int(meta.get("chunk_index", 0)),
-            "page": _clip(meta.get("page", meta.get("row", "")), 64),
+            "page": _clip(meta.get("page", ""), 64),
             "parent_id": _clip(meta.get("parent_id", ""), 128),
             "contextual_title": _clip(meta.get("contextual_title", ""), 2048),
             "visual_kind": _clip(meta.get("visual_kind", ""), 64),
@@ -300,24 +300,18 @@ class MilvusChunkIndex:
             client.delete(self._collection, ids=ids[offset : offset + _INSERT_BATCH])
 
     def delete_document(self, kb_id: str, document_id: str) -> None:
-        """删除一个文件的全部子块；collection 不存在时视为已删除。"""
-        client = self._get_client()
-        if not client.has_collection(self._collection):
-            return
+        """删除一个文件的全部子块；Milvus 不可用时抛出。"""
+        client = self._ready_client()
         client.delete(self._collection, filter=build_filter(kb_id, document_id=document_id))
 
     def delete_kb(self, kb_id: str) -> None:
         """删除一个知识库的全部子块；Milvus 不可用时抛出，由调用方中止操作。"""
-        client = self._get_client()
-        if not client.has_collection(self._collection):
-            return
+        client = self._ready_client()
         client.delete(self._collection, filter=build_filter(kb_id))
 
     def delete_stale_documents(self, kb_id: str, active_document_ids: set[str]) -> int:
         """删除知识库内不属于 active_document_ids 的文件的子块，返回删除的条数。"""
-        client = self._get_client()
-        if not client.has_collection(self._collection):
-            return 0
+        self._ready_client()
         stale_ids = self._ids(
             build_filter(kb_id), lambda row: row["document_id"] not in active_document_ids
         )
@@ -428,9 +422,6 @@ class MilvusChunkIndex:
         )
 
         if document_ids is not None and not document_ids:
-            return set()
-        client = self._get_client()
-        if not client.has_collection(self._collection):
             return set()
         client = self._ready_client()
         found = set()

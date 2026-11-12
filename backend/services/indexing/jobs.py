@@ -243,8 +243,13 @@ class IndexJobStore:
                 (kb_id, document_id, job_id),
             )
 
-    def prepare_rebuild(self, kb_id: str) -> str:
+    def prepare_rebuild(
+        self, kb_id: str, *, chunk_config: tuple[int, int] | None = None
+    ) -> str:
         """登记新的全库重建任务，并使同知识库的旧重建任务失效。
+
+        `chunk_config`（分块大小, 重叠长度）与任务在同一事务里写入：登记失败时配置也不变，
+        不会出现配置已改、索引没重建的情况。
 
         已就绪的文档标为 rebuilding：旧版本继续参与检索，直到新版本发布替换它；
         其余文档标为 processing。这里不持文档锁，单文档重新索引中的 publishing 文档
@@ -289,6 +294,11 @@ class IndexJobStore:
                 "UPDATE knowledge_bases SET active_rebuild_job_id = ? WHERE kb_id = ?",
                 (job_id, kb_id),
             )
+            if chunk_config is not None:
+                conn.execute(
+                    "UPDATE knowledge_bases SET chunk_size = ?, chunk_overlap = ? WHERE kb_id = ?",
+                    (*chunk_config, kb_id),
+                )
             # 被替代的单文档任务可能带着用户新选的解析方式；重建按文档上记录的方式解析，
             # 不先写回文档，用户的选择会被静默丢掉。
             conn.execute(

@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from services.core import config as application_config
-from services.core.container import ApplicationContainer, get_application_container
+from services.core.container import ApplicationContainer
 from services.core.errors import ResourceNotFoundError
 from services.core.request_context import carry_request_id
 from services.core.settings import get_settings
@@ -39,6 +39,20 @@ logger = logging.getLogger(__name__)
 # （最长 RERANK_TIMEOUT_SECONDS），期间命中的旧子块仍要能找到父段落。
 # 进程在此期间退出时旧父段落残留，下次发布会把文档已有的全部旧 parent_id 一并删除。
 OLD_PARENT_GRACE_SECONDS = 60.0
+
+# 解析与嵌入（阶段 A）的全局并行名额。上传 worker 和每个重建任务各有线程池，
+# 不共享名额时两个知识库同时重建会让 OCR 并行度翻倍，CPU 和内存跟着翻倍。
+_parse_slots: threading.BoundedSemaphore | None = None
+_parse_slots_lock = threading.Lock()
+
+
+def _get_parse_slots() -> threading.BoundedSemaphore:
+    """首次使用时按 index_worker_threads 创建；只在阶段 A 持有，不与任何锁嵌套。"""
+    global _parse_slots
+    with _parse_slots_lock:
+        if _parse_slots is None:
+            _parse_slots = threading.BoundedSemaphore(get_settings().index_worker_threads)
+        return _parse_slots
 
 
 def _get_chunk_config(kb_id: str, container: ApplicationContainer) -> tuple[int, int]:
@@ -244,7 +258,7 @@ def _publish_document(
     except Exception as exc:
         # 新旧两代子块可能都有残留，两版父段落都保留，以免任何残留子块丢失上下文。
         raise _PublishError(str(exc), previous_index_intact=False) from exc
-    retriever.drop_cached_retriever(kb_id)
+    retriever.drop_cached_retriever(kb_id, container)
     try:
         # 结果目录检索时不读取，只供重建复用；替换失败会恢复旧目录。
         prepared.workspace.publish_result_dir()
@@ -361,19 +375,21 @@ def _index_document(
                 return outcome, message
             workspace = prepared.workspace
 
-        # 阶段 A：解析、切分、嵌入。不持有知识库锁，同一知识库的多个文档可并行。
+        # 阶段 A：解析、切分、嵌入。不持有知识库锁，同一知识库的多个文档可并行；
+        # 全局并行数受 _parse_slots 限制，上传与重建共用。
         parsed: _ParsedDocument | None = None
         error_message = ""
         started = time.monotonic()
         try:
-            parsed = _parse_and_embed_document(
-                kb_id,
-                document_id,
-                filename,
-                prepared,
-                container,
-                lambda: index_jobs.is_current_document_job(kb_id, document_id, job_id),
-            )
+            with _get_parse_slots():
+                parsed = _parse_and_embed_document(
+                    kb_id,
+                    document_id,
+                    filename,
+                    prepared,
+                    container,
+                    lambda: index_jobs.is_current_document_job(kb_id, document_id, job_id),
+                )
         except _SupersededError:
             logger.info(
                 "Index job %s [%s/%s] superseded before embedding", job_id, kb_id, document_id
@@ -419,7 +435,7 @@ def _index_document(
             if parsed is not None:
                 # 发布时清过一次缓存，但首次上传的文档此刻才进入就绪列表；这期间建好的
                 # 检索图固定了不含它的文档列表，不再清一次会一直检索不到新文档。
-                retriever.drop_cached_retriever(kb_id)
+                retriever.drop_cached_retriever(kb_id, container)
             logger.info(
                 "Index job %s [%s/%s] %s: phaseA=%.1fs %s lock_wait=%.1fs publish=%.1fs",
                 job_id,
@@ -447,24 +463,25 @@ def run_document_job(
     kb_id: str,
     document_id: str,
     *,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> None:
     """仅当任务仍拥有文件最新版本时，才执行上传后的索引任务。"""
-    dependencies = container or get_application_container()
-    if not dependencies.documents.document_exists(
-        kb_id, document_id
-    ) or not dependencies.knowledge_bases.exists(kb_id):
-        dependencies.index_jobs().finish(job_id, INDEX_JOB_SUPERSEDED, "文档或知识库已删除")
-        return
+    index_jobs = container.index_jobs()
     try:
-        file_path = dependencies.documents.document_path(kb_id, document_id)
-    except ResourceNotFoundError:
-        dependencies.index_jobs().finish(job_id, INDEX_JOB_SUPERSEDED, "文档或知识库已删除")
-        return
-    index_jobs = dependencies.index_jobs()
-    try:
+        # 开头的存在性检查也在 try 内：这里 SQLite 被锁超时时，worker 只会把任务标为失败，
+        # 文档状态却没人写回，会一直停在处理中直到重启。
+        if not container.documents.document_exists(
+            kb_id, document_id
+        ) or not container.knowledge_bases.exists(kb_id):
+            index_jobs.finish(job_id, INDEX_JOB_SUPERSEDED, "文档或知识库已删除")
+            return
+        try:
+            file_path = container.documents.document_path(kb_id, document_id)
+        except ResourceNotFoundError:
+            index_jobs.finish(job_id, INDEX_JOB_SUPERSEDED, "文档或知识库已删除")
+            return
         outcome, message = _index_document(
-            job_id, kb_id, document_id, file_path, dependencies, rebuild=False
+            job_id, kb_id, document_id, file_path, container, rebuild=False
         )
     except Exception as exc:
         # 意外异常（例如 SQLite 被锁）也要写回文档状态，否则文档会一直停在处理中。
@@ -529,7 +546,7 @@ def run_rebuild_job(
     job_id: str,
     kb_id: str,
     *,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> None:
     """只执行知识库最新发起的重建请求。
 
@@ -537,8 +554,7 @@ def run_rebuild_job(
     解析失败只让该文档出错，其余文档照常重建。不预先清空索引：已就绪文档的旧版本
     在新版本发布前继续参与检索，发布时由 publish_document 先写新版本再删旧版本。
     """
-    dependencies = container or get_application_container()
-    index_jobs = dependencies.index_jobs()
+    index_jobs = container.index_jobs()
     with knowledge_base_lock(kb_id):
         if not index_jobs.start(job_id):
             return
@@ -547,10 +563,10 @@ def run_rebuild_job(
             return
         document_ids = [
             record["document_id"]
-            for record in dependencies.documents.list_documents(kb_id)
+            for record in container.documents.list_documents(kb_id)
             if record["index_job_id"] == job_id
         ]
-        retriever.drop_cached_retriever(kb_id)
+        retriever.drop_cached_retriever(kb_id, container)
 
     outcomes: list[tuple[str, str]] = []
     if document_ids:
@@ -561,7 +577,7 @@ def run_rebuild_job(
             outcomes = list(
                 executor.map(
                     carry_request_id(
-                        lambda name: _rebuild_one_document(job_id, kb_id, name, dependencies)
+                        lambda name: _rebuild_one_document(job_id, kb_id, name, container)
                     ),
                     document_ids,
                 )
@@ -574,8 +590,8 @@ def run_rebuild_job(
         if not index_jobs.is_active_rebuild(kb_id, job_id):
             index_jobs.finish(job_id, INDEX_JOB_SUPERSEDED, "已被新的重建任务替代")
             return
-        _drop_stale_vectors(kb_id, dependencies)
-        retriever.drop_cached_retriever(kb_id)
+        _drop_stale_vectors(kb_id, container)
+        retriever.drop_cached_retriever(kb_id, container)
         if not document_ids:
             job_status, message = INDEX_JOB_FAILED, "当前知识库没有可重建的文档"
         elif failed and not ready:
@@ -590,10 +606,12 @@ def run_rebuild_job(
         index_jobs.finish(job_id, job_status, message)
 
 
-def delete_document_indexes(kb_id: str, document_id: str) -> None:
+def delete_document_indexes(
+    kb_id: str, document_id: str, container: ApplicationContainer
+) -> None:
     get_chunk_index().delete_document(kb_id, document_id)
     parent_store.delete_document(kb_id, document_id)
-    retriever.drop_cached_retriever(kb_id)
+    retriever.drop_cached_retriever(kb_id, container)
 
 
 def run_delete_job(
@@ -601,17 +619,16 @@ def run_delete_job(
     kb_id: str,
     document_id: str,
     *,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> None:
     """幂等清理逻辑删除文档的全部外部资源；失败任务保留目标 ID 供恢复。"""
-    dependencies = container or get_application_container()
-    index_jobs = dependencies.index_jobs()
+    index_jobs = container.index_jobs()
     with document_lock(kb_id, document_id):
         if not index_jobs.start(job_id):
             return
         try:
-            delete_document_indexes(kb_id, document_id)
-            directory = dependencies.documents.document_directory(kb_id, document_id)
+            delete_document_indexes(kb_id, document_id, container)
+            directory = container.documents.document_directory(kb_id, document_id)
             if os.path.exists(directory):
                 shutil.rmtree(directory)
             mineru_client.remove_document_results(kb_id, document_id)

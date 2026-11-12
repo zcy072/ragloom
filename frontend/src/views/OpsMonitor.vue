@@ -162,7 +162,7 @@
         </ul>
       </div>
 
-      <div class="bg-white border border-[#e1eaea] rounded-lg p-5 shadow-[0_1px_2px_rgba(18,53,57,0.04)]">
+      <div v-if="canViewLogs" class="bg-white border border-[#e1eaea] rounded-lg p-5 shadow-[0_1px_2px_rgba(18,53,57,0.04)]">
         <div class="mb-3 flex items-center justify-between">
           <h3 class="font-semibold text-sm">后端日志（末尾）</h3>
           <select v-model="logLevel" aria-label="日志级别" class="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs" @change="loadLogs">
@@ -195,6 +195,7 @@ import { apiGet, authorizedFetch } from '../apiClient';
 import ChatTraceDetail from '../components/ChatTraceDetail.vue';
 import PaginationControl from '../components/PaginationControl.vue';
 import { formatLocalTime } from '../timeFormat';
+import { store } from '../store';
 import { toast } from '../toast';
 
 const statusOptions = [
@@ -292,7 +293,10 @@ const loadKnowledgeBases = () => guarded('知识库列表', async () => {
 const loadJobs = () => guarded('索引任务', async () => {
   jobs.value = await apiGet('/api/ops/index-jobs?status=failed&limit=10');
 });
+// 日志含所有知识库的信息，后端只对超级管理员开放。
+const canViewLogs = computed(() => store.user?.role === '超级管理员');
 const loadLogs = () => guarded('日志', async () => {
+  if (!canViewLogs.value) return;
   const params = new URLSearchParams({ lines: '200' });
   if (logLevel.value) params.set('level', logLevel.value);
   logs.value = await apiGet(`/api/ops/logs?${params}`);

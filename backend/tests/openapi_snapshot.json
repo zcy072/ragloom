@@ -785,11 +785,6 @@
             ],
             "title": "Model Provider"
           },
-          "new_session": {
-            "default": false,
-            "title": "New Session",
-            "type": "boolean"
-          },
           "question": {
             "maxLength": 4000,
             "title": "Question",
@@ -4254,7 +4249,7 @@
         ]
       },
       "put": {
-        "description": "保存分块大小，并安排完整索引重建任务。",
+        "description": "保存分块大小，并安排完整索引重建任务；两者在同一事务里，失败时配置不变。",
         "operationId": "save_kb_chunk_config_api_kbs__kb_id__chunk_config_put",
         "parameters": [
           {
@@ -5070,7 +5065,7 @@
     },
     "/api/ops/logs": {
       "get": {
-        "description": "返回 backend.log 末尾若干行；文件不存在时说明原因而不是报错。",
+        "description": "返回 backend.log 末尾若干行；文件不存在时说明原因而不是报错。\n\n日志是全局的，含所有知识库的 ID、文件名和任务信息，无法按可读知识库过滤，\n所以除运行监控权限外还要求超级管理员角色（角色名固定，不能改名）。",
         "operationId": "ops_logs_api_ops_logs_get",
         "parameters": [
           {

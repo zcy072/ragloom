@@ -31,7 +31,6 @@ from services.chat.query import retrieve_candidates_with_query_fallback
 from services.chat.ranking import rerank
 from services.chat.rewrite import (
     RetrievalQueryPlan,
-    _should_rewrite_query,
     build_query_variant,
     build_retrieval_query_plan,
     original_query_plan,
@@ -45,14 +44,13 @@ from services.chat.sources import (
 )
 from services.chat.trace import ChatTrace, TraceContextSpan, document_summary, stage_event
 from services.core import config as application_config
-from services.core.container import ApplicationContainer, get_application_container
+from services.core.container import ApplicationContainer
 from services.core.contracts import ModelConfig
 from services.core.errors import (
     InvalidRequestError,
     ResourceNotFoundError,
     ServiceUnavailableError,
 )
-from services.core.llm_config import create_answer_llm, select_model_config
 from services.core.safe_errors import safe_error_summary
 from services.core.settings import get_settings
 from services.retrieval import context as context_builder
@@ -73,6 +71,8 @@ class ChatStream:
 
     events: AsyncGenerator[str, None]
     refresh_summary: Callable[[], Awaitable[bool]]
+    # 响应结束后调用；回答流从未开始时补写取消的运行记录和追踪，否则什么都不做。
+    abandon: Callable[[], Awaitable[None]]
 
 
 def _protect_asterisks(value: str) -> str:
@@ -94,9 +94,16 @@ async def _stream_chunks(
     llm: Any,
     messages: list,
     recorder: ChatRunRecorder | None,
+    finish: dict[str, str] | None = None,
 ) -> AsyncGenerator[str, None]:
-    """逐个产出模型分片的纯文本内容；有内容时顺带记录首字时间。"""
+    """逐个产出模型分片的纯文本内容；有内容时顺带记录首字时间。
+
+    传入 ``finish`` 时把上游的 finish_reason 写进 ``finish["reason"]``，用来识别长度截断。
+    """
     async for chunk in llm.astream(messages):
+        reason = (getattr(chunk, "response_metadata", None) or {}).get("finish_reason")
+        if finish is not None and isinstance(reason, str) and reason:
+            finish["reason"] = reason
         content = _restore_asterisks(_chunk_text(chunk.content))
         if content:
             if recorder:
@@ -153,18 +160,13 @@ def _prompt_chars(messages: list) -> int:
 
 
 def _validate_and_normalize(
-    req: ChatRequest, container: ApplicationContainer | None = None
+    req: ChatRequest, container: ApplicationContainer
 ) -> tuple[ModelConfig, str]:
     """校验模型配置和知识库 ID，要求知识库处于可用状态，返回 (model_config, kb_id)。
 
     模型选择失败时直接抛出：未配置报 503，指定的服务商不存在报 404，不改用其他服务商。
     """
-    dependencies = container or get_application_container()
-    model_config = (
-        container.select_model(req.model_provider)
-        if container is not None
-        else select_model_config(req.model_provider, dependencies.model_providers)
-    )
+    model_config = container.select_model(req.model_provider)
     if not model_config["api_key"]:
         raise ServiceUnavailableError(
             "尚未配置大模型 API Key，请先前往【模型配置】页面填写并保存后再使用问答功能。",
@@ -174,13 +176,13 @@ def _validate_and_normalize(
         kb_id = application_config.validate_kb_id(req.kb_id)
     except ValueError as exc:
         raise InvalidRequestError(str(exc), code="invalid_knowledge_base_id") from exc
-    if not dependencies.knowledge_bases.exists(kb_id):
+    if not container.knowledge_bases.exists(kb_id):
         raise ResourceNotFoundError("知识库不存在", code="knowledge_base_not_found")
     return model_config, kb_id
 
 
 def _aux_model_config(
-    model_config: ModelConfig, container: ApplicationContainer | None = None
+    model_config: ModelConfig, container: ApplicationContainer
 ) -> ModelConfig:
     """返回改写、规划、补充查询和摘要使用的模型配置。
 
@@ -191,13 +193,8 @@ def _aux_model_config(
     provider = get_settings().chat_aux_model_provider
     if not provider:
         return model_config
-    dependencies = container or get_application_container()
     try:
-        aux_config = (
-            container.select_model(provider)
-            if container is not None
-            else select_model_config(provider, dependencies.model_providers)
-        )
+        aux_config = container.select_model(provider)
     except Exception as exc:
         logger.warning("Auxiliary model %s unavailable: %s", provider, safe_error_summary(exc))
         return model_config
@@ -222,12 +219,11 @@ def _load_session_history(
     owner: SessionOwner,
     kb_id: str,
     *,
-    force_new: bool = False,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> tuple[str, bool, chat_sessions.ConversationMemory]:
     """复用或创建会话，并返回早期摘要、最近对话原文和最近引用的文件。"""
     resolution = chat_sessions.resolve_session(
-        session_id, owner, kb_id, force_new=force_new, container=container
+        session_id, owner, kb_id, container=container
     )
     memory = chat_sessions.load_conversation_memory(
         resolution.session_id,
@@ -241,7 +237,7 @@ def _load_session_history(
 def _cleanup_failed_new_session(
     session_id: str,
     owner: SessionOwner,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> None:
     """前置处理失败时删除本次新建且尚未交付给客户端的会话。"""
     try:
@@ -260,7 +256,7 @@ async def _collect_web_results(
     query: str,
     trace: ChatTrace,
     diagnostics: RetrievalDiagnostics,
-    container: ApplicationContainer | None,
+    container: ApplicationContainer,
 ) -> list:
     """等待网页搜索并单独重排，记录追踪阶段；失败时返回空列表，不影响知识库问答。
 
@@ -303,7 +299,7 @@ async def _plan_query(
     conversation_summary: str,
     model_config: ModelConfig,
     image_base64: str | None,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
     *,
     recent_documents: tuple[str, ...] = (),
 ) -> tuple[RetrievalQueryPlan, bool]:
@@ -312,7 +308,6 @@ async def _plan_query(
     开启工具化检索时由模型决定；模型不可用、附带图片或知识库关闭改写时，
     均退回"总是检索"的原有行为。
     """
-    container = container or get_application_container()
     try:
         query_rewrite_enabled = container.knowledge_base_settings.query_rewrite_enabled(kb_id)
     except (ValueError, sqlite3.OperationalError):
@@ -333,13 +328,14 @@ async def _plan_query(
         if decision is not None:
             if not decision.should_search:
                 return original_query_plan(question), False
-            # 规划器也会把完整问题写成关键词式检索词；只有追问被补全时才算"结合了历史"，
+            # 规划器也会把完整问题写成关键词式检索词；只有它声明补全了追问才算"结合了历史"，
             # 否则回答模型会把检索词当成解析后的问题，回答目标随检索词的写法变化。
             return (
                 RetrievalQueryPlan(
                     query=decision.query,
-                    used_history=decision.query != question
-                    and _should_rewrite_query(question, history, conversation_summary),
+                    used_history=decision.used_history
+                    and decision.query != question
+                    and bool(history or conversation_summary.strip()),
                 ),
                 True,
             )
@@ -481,12 +477,14 @@ async def _stream_answer(
     messages: list,
     fallback_messages: list | None,
     image_base64: str | None,
+    *,
+    container: ApplicationContainer,
     allow_answer_without_evidence: bool = False,
-    container: ApplicationContainer | None = None,
     diagnostics: RetrievalDiagnostics | None = None,
     user_message_id: int | None = None,
     recorder: ChatRunRecorder | None = None,
     trace: ChatTrace | None = None,
+    on_start: Callable[[], None] | None = None,
 ) -> AsyncGenerator[str, None]:
     """逐段产出 SSE 数据，finally 块保证回答结束或中断后仍保存助手消息。
 
@@ -495,7 +493,10 @@ async def _stream_answer(
     生成失败且没有任何文字时会被撤回，避免历史里留下没有回答的孤立问题。
     客户端主动取消不算失败，问题保留。`recorder` 在 finally 中写入一条运行记录，
     未设置状态即表示被取消。`trace` 记录生成阶段，并与运行记录、助手消息一起落库。
+    `on_start` 在生成器第一次被迭代时调用，调用方据此判断落库是否已交给本函数。
     """
+    if on_start:
+        on_start()
     full_answer, display_answer = "", ""
     cited_sources: list[ChatSource] = []
     session_discarded = False
@@ -600,11 +601,7 @@ async def _stream_answer(
             return
 
         try:
-            llm = (
-                container.create_answer_llm(model_config)
-                if container is not None
-                else create_answer_llm(model_config)
-            )
+            llm = container.create_answer_llm(model_config)
         except Exception as exc:
             # 客户端构造失败（配置不合法等）同样是没有产出回答的生成失败。
             # 上游异常文本可能回显凭证，日志只记录允许的字段。
@@ -614,11 +611,12 @@ async def _stream_answer(
             yield failure_event(exc)
             return
         generation_failed = False
-        generation_error: Exception | None = None
+        generation_error: Exception | str | None = None
+        finish: dict[str, str] = {}
         if recorder:
             recorder.mark_generation_start()
         try:
-            async for content in _stream_chunks(llm, messages, recorder):
+            async for content in _stream_chunks(llm, messages, recorder, finish):
                 full_answer += content
                 yield f"data: {json.dumps({'chunk': content})}\n\n"
         except asyncio.CancelledError:
@@ -631,7 +629,7 @@ async def _stream_answer(
             # 从头重试会让浏览器拼接两份回答，而数据库只保存第二份。
             if fallback_messages and not full_answer:
                 try:
-                    async for content in _stream_chunks(llm, fallback_messages, recorder):
+                    async for content in _stream_chunks(llm, fallback_messages, recorder, finish):
                         full_answer += content
                         yield f"data: {json.dumps({'chunk': content})}\n\n"
                     generation_failed = False
@@ -643,6 +641,15 @@ async def _stream_answer(
                         "Text-only fallback failed: %s", safe_error_summary(fallback_exc)
                     )
 
+        if not generation_failed and not full_answer.strip():
+            # 模型正常结束却没有正文（常见于推理模型把输出额度全用在思考上）也是生成失败，
+            # 否则会被记成回答成功，前端收到空回答，问题却留在历史里。
+            logger.warning(
+                "Answer model returned no text (finish_reason=%s)", finish.get("reason", "")
+            )
+            generation_failed = True
+            generation_error = f"模型没有返回正文（finish_reason={finish.get('reason') or '无'}）"
+            full_answer = ""
         if generation_failed and not full_answer:
             # 错误不是回答：不流出、不落库，也不让上游异常原文到达用户或后续对话上下文。
             # 对应的用户问题同样撤回，见 failure_event。
@@ -653,8 +660,11 @@ async def _stream_answer(
 
         display_answer = full_answer.strip()
         cited_sources = select_cited_sources(display_answer, source_catalog)
-        # 中断提示只由终态事件通知前端展示，不写入历史，避免被当作模型说过的话。
+        # 中断和截断提示只由终态事件通知前端展示，不写入历史，避免被当作模型说过的话。
+        truncated = not generation_failed and finish.get("reason") == "length"
         interrupted_event = {"interrupted": True} if generation_failed else {}
+        if truncated:
+            interrupted_event["truncated"] = True
         if recorder:
             if generation_failed:
                 recorder.status = "interrupted"
@@ -669,6 +679,7 @@ async def _stream_answer(
                     first_token_ms=recorder.first_token_ms() if recorder else None,
                     answer_chars=len(display_answer),
                     cited=len(trace.cited_ids),
+                    **({"truncated": True} if truncated else {}),
                 )
             )
         if not await persist_answer():
@@ -725,7 +736,7 @@ async def with_heartbeat(
 async def chat(
     req: ChatRequest,
     owner: SessionOwner,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
     *,
     include_common: bool = False,
 ) -> ChatStream:
@@ -733,8 +744,6 @@ async def chat(
 
     ``include_common`` 由调用方按提问者能否读取通用知识库决定，为真时补充检索通用知识库。
     """
-    supplied_container = container
-    container = container or get_application_container()
     recorder = ChatRunRecorder(
         account_id=owner.account_id,
         username=owner.username,
@@ -747,9 +756,9 @@ async def chat(
     try:
         # 会话和知识库校验都是同步 SQLite 读写，放进线程避免阻塞事件循环。
         model_config, kb_id = await asyncio.to_thread(
-            _validate_and_normalize, req, supplied_container
+            _validate_and_normalize, req, container
         )
-        aux_config = await asyncio.to_thread(_aux_model_config, model_config, supplied_container)
+        aux_config = await asyncio.to_thread(_aux_model_config, model_config, container)
         if req.image_base64:
             trace.start("image")
         image_base64, image_mime, image_ocr_text = await prepare_chat_image(
@@ -764,7 +773,6 @@ async def chat(
                 req.session_id,
                 owner,
                 kb_id,
-                force_new=req.new_session,
                 container=container,
             )
         )
@@ -774,7 +782,7 @@ async def chat(
             recorder.status = "cancelled"
         else:
             recorder.fail(exc)
-        await asyncio.shield(asyncio.to_thread(recorder.finish, supplied_container))
+        await asyncio.shield(asyncio.to_thread(recorder.finish, container))
         raise
 
     recorder.kb_id = kb_id
@@ -937,9 +945,9 @@ async def chat(
         def _cleanup_and_record() -> None:
             if session_created:
                 _cleanup_failed_new_session(session_id, owner, container)
-            run_id = recorder.finish(supplied_container)
+            run_id = recorder.finish(container)
             # 会话可能已随清理删除，追踪记录仍按运行记录保留，供监控页排查失败原因。
-            trace.save(diagnostics, recorder.status, run_id=run_id, container=supplied_container)
+            trace.save(diagnostics, recorder.status, run_id=run_id, container=container)
 
         await asyncio.shield(asyncio.to_thread(_cleanup_and_record))
         raise
@@ -954,8 +962,29 @@ async def chat(
     # 返回协程的 lambda 会被当成同步函数放进线程池，协程从未执行，摘要永远不会更新。
     async def refresh_summary() -> bool:
         return await chat_memory.refresh_conversation_summary(
-            session_id, aux_config, supplied_container
+            session_id, aux_config, container
         )
+
+    answer_started = False
+
+    def mark_answer_started() -> None:
+        nonlocal answer_started
+        answer_started = True
+
+    async def abandon() -> None:
+        # 回答流开始后由它的 finally 落库；从未开始时这里按取消补写，用户问题保留，
+        # 与生成前客户端取消的处理一致。只补写一次，之后再迭代回答流也不会重复落库。
+        nonlocal answer_started
+        if answer_started:
+            return
+        answer_started = True
+        recorder.status = "cancelled"
+
+        def record() -> None:
+            run_id = recorder.finish(container)
+            trace.save(diagnostics, recorder.status, run_id=run_id, container=container)
+
+        await asyncio.shield(asyncio.to_thread(record))
 
     return ChatStream(
         events=_stream_answer(
@@ -966,11 +995,13 @@ async def chat(
             fallback_messages,
             image_base64,
             allow_answer_without_evidence=not should_search,
-            container=supplied_container,
+            container=container,
             diagnostics=diagnostics,
             user_message_id=user_message_id,
             recorder=recorder,
             trace=trace,
+            on_start=mark_answer_started,
         ),
         refresh_summary=refresh_summary,
+        abandon=abandon,
     )

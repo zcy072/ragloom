@@ -1,10 +1,11 @@
 """Chat sessions and streaming-answer HTTP endpoints."""
 
+from collections.abc import AsyncGenerator, Callable
 from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from starlette.background import BackgroundTask
+from starlette.types import Receive, Scope, Send
 
 from routers import schemas
 from services.chat import service as chat_service
@@ -41,6 +42,38 @@ def _source_reader(
     return source_access.kb_reader(
         principal.can_read_knowledge_base, container.knowledge_bases.exists
     )
+
+
+class _ChatStreamResponse(StreamingResponse):
+    """流式返回回答；响应结束后收尾回答流、释放问答名额，再刷新会话摘要。
+
+    收尾不能只靠事件生成器的 finally：客户端在首包前断开时（检索、重排期间点停止或刷新），
+    Starlette 可能一次都不迭代生成器，finally 不会执行，名额要等过期才作废，运行记录和
+    追踪也会丢失。名额在摘要刷新之前释放，摘要调用不占用户的并发名额。
+    """
+
+    def __init__(self, stream: chat_service.ChatStream, release: Callable[[], None]) -> None:
+        super().__init__(
+            chat_service.with_heartbeat(
+                stream.events, application_config.CHAT_SSE_HEARTBEAT_SECONDS
+            ),
+            media_type="text/event-stream",
+        )
+        self._stream = stream
+        self._release = release
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            try:
+                # 中途断开时生成器停在某个 yield，主动关闭让它的 finally 立即保存部分回答。
+                await cast(AsyncGenerator[str, None], self.body_iterator).aclose()
+                await self._stream.abandon()
+            finally:
+                self._release()
+        # 与 Starlette 的 BackgroundTask 一致：响应正常结束（含客户端断开）后才刷新。
+        await self._stream.refresh_summary()
 
 
 @router.get("/chat/sessions")
@@ -130,21 +163,7 @@ async def stream_chat_answer(
         release()
         raise
 
-    async def events():
-        # 回答流结束、出错或客户端断开时都释放名额。
-        try:
-            async for event in chat_service.with_heartbeat(
-                stream.events, application_config.CHAT_SSE_HEARTBEAT_SECONDS
-            ):
-                yield event
-        finally:
-            release()
-
-    return StreamingResponse(
-        events(),
-        media_type="text/event-stream",
-        background=BackgroundTask(stream.refresh_summary),
-    )
+    return _ChatStreamResponse(stream, release)
 
 
 @router.get("/chat/traces/{trace_id}")

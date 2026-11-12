@@ -28,7 +28,7 @@ def parent_chunk_rows(splits: Iterable) -> list[ParentRow]:
         parents[parent_id] = (
             parent_id,
             str(document.metadata.get("source", "")),
-            str(document.metadata.get("page", document.metadata.get("row", ""))),
+            str(document.metadata.get("page", "")),
             str(parent_content),
             str(document.metadata.get("contextual_title", "")),
         )

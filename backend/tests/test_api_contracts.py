@@ -6,6 +6,7 @@ import api
 from services.chat import sessions as chat_sessions
 from services.core import config as application_config
 from services.core import model_api_keys, model_use_cases
+from services.core.container import get_application_container
 from services.retrieval.chunk_index import get_chunk_index
 from tests.support import IsolatedStorageAsyncTestCase, api_client, kb_id_by_name
 
@@ -361,7 +362,7 @@ class ApiContractTest(IsolatedStorageAsyncTestCase):
         await self.client.put(
             "/api/chat/sessions/s1/title", json={"title": "我的标题"}
         )
-        chat_sessions.save_user_message("s1", "第一个问题")
+        chat_sessions.save_user_message("s1", "第一个问题", container=get_application_container())
 
         listed = await self.client.get("/api/chat/sessions")
         self.assertEqual(listed.json()[0]["title"], "我的标题")

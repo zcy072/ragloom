@@ -46,12 +46,13 @@ class IndexWorker:
         self._scan_interval = max(0.05, scan_interval)
         self._next_scan = 0.0
         self._worker_count = worker_count
+        # 模块级单例在导入时创建，那时默认容器还不能构造，不传时到用时再取。
         self._container = container
         self._dispatcher = dispatcher or (
-            lambda job_id: dispatch_index_job(job_id, container=self._container)
+            lambda job_id: dispatch_index_job(job_id, container=self._dependencies())
         )
         self._pending_job_ids = pending_job_ids or (
-            lambda: (self._container or get_application_container()).index_jobs().queued_ids()
+            lambda: self._dependencies().index_jobs().queued_ids()
         )
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._queued_job_ids: set[str] = set()
@@ -59,6 +60,9 @@ class IndexWorker:
         self._stopping = threading.Event()
         self._threads: list[threading.Thread] = []
         self._started = False
+
+    def _dependencies(self) -> ApplicationContainer:
+        return self._container or get_application_container()
 
     def start(self) -> None:
         """启动后台线程，并把 SQLite 中遗留的排队任务重新放入内存队列。"""
@@ -149,7 +153,7 @@ class IndexWorker:
                     # 标记失败本身也可能出错（例如 SQLite 被锁）；不能让异常带走线程。
                     # 任务留在 running，下次启动时 recover_interrupted 会把它标为 interrupted（删除任务则重新排队）。
                     try:
-                        (self._container or get_application_container()).index_jobs().finish(
+                        self._dependencies().index_jobs().finish(
                             job_id, INDEX_JOB_FAILED, str(exc)
                         )
                     except Exception:
@@ -162,10 +166,9 @@ class IndexWorker:
                 self._queue.task_done()
 
 
-def dispatch_index_job(job_id: str, *, container: ApplicationContainer | None = None) -> None:
+def dispatch_index_job(job_id: str, *, container: ApplicationContainer) -> None:
     """按任务操作类型分发到文档处理、重建或删除索引流程。"""
-    dependencies = container or get_application_container()
-    index_jobs = dependencies.index_jobs()
+    index_jobs = container.index_jobs()
     job = index_jobs.get(job_id)
     if not job or job["status"] != INDEX_JOB_QUEUED:
         return
@@ -181,17 +184,17 @@ def dispatch_index_job(job_id: str, *, container: ApplicationContainer | None = 
             job_id,
             kb_id,
             document_id,
-            container=dependencies,
+            container=container,
         )
         return
     if operation == "rebuild":
-        knowledge_base.run_rebuild_job(job_id, kb_id, container=dependencies)
+        knowledge_base.run_rebuild_job(job_id, kb_id, container=container)
         return
     if operation == "delete":
         if not document_id:
             index_jobs.finish(job_id, INDEX_JOB_FAILED, "删除索引任务缺少文档 ID")
             return
-        knowledge_base.run_delete_job(job_id, kb_id, document_id, container=dependencies)
+        knowledge_base.run_delete_job(job_id, kb_id, document_id, container=container)
         return
 
     index_jobs.finish(job_id, INDEX_JOB_FAILED, "未知的索引任务类型")

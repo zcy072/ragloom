@@ -159,7 +159,7 @@ async def refine_evidence(
     filters: RetrievalFilters | None,
     *,
     include_common: bool = False,
-    container: ApplicationContainer | None,
+    container: ApplicationContainer,
     diagnostics: RetrievalDiagnostics,
 ) -> list:
     """最多补充检索 `CHAT_AGENTIC_MAX_ROUNDS` 轮，返回合并后的证据。"""

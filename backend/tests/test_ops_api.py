@@ -9,6 +9,7 @@ import app_storage
 from services.chat import runs as chat_runs
 from services.core import config as application_config
 from services.core import log_tail
+from services.core.container import get_application_container
 from tests.in_memory_index import InMemoryChunkIndex
 from tests.support import IsolatedStorageTestCase, add_knowledge_bases, api_client
 
@@ -66,7 +67,7 @@ class OpsApiTest(IsolatedStorageTestCase):
             )
         kb_id = add_knowledge_bases("技术部")[0]
         recorder = chat_runs.ChatRunRecorder(1, "alice", kb_id, question="问题", status="answered")
-        chat_runs.record_run(recorder)
+        chat_runs.record_run(recorder, container=get_application_container())
 
     def _get(self, username, password, paths):
         async def run():
@@ -86,6 +87,18 @@ class OpsApiTest(IsolatedStorageTestCase):
         ]
         for response in self._get("plain", "user-password", paths):
             self.assertEqual(response.status_code, 403)
+
+    def test_logs_are_limited_to_the_super_admin_role(self):
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.execute(
+                "UPDATE roles SET menu_permissions = '[\"问答对话\", \"运行监控\"]' "
+                "WHERE name = '普通'"
+            )
+        logs, runs = self._get("plain", "user-password", ["/api/ops/logs", "/api/ops/chat-runs"])
+        self.assertEqual(logs.status_code, 403)
+        self.assertEqual(runs.status_code, 200)
+        (admin_logs,) = self._admin_get("/api/ops/logs")
+        self.assertEqual(admin_logs.status_code, 200)
 
     def test_model_check_requires_model_permission_but_listing_does_not(self):
         check, listing = self._get("plain", "user-password", ["/api/models/check", "/api/models"])
@@ -204,7 +217,7 @@ class OpsKnowledgeBaseScopeTest(IsolatedStorageTestCase):
             )
         for kb_id in (self.readable_id, self.hidden_id, self.deleting_id):
             chat_runs.record_run(
-                chat_runs.ChatRunRecorder(1, "alice", kb_id, question=kb_id, status="answered")
+                chat_runs.ChatRunRecorder(1, "alice", kb_id, question=kb_id, status="answered"), container=get_application_container()
             )
             app_storage.index_jobs.prepare_rebuild(kb_id)
         app_storage.knowledge_bases.mark_deleting(self.deleting_id)

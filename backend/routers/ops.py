@@ -4,7 +4,7 @@ import json
 import os
 from typing import Any, Literal, cast
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 
 import app_storage
@@ -18,6 +18,7 @@ from services.core.container import ApplicationContainer, get_application_contai
 from services.core.logging_setup import log_file_path
 from services.core.settings import get_settings
 from services.identity import auth as auth_service
+from services.identity.roles import SUPER_ADMIN_ROLE_NAME
 from services.retrieval.chunk_index import get_chunk_index
 
 router = APIRouter(prefix="/api/ops", tags=["ops"])
@@ -35,9 +36,10 @@ def _readable_kb_ids(principal: auth_service.Principal) -> list[str] | None:
 def ops_overview(
     days: int = Query(default=7, ge=1, le=90),
     principal: auth_service.Principal = Depends(_MONITOR),
+    container: ApplicationContainer = Depends(get_application_container),
 ) -> chat_runs.RunsOverview:
     """返回最近 N 天问答的状态分布、耗时分位数和按天趋势，只统计调用者能读的知识库。"""
-    return chat_runs.overview(days, kb_ids=_readable_kb_ids(principal))
+    return chat_runs.overview(days, kb_ids=_readable_kb_ids(principal), container=container)
 
 
 @router.get("/dependencies", response_model=list[schemas.OpsDependencyResponse])
@@ -59,6 +61,7 @@ def ops_chat_runs(
     limit: int = Query(default=20, ge=1, le=chat_runs.LIST_LIMIT_MAX),
     offset: int = Query(default=0, ge=0),
     principal: auth_service.Principal = Depends(_MONITOR),
+    container: ApplicationContainer = Depends(get_application_container),
 ) -> dict:
     """按时间倒序分页返回问答记录，可按状态、知识库、最小总耗时和用户评价过滤。
 
@@ -67,6 +70,7 @@ def ops_chat_runs(
     total, items = chat_runs.list_runs(
         status=status, kb_id=kb_id or None, kb_ids=_readable_kb_ids(principal),
         min_total_ms=slow_ms, feedback=feedback, limit=limit, offset=offset,
+        container=container,
     )
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 
@@ -99,7 +103,10 @@ def ops_export_chat_traces(
             ensure_ascii=False,
         )
         for stored in chat_trace.evaluation_rows(
-            -1 if rating == "down" else 1, limit=limit, kb_ids=_readable_kb_ids(principal)
+            -1 if rating == "down" else 1,
+            limit=limit,
+            kb_ids=_readable_kb_ids(principal),
+            container=container,
         )
     ]
     return PlainTextResponse(
@@ -127,9 +134,15 @@ def ops_index_jobs(
 def ops_logs(
     lines: int = Query(default=200, ge=1, le=LOG_LINES_MAX),
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] | None = None,
-    _principal: auth_service.Principal = Depends(_MONITOR),
+    principal: auth_service.Principal = Depends(_MONITOR),
 ) -> dict:
-    """返回 backend.log 末尾若干行；文件不存在时说明原因而不是报错。"""
+    """返回 backend.log 末尾若干行；文件不存在时说明原因而不是报错。
+
+    日志是全局的，含所有知识库的 ID、文件名和任务信息，无法按可读知识库过滤，
+    所以除运行监控权限外还要求超级管理员角色（角色名固定，不能改名）。
+    """
+    if principal.role != SUPER_ADMIN_ROLE_NAME:
+        raise HTTPException(403, "后端日志只对超级管理员开放")
     path = log_file_path(get_settings())
     if not os.path.isfile(path):
         return {

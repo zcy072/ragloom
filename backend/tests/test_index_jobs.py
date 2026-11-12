@@ -73,7 +73,7 @@ class IndexJobTest(IsolatedStorageTestCase):
             patch.object(knowledge_base, "_publish_document") as publish,
         ):
             knowledge_base.run_document_job(
-                job_id, self.kb_id, fixture_document_id(self.kb_id, "方案.pdf")
+                job_id, self.kb_id, fixture_document_id(self.kb_id, "方案.pdf"), container=get_application_container()
             )
         publish.assert_called_once()
 
@@ -88,6 +88,33 @@ class IndexJobTest(IsolatedStorageTestCase):
         self.assertEqual(status, "ready")
         self.assertEqual(job_status, INDEX_JOB_COMPLETED)
 
+    def test_database_error_in_the_pre_checks_still_marks_the_document_failed(self):
+        """开头的存在性检查遇到 SQLite 被锁时，文档也要写回失败，不能一直停在处理中。"""
+        job_id = create_index_job(self.kb_id, "process", "方案.pdf")
+        document_id = fixture_document_id(self.kb_id, "方案.pdf")
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.execute(
+                "UPDATE documents SET index_job_id = ?, status = 'processing' WHERE document_id = ?",
+                (job_id, document_id),
+            )
+        documents = get_application_container().documents
+        with patch.object(
+            type(documents),
+            "document_exists",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ):
+            knowledge_base.run_document_job(job_id, self.kb_id, document_id, container=get_application_container())
+
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            status = conn.execute(
+                "SELECT status FROM documents WHERE document_id = ?", (document_id,)
+            ).fetchone()[0]
+            job_status = conn.execute(
+                "SELECT status FROM index_jobs WHERE id = ?", (job_id,)
+            ).fetchone()[0]
+        self.assertEqual(status, "error")
+        self.assertEqual(job_status, INDEX_JOB_FAILED)
+
     def test_cache_is_dropped_after_new_document_becomes_ready(self):
         # 发布时清过缓存，但新文档要到状态写成 ready 才进入就绪列表；这之间建好的
         # 检索图不含新文档，状态写入后必须再清一次。
@@ -101,7 +128,7 @@ class IndexJobTest(IsolatedStorageTestCase):
         parsed = knowledge_base._ParsedDocument([], [], {})
         statuses_at_drop: list[str] = []
 
-        def record_status(kb_id):
+        def record_status(kb_id, _container):
             with sqlite3.connect(app_storage.DB_FILE) as conn:
                 statuses_at_drop.append(
                     conn.execute(
@@ -118,7 +145,7 @@ class IndexJobTest(IsolatedStorageTestCase):
             ),
         ):
             knowledge_base.run_document_job(
-                job_id, self.kb_id, fixture_document_id(self.kb_id, "方案.pdf")
+                job_id, self.kb_id, fixture_document_id(self.kb_id, "方案.pdf"), container=get_application_container()
             )
         self.assertEqual(statuses_at_drop[-1:], ["ready"])
 
@@ -140,6 +167,32 @@ class IndexJobTest(IsolatedStorageTestCase):
             app_storage.documents.get_document(self.kb_id, document_id)["parser_mode"],
             "mineru_cloud",
         )
+
+    def test_chunk_config_is_saved_together_with_the_rebuild_job(self):
+        """重建任务登记失败时分块配置不变，避免配置已改、索引没重建。"""
+
+        def chunk_config():
+            with sqlite3.connect(app_storage.DB_FILE) as conn:
+                return conn.execute(
+                    "SELECT chunk_size, chunk_overlap FROM knowledge_bases WHERE kb_id = ?",
+                    (self.kb_id,),
+                ).fetchone()
+
+        before = chunk_config()
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            # 让事务里最后一条文档更新失败，模拟登记中途出错。
+            conn.execute(
+                "CREATE TRIGGER fail_rebuild BEFORE UPDATE OF index_job_id ON documents "
+                "BEGIN SELECT RAISE(ABORT, 'boom'); END"
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            app_storage.index_jobs.prepare_rebuild(self.kb_id, chunk_config=(600, 0))
+        self.assertEqual(chunk_config(), before)
+
+        with sqlite3.connect(app_storage.DB_FILE) as conn:
+            conn.execute("DROP TRIGGER fail_rebuild")
+        app_storage.index_jobs.prepare_rebuild(self.kb_id, chunk_config=(600, 0))
+        self.assertEqual(chunk_config(), (600, 0))
 
     def test_document_source_allowlist_contains_only_ready_versions(self):
         with sqlite3.connect(app_storage.DB_FILE) as conn:
@@ -354,7 +407,7 @@ class IndexJobTest(IsolatedStorageTestCase):
     def test_dispatcher_routes_queued_document_job(self):
         job_id = create_index_job(self.kb_id, "process", "方案.pdf")
         with patch.object(index_worker.knowledge_base, "run_document_job") as run_document_job:
-            index_worker.dispatch_index_job(job_id)
+            index_worker.dispatch_index_job(job_id, container=get_application_container())
 
         run_document_job.assert_called_once_with(
             job_id,

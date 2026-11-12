@@ -127,7 +127,7 @@ def prune_expired_history() -> None:
     最后尝试压缩数据库，回收删除知识库等操作留下的空闲页；空闲页不足阈值时跳过。
     """
     index_jobs.prune_history()
-    chat_runs.prune(db_file=DB_FILE)
+    chat_runs.prune(DB_FILE)
     login_events.prune(DB_FILE)
     auth_sessions.prune_expired(DB_FILE)
     index_jobs.compact_database()

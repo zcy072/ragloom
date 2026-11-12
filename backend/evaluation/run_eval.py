@@ -194,12 +194,18 @@ def interleave(groups: list[list]) -> list:
 
 
 def agentic_model_config() -> dict:
-    """补充检索评测使用的对话模型：沿用 SiliconFlow 默认模型，key 来自环境变量。"""
+    """补充检索评测使用的对话模型。
+
+    默认用 SiliconFlow 的默认模型和 SILICONFLOW_API_KEY；设置 EVAL_AGENTIC_BASE_URL 和
+    EVAL_AGENTIC_API_KEY 可改用其他 OpenAI 兼容服务商，EVAL_AGENTIC_MODEL 指定模型名。
+    """
     from services.core import config as application_config
 
     return {
-        "api_key": os.environ["SILICONFLOW_API_KEY"],
-        "base_url": application_config.DEFAULT_SILICONFLOW_BASE_URL,
+        "api_key": os.getenv("EVAL_AGENTIC_API_KEY") or os.environ["SILICONFLOW_API_KEY"],
+        "base_url": os.getenv(
+            "EVAL_AGENTIC_BASE_URL", application_config.DEFAULT_SILICONFLOW_BASE_URL
+        ),
         "model": os.getenv("EVAL_AGENTIC_MODEL", application_config.DEFAULT_SILICONFLOW_MODEL),
     }
 
@@ -242,7 +248,7 @@ async def evaluate_question(
         from services.retrieval.chunk_index import get_chunk_index
 
         index = get_chunk_index()
-        sources = retrieval.source_state.current_document_allowlist(kb_id, None)
+        sources = retrieval.source_state.current_document_allowlist(kb_id, None, container)
         routes = sorted(index.available_routes(kb_id, sources))
         embeddings = retrieval.CachedQueryEmbeddings(container.create_query_embeddings())
         k = retrieval.RETRIEVAL_DENSE_K
@@ -468,6 +474,7 @@ async def run(args: argparse.Namespace) -> int:
             "agentic": (
                 {
                     "model": agentic_model_config()["model"],
+                    "base_url": agentic_model_config()["base_url"],
                     "questions_with_followup": sum(1 for n in agentic_rounds if n),
                     "total_rounds": sum(agentic_rounds),
                 }

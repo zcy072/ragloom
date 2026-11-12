@@ -9,7 +9,7 @@ from services.core import sqlite_connections as application_db
 
 logger = logging.getLogger(__name__)
 
-CURRENT_DATABASE_SCHEMA_VERSION = 13
+CURRENT_DATABASE_SCHEMA_VERSION = 14
 
 
 def _create_chat_memory_table(conn: sqlite3.Connection) -> None:
@@ -87,14 +87,6 @@ def _create_current_tables(
             base_url TEXT,
             default_model TEXT,
             is_active INTEGER DEFAULT 0
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS app_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
         )
         """
     )

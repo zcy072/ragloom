@@ -57,16 +57,20 @@ def create_knowledge_base(name: str, *, grant_role_id: int | None = None) -> Kno
         raise _name_conflict() from exc
 
 
-def schedule_rebuild(kb_id: str) -> str:
-    """Create the latest durable rebuild job and wake the index worker."""
+def schedule_rebuild(kb_id: str, *, chunk_config: tuple[int, int] | None = None) -> str:
+    """Create the latest durable rebuild job and wake the index worker.
+
+    `chunk_config` is saved in the same transaction as the job, so a failed schedule leaves
+    the old configuration in place.
+    """
     index_jobs = get_application_container().index_jobs()
     try:
-        job_id = index_jobs.prepare_rebuild(kb_id)
+        job_id = index_jobs.prepare_rebuild(kb_id, chunk_config=chunk_config)
     except ValueError as exc:
         raise ResourceNotFoundError(
             str(exc), code="knowledge_base_not_found"
         ) from exc
-    retriever.drop_cached_retriever(kb_id)
+    retriever.drop_cached_retriever(kb_id, get_application_container())
     index_worker.enqueue(job_id)
     return job_id
 
@@ -110,7 +114,7 @@ def _finish_delete(kb_id: str) -> None:
     dependencies.index_jobs().supersede(kb_id, "知识库已删除")
     _cleanup_external_resources(kb_id)
     dependencies.knowledge_bases.delete_relational_data(kb_id)
-    retriever.drop_cached_retriever(kb_id)
+    retriever.drop_cached_retriever(kb_id, get_application_container())
     # 不在请求线程里 VACUUM：它会锁住整个数据库的写入，交给启动时和每日清理压缩。
     dependencies.index_jobs().redact_orphaned_filenames(kb_id)
 

@@ -6,7 +6,7 @@ from typing import Any
 
 from services.chat.diagnostics import RetrievalDiagnostics
 from services.chat.ranking import select_rerank_candidates
-from services.core.container import ApplicationContainer, get_application_container
+from services.core.container import ApplicationContainer
 from services.core.contracts import RetrievalFilters
 from services.core.errors import InvalidRequestError, InvalidStateError
 from services.retrieval import retriever as retrieval_service
@@ -85,14 +85,13 @@ async def retrieve_rerank_candidates(
     filters: RetrievalFilters | None = None,
     *,
     include_common: bool = False,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
     diagnostics: RetrievalDiagnostics | None = None,
 ):
     """执行语义检索，并额外补充一小批 BM25 精确关键词候选。
 
     ``include_common`` 表示提问者能读取通用知识库，此时补充检索通用知识库。
     """
-    container = container or get_application_container()
     # 检索库和 SQLite 都是同步的，整段放进线程，避免阻塞 FastAPI 事件循环。
     semantic_docs, lexical_docs = await asyncio.to_thread(
         _collect_candidates, kb_id, question, has_image, filters, include_common, container
@@ -160,7 +159,7 @@ async def retrieve_candidates_with_query_fallback(
     *,
     variant_query: str = "",
     include_common: bool = False,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
     diagnostics: RetrievalDiagnostics | None = None,
 ) -> tuple[list, str]:
     """优先使用改写问题检索；只有完全无命中时才回退用户原问题。
@@ -170,9 +169,7 @@ async def retrieve_candidates_with_query_fallback(
     """
     # A rewrite is preferred when it succeeds, but it can occasionally over-specify the
     # user's intent.  Retry the original wording only when the rewrite found no evidence.
-    container_kwargs: dict[str, Any] = {"include_common": include_common}
-    if container is not None:
-        container_kwargs["container"] = container
+    container_kwargs: dict[str, Any] = {"include_common": include_common, "container": container}
     primary_kwargs: dict[str, Any] = dict(container_kwargs)
     if diagnostics is not None:
         primary_kwargs["diagnostics"] = diagnostics

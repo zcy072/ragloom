@@ -1626,7 +1626,11 @@ class ChatRateLimitHttpTest(IsolatedStorageTestCase):
             yield "data: {}\n\n"
 
         async def fake_chat(*_args, **_kwargs):
-            return SimpleNamespace(events=events(), refresh_summary=lambda: asyncio.sleep(0))
+            return SimpleNamespace(
+                events=events(),
+                refresh_summary=lambda: asyncio.sleep(0),
+                abandon=lambda: asyncio.sleep(0),
+            )
 
         async def run():
             async with api_client() as client:
@@ -1655,6 +1659,45 @@ class ChatRateLimitHttpTest(IsolatedStorageTestCase):
         self.assertEqual([response.status_code for response in responses], [200, 200, 429])
         self.assertEqual(responses[2].json()["code"], "chat_rate_limited")
         self.assertIn("Retry-After", responses[2].headers)
+
+
+    def test_disconnect_before_the_first_event_frees_the_slot(self):
+        """客户端在首包前断开时生成器可能一次都不被迭代，名额和收尾仍要立即完成。"""
+        calls = []
+
+        async def events():
+            calls.append("iterated")
+            yield "data: {}\n\n"
+
+        async def abandon():
+            calls.append("abandon")
+
+        async def refresh_summary():
+            calls.append("summary")
+            # 摘要刷新时名额必须已经释放，不能让摘要调用占用户的并发名额。
+            rate_limit.get_chat_request_limiter().acquire(1)()
+
+        stream = SimpleNamespace(
+            events=events(), refresh_summary=refresh_summary, abandon=abandon
+        )
+        with patch.dict("os.environ", {"CHAT_USER_MAX_CONCURRENT": "1", "CHAT_USER_PER_MINUTE": "10"}):
+            rate_limit.reset_auth_rate_limiter()
+            release = rate_limit.get_chat_request_limiter().acquire(1)
+            response = chat_router._ChatStreamResponse(stream, release)
+            sent = []
+
+            async def receive():
+                return {"type": "http.disconnect"}
+
+            async def send(message):
+                sent.append(message["type"])
+                await asyncio.sleep(0)
+
+            asyncio.run(
+                response({"type": "http", "asgi": {"spec_version": "2.3"}}, receive, send)
+            )
+            self.assertEqual(calls, ["abandon", "summary"])
+            rate_limit.get_chat_request_limiter().acquire(1)()
 
 
 if __name__ == "__main__":

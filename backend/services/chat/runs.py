@@ -144,7 +144,7 @@ class ChatRunRecorder:
 
     def finish(
         self,
-        container: ApplicationContainer | None = None,
+        container: ApplicationContainer,
         *,
         answer_chars: int | None = None,
         cited_sources: int | None = None,
@@ -181,7 +181,7 @@ def _resolved_status(recorder: ChatRunRecorder) -> RunStatus:
     return recorder.status or "cancelled"
 
 
-def record_run(recorder: ChatRunRecorder, *, container: ApplicationContainer | None = None) -> int:
+def record_run(recorder: ChatRunRecorder, *, container: ApplicationContainer) -> int:
     """把一次问答的累积事实写成一行记录，返回记录 ID。"""
     now = time.perf_counter()
     extra = {key: value for key, value in recorder.elapsed_ms.items() if key not in _STAGE_COLUMNS}
@@ -253,7 +253,7 @@ def overview(
     days: int,
     *,
     kb_ids: Sequence[str] | None = None,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> RunsOverview:
     """统计最近 `days` 天的问答状态分布、耗时分位数和按天趋势。
 
@@ -370,7 +370,7 @@ def list_runs(
     feedback: int | None = None,
     limit: int = 20,
     offset: int = 0,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> tuple[int, list[ChatRunRecord]]:
     """按时间倒序分页返回记录，并给出过滤后的总数；每条记录带上对应的追踪 ID 和用户评价。
 
@@ -410,15 +410,13 @@ def list_runs(
     return total, [_record_from_row(row) for row in rows]
 
 
-def prune(
-    retention_days: int | None = None,
-    *,
-    container: ApplicationContainer | None = None,
-    db_file: str | None = None,
-) -> int:
-    """删除超过保留期的运行记录和追踪记录，返回删除的运行记录条数；启动维护时直接传入数据库路径。"""
+def prune(db_file: str, retention_days: int | None = None) -> int:
+    """删除超过保留期的运行记录和追踪记录，返回删除的运行记录条数。
+
+    与 login_events.prune 等维护函数一样直接接收数据库路径，由 app_storage 的定时维护调用。
+    """
     days = max(1, retention_days or get_settings().chat_run_retention_days)
-    with application_db.connect(db_file or database_file(container)) as conn:
+    with application_db.connect(db_file) as conn:
         cursor = conn.execute("DELETE FROM chat_runs WHERE created_at < ?", (_cutoff(days),))
         chat_trace.prune(conn, _cutoff(days))
     return cursor.rowcount

@@ -36,7 +36,6 @@ class ContextSpan:
     source: str
     content: str
     pages: tuple[str, ...]
-    page_unit: str
     rank: int
     chunk_start: int | None = None
     chunk_end: int | None = None
@@ -250,7 +249,7 @@ def _span_from_documents(
         if content and content not in seen_contents:
             unique_contents.append(content)
             seen_contents.add(content)
-        raw_page = document.metadata.get("page", document.metadata.get("row"))
+        raw_page = document.metadata.get("page")
         if raw_page not in (None, ""):
             page = str(raw_page)
             if page not in pages:
@@ -258,12 +257,10 @@ def _span_from_documents(
         contextual_title = str(document.metadata.get("contextual_title", "")).strip()
         if contextual_title and contextual_title not in contextual_titles:
             contextual_titles.append(contextual_title)
-    page_unit = "页"
     return ContextSpan(
         source=source,
         content="\n\n".join(unique_contents),
         pages=tuple(pages),
-        page_unit=page_unit,
         rank=rank,
         chunk_start=chunk_start,
         chunk_end=chunk_end,
@@ -494,7 +491,7 @@ def context_span_page_label(span: ContextSpan) -> str:
         except (TypeError, ValueError):
             display_pages.append(str(raw_page))
     suffix = " 等" if len(span.pages) > 4 else ""
-    return f"第 {', '.join(display_pages)}{suffix} {span.page_unit}"
+    return f"第 {', '.join(display_pages)}{suffix} 页"
 
 
 def format_context_spans(spans: list[ContextSpan]) -> str:

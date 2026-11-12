@@ -9,7 +9,9 @@ import app_storage
 from routers import knowledge_bases as kb_routes
 from services.chat import runs, service, sessions, trace
 from services.chat.diagnostics import RetrievalDiagnostics
+from services.core import llm_config
 from services.core import sqlite_connections as application_db
+from services.core.container import get_application_container
 from services.core.errors import ResourceNotFoundError
 from tests.support import IsolatedStorageTestCase, add_knowledge_bases
 
@@ -20,7 +22,7 @@ class ChatLifecycleTest(IsolatedStorageTestCase):
         app_storage.initialize_database()
         self.a, self.b = add_knowledge_bases("主库", "来源库")
         self.owner = sessions.SessionOwner(1, "alice")
-        self.session_id = sessions.resolve_session(None, self.owner, self.a).session_id
+        self.session_id = sessions.resolve_session(None, self.owner, self.a, container=get_application_container()).session_id
 
     def source(self, kb_id):
         return {"id": 1, "kb_id": kb_id, "source": "制度.pdf", "content": "证据"}
@@ -28,11 +30,11 @@ class ChatLifecycleTest(IsolatedStorageTestCase):
     def test_deleting_main_kb_rejects_all_writes_and_history(self):
         app_storage.knowledge_bases.mark_deleting(self.a)
         for write in (
-            lambda: sessions.resolve_session(None, self.owner, self.a),
-            lambda: sessions.resolve_session(self.session_id, self.owner, self.a),
-            lambda: sessions.save_user_message(self.session_id, "问题"),
-            lambda: sessions.save_assistant_message(self.session_id, "回答", []),
-            lambda: sessions.load_owned_session_messages(self.session_id, self.owner),
+            lambda: sessions.resolve_session(None, self.owner, self.a, container=get_application_container()),
+            lambda: sessions.resolve_session(self.session_id, self.owner, self.a, container=get_application_container()),
+            lambda: sessions.save_user_message(self.session_id, "问题", container=get_application_container()),
+            lambda: sessions.save_assistant_message(self.session_id, "回答", [], container=get_application_container()),
+            lambda: sessions.load_owned_session_messages(self.session_id, self.owner, container=get_application_container()),
         ):
             with self.assertRaises(ResourceNotFoundError):
                 write()
@@ -41,17 +43,17 @@ class ChatLifecycleTest(IsolatedStorageTestCase):
                 self.session_id,
                 "摘要",
                 expected_message_id=0,
-                through_message_id=1,
+                through_message_id=1, container=get_application_container(),
             )
         )
-        self.assertEqual(runs.record_run(runs.ChatRunRecorder(1, "alice", self.a)), 0)
+        self.assertEqual(runs.record_run(runs.ChatRunRecorder(1, "alice", self.a), container=get_application_container()), 0)
         payload = trace.ChatTrace(1, kb_id=self.a).payload(RetrievalDiagnostics("问题"), "answered")
         trace.save_trace(
             payload,
             account_id=1,
             session_id=self.session_id,
             run_id=None,
-            assistant_message_id=None,
+            assistant_message_id=None, container=get_application_container(),
         )
         with application_db.connect(app_storage.DB_FILE) as conn:
             for table in ("chat_messages", "chat_session_memory", "chat_runs", "chat_traces"):
@@ -61,10 +63,10 @@ class ChatLifecycleTest(IsolatedStorageTestCase):
         app_storage.knowledge_bases.delete_relational_data(self.b)
         sources = [self.source(self.a), self.source(self.b)]
         sources[0]["evidence"] = [self.source(self.a), self.source(self.b)]
-        sessions.save_assistant_message(self.session_id, "历史正文不改", sources)
+        sessions.save_assistant_message(self.session_id, "历史正文不改", sources, container=get_application_container())
         tracker = trace.ChatTrace(1, kb_id=self.a, session_id=self.session_id)
         tracker.candidates = [{"kb_id": self.b, "snippet": "不可保留"}]
-        tracker.save(RetrievalDiagnostics("问题"), "answered", run_id=None)
+        tracker.save(RetrievalDiagnostics("问题"), "answered", run_id=None, container=get_application_container())
         with application_db.connect(app_storage.DB_FILE) as conn:
             saved_sources = json.loads(
                 conn.execute("SELECT sources FROM chat_messages").fetchone()[0]
@@ -81,7 +83,7 @@ class ChatLifecycleTest(IsolatedStorageTestCase):
             {"id": 3, "url": "https://example.test"},
         ]
         sources[0]["evidence"] = [self.source(self.a), self.source(self.b)]
-        sessions.save_assistant_message(self.session_id, "来源库这个词保留", sources)
+        sessions.save_assistant_message(self.session_id, "来源库这个词保留", sources, container=get_application_container())
         payload = trace.ChatTrace(1, kb_id=self.a).payload(RetrievalDiagnostics("问题"), "answered")
         for key in ("candidates", "reranked", "context"):
             payload[key] = [{"kb_id": self.a}, {"kb_id": self.b}]
@@ -91,7 +93,7 @@ class ChatLifecycleTest(IsolatedStorageTestCase):
             account_id=1,
             session_id=self.session_id,
             run_id=None,
-            assistant_message_id=None,
+            assistant_message_id=None, container=get_application_container(),
         )
         app_storage.knowledge_bases.delete_relational_data(self.b)
         with application_db.connect(app_storage.DB_FILE) as conn:
@@ -126,11 +128,11 @@ class ChatLifecycleTest(IsolatedStorageTestCase):
                         [],
                         None,
                         None,
-                        allow_answer_without_evidence=True,
+                        allow_answer_without_evidence=True, container=get_application_container(),
                     )
                 ]
 
-            with patch.object(service, "create_answer_llm", return_value=Model()):
+            with patch.object(llm_config, "create_answer_llm", return_value=Model()):
                 task = asyncio.create_task(consume())
                 await asyncio.wait_for(started.wait(), 5)
                 app_storage.knowledge_bases.mark_deleting(self.a)

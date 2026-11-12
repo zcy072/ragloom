@@ -16,7 +16,8 @@ export function useChatSessions({ messages, selectedKb }, dependencies = {}) {
   // 会话列表请求序号：快速切换时，较早发出的响应后到达不能覆盖较新的结果。
   let sessionsRequestVersion = 0;
   const deletingSessionId = ref(null);
-  // 只有用户主动点击“新对话”时置为 true，页面恢复会话时保持 false。
+  // 用户点击“新对话”后置为 true，页面初始化时据此不再自动打开最近的会话。
+  // 后端不带 session_id 就新建会话，所以发送请求不需要这个标记。
   const newSessionPending = ref(false);
   /** 从后端刷新当前用户可见的聊天会话。 */
   const loadSessions = async () => {

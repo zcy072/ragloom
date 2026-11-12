@@ -11,6 +11,7 @@ from fastapi import UploadFile
 import app_storage
 from routers import documents, knowledge_bases, schemas
 from services.core import config as application_config
+from services.core.container import get_application_container
 from services.core.errors import (
     InvalidRequestError,
     PayloadTooLargeError,
@@ -303,7 +304,7 @@ class DocumentMetadataApiTest(IsolatedStorageTestCase):
             "remove_document_results",
             side_effect=RuntimeError("artifact unavailable"),
         ):
-            pipeline.run_delete_job(result.job_id, self.kb_id, document_id)
+            pipeline.run_delete_job(result.job_id, self.kb_id, document_id, container=get_application_container())
         self.assertFalse(app_storage.documents.document_exists(self.kb_id, document_id))
         job = app_storage.index_jobs.get(result.job_id)
         self.assertEqual(job["status"], INDEX_JOB_FAILED)

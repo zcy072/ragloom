@@ -28,7 +28,6 @@ const createComposable = ({
   webSearch
 }) => {
   const messages = ref([]);
-  const newSessionPending = ref(true);
   const modelConfigured = ref(true);
   let sessionRefreshes = 0;
   const errors = [];
@@ -40,7 +39,6 @@ const createComposable = ({
       modelConfigured,
       hasRetrievalFilters: ref(false),
       retrievalFilterPayload: () => ({}),
-      newSessionPending,
       loadSessions: async () => { sessionRefreshes += 1; },
       ...(webSearch ? { webSearch } : {})
     },
@@ -54,7 +52,6 @@ const createComposable = ({
   return {
     composable,
     messages,
-    newSessionPending,
     modelConfigured,
     chatStore,
     errors,
@@ -78,7 +75,6 @@ test('SSE events split across reads produce one terminal assistant message', asy
   assert.equal(fixture.messages.value[1].content, '最终答案');
   assert.deepEqual(fixture.messages.value[1].sources, [{ id: 1 }]);
   assert.equal(fixture.chatStore.activeSessionId, 'new-session');
-  assert.equal(fixture.newSessionPending.value, false);
   assert.equal(fixture.refreshes(), 1);
   assert.equal(fixture.composable.loading.value, false);
 });

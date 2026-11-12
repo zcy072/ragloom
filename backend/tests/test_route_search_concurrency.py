@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 from langchain_core.documents import Document as LCDocument
 
+from services.core.container import get_application_container
 from services.retrieval import retriever as retrieval_service
 
 
@@ -53,9 +54,9 @@ class WeightedRouteRetrieverTests(unittest.TestCase):
             retrieval_service._RoutePlan("kb2", "fixed", 0.5, None),
             retrieval_service._RoutePlan("kb3", "fixed", 0.5, None),
         ]
-        retriever = retrieval_service.WeightedRouteRetriever(index, embeddings, plans)
+        retriever = retrieval_service.WeightedRouteRetriever(index, embeddings, plans, container=get_application_container())
 
-        def allowlist(kb_id, _requested):
+        def allowlist(kb_id, _requested, _container):
             return [] if kb_id == "kb3" else [f"{kb_id}.pdf"]
 
         original = retrieval_service.source_state.current_document_allowlist

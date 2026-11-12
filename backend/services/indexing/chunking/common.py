@@ -283,7 +283,7 @@ def _adjacent_split_key(document: LCDocument) -> tuple[str, str, str, str]:
     """生成用于比较相邻切片是否重复的键。"""
     return (
         _split_source(document),
-        str(document.metadata.get("page", document.metadata.get("row", ""))),
+        str(document.metadata.get("page", "")),
         chunk_route(document),
         re.sub(r"\s+", "", document.page_content),
     )

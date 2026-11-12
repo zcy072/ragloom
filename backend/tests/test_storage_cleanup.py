@@ -9,6 +9,7 @@ from langchain_core.documents import Document
 import app_storage
 from routers import chat, knowledge_bases, schemas
 from services.core import config as application_config
+from services.core.container import get_application_container
 from services.core.errors import ServiceUnavailableError
 from services.documents import mineru as mineru_client
 from services.indexing import pipeline as knowledge_base
@@ -50,11 +51,11 @@ class StorageCleanupTest(IsolatedStorageTestCase):
             ) as compact_database,
         ):
             knowledge_base.run_delete_job(
-                job_id, self.kb_id, fixture_document_id(self.kb_id, "制度.pdf")
+                job_id, self.kb_id, fixture_document_id(self.kb_id, "制度.pdf"), container=get_application_container()
             )
 
         delete_indexes.assert_called_once_with(
-            self.kb_id, fixture_document_id(self.kb_id, "制度.pdf")
+            self.kb_id, fixture_document_id(self.kb_id, "制度.pdf"), get_application_container()
         )
         compact_database.assert_called_once_with()
         with sqlite3.connect(app_storage.DB_FILE) as conn:
@@ -75,7 +76,7 @@ class StorageCleanupTest(IsolatedStorageTestCase):
             patch.object(app_storage.index_jobs, "compact_database", return_value=False),
         ):
             knowledge_base.run_delete_job(
-                job_id, self.kb_id, fixture_document_id(self.kb_id, "制度.pdf")
+                job_id, self.kb_id, fixture_document_id(self.kb_id, "制度.pdf"), container=get_application_container()
             )
 
         with sqlite3.connect(app_storage.DB_FILE) as conn:

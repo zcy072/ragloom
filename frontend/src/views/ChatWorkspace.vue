@@ -81,6 +81,7 @@
                 <button @click="copyAnswer(msg.content)" :disabled="loading || loadingSession || !msg.content" class="app-icon-button mt-2 disabled:opacity-40" title="复制回答" aria-label="复制回答"><Copy class="h-4 w-4" /></button>
               </div>
               <div v-if="msg.interrupted" class="mt-2 text-[12px] text-amber-700">回答生成中断，以上内容可能不完整，请重试。</div>
+              <div v-else-if="msg.truncated" class="mt-2 text-[12px] text-amber-700">回答达到长度上限被截断，可以让模型接着说或缩小问题范围。</div>
               <ChatMessageTrace :message="msg" @feedback="value => { msg.feedback = value; }" />
               <RetrievalDiagnostics v-if="msg.diagnostics" :diagnostics="msg.diagnostics" />
               <div v-if="visibleSources(msg).length > 0" class="mt-3">
@@ -289,7 +290,6 @@ const {
   modelConfigured,
   hasRetrievalFilters,
   retrievalFilterPayload,
-  newSessionPending,
   loadSessions,
   webSearch: computed(() => webSearchAllowed.value && webSearch.value)
 });

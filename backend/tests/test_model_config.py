@@ -129,7 +129,7 @@ class ModelConfigTest(IsolatedStorageTestCase):
         }
         clients = (
             (llm_config.create_answer_llm(model_config), 4000),
-            (llm_config.create_rewrite_llm(model_config), 256),
+            (llm_config.create_rewrite_llm(model_config), 1024),
             (
                 llm_config.create_planner_llm(model_config),
                 config.CHAT_RETRIEVAL_PLANNING_MAX_TOKENS,

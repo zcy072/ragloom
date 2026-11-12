@@ -294,14 +294,10 @@ def save_kb_chunk_config(
     data: schemas.ChunkConfigRequest,
     _principal=Depends(auth_service.require_knowledge_base_manager),
 ):
-    """保存分块大小，并安排完整索引重建任务。"""
-    chunk_size = data.chunk_size
-    chunk_overlap = data.chunk_overlap
-    try:
-        app_storage.knowledge_base_settings.set_chunk_config(kb_id, chunk_size, chunk_overlap)
-    except ValueError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    job_id = knowledge_base_use_cases.schedule_rebuild(kb_id)
+    """保存分块大小，并安排完整索引重建任务；两者在同一事务里，失败时配置不变。"""
+    job_id = knowledge_base_use_cases.schedule_rebuild(
+        kb_id, chunk_config=(data.chunk_size, data.chunk_overlap)
+    )
     return {"status": "success", "rebuilding": True, "job_id": job_id}
 
 

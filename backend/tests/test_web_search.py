@@ -13,6 +13,8 @@ from services.chat import service as chat_service
 from services.chat import trace as chat_trace
 from services.chat import web_search
 from services.chat.sources import build_source_catalog, select_cited_sources
+from services.core import llm_config
+from services.core.container import get_application_container
 from services.retrieval import context as context_builder
 from tests import test_chat_trace
 
@@ -112,25 +114,35 @@ class SearchWebTest(unittest.TestCase):
 
     def test_missing_key_degrades_without_calling_provider(self):
         with patch.object(web_search, "configured_provider", return_value=None):
-            outcome = asyncio.run(web_search.search_web("q", "q", 1))
+            outcome = asyncio.run(web_search.search_web("q", "q", 1, container=get_application_container()))
         self.assertEqual(outcome.documents, [])
         self.assertEqual(outcome.error, "未配置 DeepSeek 密钥")
 
     def test_provider_failure_degrades(self):
         provider = SimpleNamespace(search=AsyncMock(side_effect=web_search.WebSearchError("搜索超时")))
-        outcome = asyncio.run(web_search.search_web("q", "q", 1, provider=provider))
+        outcome = asyncio.run(web_search.search_web("q", "q", 1, provider=provider, container=get_application_container()))
         self.assertEqual((outcome.documents, outcome.error), ([], "搜索超时"))
 
     def test_failed_search_does_not_consume_quota(self):
         failing = SimpleNamespace(search=AsyncMock(side_effect=RuntimeError("boom")))
         working = SimpleNamespace(search=AsyncMock(return_value=[]))
         with patch.dict(os.environ, {"WEB_SEARCH_USER_PER_MINUTE": "1", "WEB_SEARCH_DAILY_LIMIT": "1"}):
-            failed = asyncio.run(web_search.search_web("q", "q", 1, provider=failing))
-            succeeded = asyncio.run(web_search.search_web("q", "q", 1, provider=working))
-            limited = asyncio.run(web_search.search_web("q", "q", 1, provider=working))
+            failed = asyncio.run(web_search.search_web("q", "q", 1, provider=failing, container=get_application_container()))
+            succeeded = asyncio.run(web_search.search_web("q", "q", 1, provider=working, container=get_application_container()))
+            limited = asyncio.run(web_search.search_web("q", "q", 1, provider=working, container=get_application_container()))
         self.assertEqual(failed.error, "搜索失败：RuntimeError")
         self.assertEqual(succeeded.error, "")
         self.assertIn("上限", limited.error)
+
+    def test_cancelled_search_refunds_quota(self):
+        """检索阶段出错或用户取消时搜索任务被取消，服务方没有返回结果，额度要退回。"""
+        cancelled = SimpleNamespace(search=AsyncMock(side_effect=asyncio.CancelledError))
+        working = SimpleNamespace(search=AsyncMock(return_value=[]))
+        with patch.dict(os.environ, {"WEB_SEARCH_USER_PER_MINUTE": "1", "WEB_SEARCH_DAILY_LIMIT": "1"}):
+            with self.assertRaises(asyncio.CancelledError):
+                asyncio.run(web_search.search_web("q", "q", 1, provider=cancelled, container=get_application_container()))
+            succeeded = asyncio.run(web_search.search_web("q", "q", 1, provider=working, container=get_application_container()))
+        self.assertEqual(succeeded.error, "")
 
 
 class WebSourcesTest(unittest.TestCase):
@@ -173,10 +185,10 @@ class WebSearchFlowTest(test_chat_trace.ChatFlowTestCase):
             return [doc for doc in docs if doc.metadata.get("url")]
 
         async def consume():
-            stream = await chat_service.chat(request, owner)
+            stream = await chat_service.chat(request, owner, container=get_application_container())
             return [event async for event in stream.events]
 
-        with patch.object(chat_service, "select_model_config", return_value={
+        with patch.object(llm_config, "select_model_config", return_value={
             "api_key": "k", "base_url": "https://example.test/v1", "model": "m",
         }), patch.object(
             chat_service, "prepare_chat_image", new=AsyncMock(return_value=("", "", ""))
@@ -187,13 +199,13 @@ class WebSearchFlowTest(test_chat_trace.ChatFlowTestCase):
             chat_service.context_builder, "build_context_spans", return_value=[]
         ), patch.object(
             chat_service.web_search, "search_web", new=AsyncMock(return_value=outcome)
-        ), patch.object(chat_service, "create_answer_llm", return_value=Model()):
+        ), patch.object(llm_config, "create_answer_llm", return_value=Model()):
             events = [json.loads(e[6:]) for e in asyncio.run(consume()) if e.startswith("data: ")]
 
         self.assertIn("https://example.com/p", seen_messages[-1].content)
         final = events[-1]
         self.assertEqual(final["sources"][0]["url"], "https://example.com/p")
-        payload = chat_trace.load_trace(final["trace_id"]).payload
+        payload = chat_trace.load_trace(final["trace_id"], container=get_application_container()).payload
         web_stage = next(s for s in payload["stages"] if s["stage"] == "web_search")
         self.assertEqual(web_stage["status"], "ok")
         self.assertEqual(payload["web_results"][0]["url"], "https://example.com/p")

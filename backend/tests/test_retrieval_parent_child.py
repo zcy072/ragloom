@@ -229,18 +229,20 @@ class ParentChildRetrievalTest(IsolatedStorageTestCase):
                 app_storage.documents, "ready_document_ids", side_effect=states
             ) as ready_read,
         ):
-            with source_state.request_document_snapshot(self.kb_id):
+            with source_state.request_document_snapshot(self.kb_id, container=get_application_container()):
                 self.assertEqual(
-                    source_state.current_document_allowlist(self.kb_id, None),
+                    source_state.current_document_allowlist(self.kb_id, None, container=get_application_container()),
                     ("现行制度.pdf", "降级方案.pdf"),
                 )
                 threaded_sources = asyncio.run(
-                    asyncio.to_thread(source_state.ready_document_ids, self.kb_id)
+                    asyncio.to_thread(
+                        source_state.ready_document_ids, self.kb_id, get_application_container()
+                    )
                 )
                 self.assertEqual(threaded_sources, ("现行制度.pdf", "降级方案.pdf"))
 
-            with source_state.request_document_snapshot(self.kb_id):
-                self.assertEqual(source_state.ready_document_ids(self.kb_id), ("新版制度.pdf",))
+            with source_state.request_document_snapshot(self.kb_id, container=get_application_container()):
+                self.assertEqual(source_state.ready_document_ids(self.kb_id, container=get_application_container()), ("新版制度.pdf",))
 
         self.assertEqual(ready_read.call_count, 2)
 
@@ -291,7 +293,7 @@ class ParentChildRetrievalTest(IsolatedStorageTestCase):
             self.assertEqual(
                 retriever.get_cached_retriever(self.kb_id, include_common=True), "with-common"
             )
-            retriever.drop_cached_retriever(self.kb_id)
+            retriever.drop_cached_retriever(self.kb_id, container=get_application_container())
             self.assertIsNone(retriever.get_cached_retriever(self.kb_id))
             self.assertIsNone(retriever.get_cached_retriever(self.kb_id, include_common=True))
 
@@ -309,7 +311,7 @@ class ParentChildRetrievalTest(IsolatedStorageTestCase):
             )
         ]
         with patch.object(self.index(), "search_hybrid", return_value=[]) as search:
-            retriever.WeightedRouteRetriever(self.index(), embeddings, plans).invoke("审批规则")
+            retriever.WeightedRouteRetriever(self.index(), embeddings, plans, container=get_application_container()).invoke("审批规则")
 
         self.assertEqual(search.call_count, 3)
         self.assertEqual(base_embeddings.query_calls, 1)
@@ -344,7 +346,7 @@ class ParentChildRetrievalTest(IsolatedStorageTestCase):
                 retriever._route_plans(app_storage_container(), index, self.kb_id, None, 0.7)
             self.assertEqual(probe.call_count, 1)
 
-            retriever.drop_cached_retriever(self.kb_id)
+            retriever.drop_cached_retriever(self.kb_id, container=get_application_container())
             retriever._route_plans(app_storage_container(), index, self.kb_id, None, 0.7)
             self.assertEqual(probe.call_count, 2)
 
@@ -407,7 +409,7 @@ class ParentChildRetrievalTest(IsolatedStorageTestCase):
             retriever._RoutePlan(kb_id, chunking.CHUNK_ROUTE_FIXED, 0.60, None),
         ]
 
-        found = retriever.WeightedRouteRetriever(self.index(), FakeEmbeddings(), plans).invoke(
+        found = retriever.WeightedRouteRetriever(self.index(), FakeEmbeddings(), plans, container=get_application_container()).invoke(
             "审批规则"
         )
 
@@ -455,7 +457,7 @@ class ParentChildRetrievalTest(IsolatedStorageTestCase):
             ),
         )
 
-        found = retriever.WeightedRouteRetriever(self.index(), FakeEmbeddings(), [plan]).invoke(
+        found = retriever.WeightedRouteRetriever(self.index(), FakeEmbeddings(), [plan], container=get_application_container()).invoke(
             "审批规则"
         )
 
@@ -468,7 +470,7 @@ class ParentChildRetrievalTest(IsolatedStorageTestCase):
 
         with patch.object(self.index(), "search_hybrid", side_effect=RuntimeError("milvus down")):
             with self.assertRaisesRegex(RuntimeError, "milvus down"):
-                retriever.WeightedRouteRetriever(self.index(), FakeEmbeddings(), [plan]).invoke(
+                retriever.WeightedRouteRetriever(self.index(), FakeEmbeddings(), [plan], container=get_application_container()).invoke(
                     "审批规则"
                 )
 
@@ -668,7 +670,7 @@ class ParentChildRetrievalTest(IsolatedStorageTestCase):
 
         mark_ready(self.kb_id, document_id)
         plans = [retriever._RoutePlan(self.kb_id, chunking.CHUNK_ROUTE_FIXED, 1.0, None)]
-        fused = retriever.WeightedRouteRetriever(index, FakeEmbeddings(), plans).invoke("片段")
+        fused = retriever.WeightedRouteRetriever(index, FakeEmbeddings(), plans, container=get_application_container()).invoke("片段")
         self.assertEqual(len(fused), 6)
 
     def test_parent_child_split_keeps_parent_text_on_one_transient_child_only(self):

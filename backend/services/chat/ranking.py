@@ -16,7 +16,7 @@ from services.core.config import (
     RETRIEVAL_RERANK_MAX_CANDIDATES,
     RETRIEVAL_RERANK_MIN_SCORE,
 )
-from services.core.container import ApplicationContainer, get_application_container
+from services.core.container import ApplicationContainer
 from services.core.safe_errors import safe_error_summary
 from services.core.settings import get_settings
 from services.indexing import chunking
@@ -128,21 +128,23 @@ async def rerank(
     question: str,
     docs: list,
     *,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
     diagnostics: RetrievalDiagnostics | None = None,
 ) -> list:
-    """对数量受限且来源多样的候选重排序；失败时保留原候选顺序并截到与成功时相同的数量。"""
+    """对候选重排序；失败时保留原候选顺序并截到与成功时相同的数量。
+
+    知识库候选由调用方经 ``select_rerank_candidates`` 选好（召回阶段已做多样性限额），
+    这里不再重复挑选，只按上限截断，保证远程重排不会收到无界列表。
+    """
     if not docs:
         return docs
-    # Candidate bounding is repeated here because callers may also use this helper
-    # directly; the remote reranker must never receive an unbounded document list.
-    candidates = select_rerank_candidates(docs)
+    candidates = docs[:RETRIEVAL_RERANK_MAX_CANDIDATES]
     if diagnostics is not None:
         diagnostics.counts["rerank_input"] = len(candidates)
         diagnostics.rerank_status = "degraded"
     try:
         client = await _get_rerank_client()
-        url, model, headers = _rerank_endpoint(container or get_application_container())
+        url, model, headers = _rerank_endpoint(container)
         response = await client.post(
             url,
             json={

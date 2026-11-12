@@ -242,7 +242,7 @@ class ChatTrace:
         *,
         run_id: int | None,
         assistant_message_id: int | None = None,
-        container: ApplicationContainer | None = None,
+        container: ApplicationContainer,
     ) -> None:
         """生成追踪记录并写库；状态缺失视为被取消，与运行记录的规则一致。"""
         save_trace(
@@ -324,7 +324,7 @@ def save_trace(
     session_id: str,
     run_id: int | None,
     assistant_message_id: int | None,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> None:
     """写入一条追踪记录；失败只记警告，不影响回答。"""
     try:
@@ -365,7 +365,7 @@ class StoredTrace:
     payload: ChatTracePayload
 
 
-def load_trace(trace_id: str, *, container: ApplicationContainer | None = None) -> StoredTrace:
+def load_trace(trace_id: str, *, container: ApplicationContainer) -> StoredTrace:
     """按 ID 读取追踪记录；不存在时抛出 404 对应的错误。"""
     with application_db.connect(database_file(container)) as conn:
         row = conn.execute(
@@ -397,7 +397,7 @@ def set_feedback(
     account_id: int,
     feedback: Feedback,
     *,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> None:
     """记录提问者对回答的评价；只有追踪记录的所属账号可以评价，正在删除的知识库不接受评价。
 
@@ -424,7 +424,7 @@ def evaluation_rows(
     *,
     limit: int,
     kb_ids: Sequence[str] | None = None,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> list[StoredTrace]:
     """按时间倒序取出指定评价的追踪记录，供导出为评测题目；损坏的记录跳过。
 

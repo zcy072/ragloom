@@ -34,7 +34,6 @@ export function useChatStream({
   modelConfigured,
   hasRetrievalFilters,
   retrievalFilterPayload,
-  newSessionPending,
   loadSessions,
   webSearch = null
 }, dependencies = {}) {
@@ -136,7 +135,6 @@ export function useChatStream({
         question: questionText,
         kb_id: selectedKb.value,
         ...(chatStore.activeSessionId ? { session_id: chatStore.activeSessionId } : {}),
-        ...(newSessionPending.value ? { new_session: true } : {}),
         ...(imageBase64 ? { image_base64: imageBase64, image_mime: imageMime } : {}),
         ...(selectedModel.value ? { model_provider: selectedModel.value } : {}),
         ...(hasRetrievalFilters.value ? { filters: retrievalFilterPayload() } : {}),
@@ -238,6 +236,7 @@ export function useChatStream({
                   lastMessage.content = data.final_answer || answer;
                   lastMessage.sources = data.sources || [];
                   if (data.interrupted) lastMessage.interrupted = true;
+                  if (data.truncated) lastMessage.truncated = true;
                   if (data.diagnostics && Object.keys(data.diagnostics).length) lastMessage.diagnostics = data.diagnostics;
                   lastMessage.stages = stages;
                   if (data.trace_id) {
@@ -251,7 +250,6 @@ export function useChatStream({
                   if (!isCurrent()) return;
                   sessionCreated = true;
                 }
-                if (data.session_id) newSessionPending.value = false;
               }
             } catch (error) {
               console.error('Error parsing stream:', error);

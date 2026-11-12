@@ -214,7 +214,7 @@ class IndexWorkerTest(IsolatedStorageTestCase):
                 async with api.lifespan(api.app):
                     start.assert_called_once_with()
                     start_rerank.assert_called_once_with()
-                    warmup.assert_called_once_with()
+                    warmup.assert_called_once_with(api.get_application_container())
                 stop.assert_called_once_with()
                 close_rerank.assert_awaited_once_with()
 

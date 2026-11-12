@@ -93,7 +93,7 @@ def _history_message_from_row(row: tuple[object, ...]) -> ChatHistoryMessage:
 
 
 def list_owned_sessions(
-    owner: SessionOwner, *, container: ApplicationContainer | None = None
+    owner: SessionOwner, *, container: ApplicationContainer
 ) -> list[ChatSessionSummary]:
     """按最近更新时间返回一个账号拥有的全部会话。"""
     with application_db.connect(database_file(container)) as conn:
@@ -122,7 +122,7 @@ def get_owned_session_kb(
     session_id: str,
     owner: SessionOwner,
     *,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> str:
     """返回本人会话绑定的知识库；不存在或不属于本人时统一返回 404。"""
     with application_db.connect(database_file(container)) as conn:
@@ -133,7 +133,7 @@ def load_owned_session_messages(
     session_id: str,
     owner: SessionOwner,
     *,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> tuple[str, list[ChatHistoryMessage]]:
     """校验会话归属，并返回其知识库和按时间排序的消息。"""
     with application_db.connect(database_file(container)) as conn:
@@ -151,7 +151,7 @@ def delete_owned_session(
     session_id: str,
     owner: SessionOwner,
     *,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> None:
     """再次校验归属后，原子删除会话及其全部消息。"""
     with application_db.connect(database_file(container)) as conn:
@@ -167,7 +167,7 @@ def rename_owned_session(
     owner: SessionOwner,
     title: str,
     *,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> None:
     """校验归属后更新会话标题；标题的空值和长度由接口层的请求模型保证。"""
     with application_db.connect(database_file(container)) as conn:
@@ -183,7 +183,7 @@ def save_user_message(
     session_id: str,
     content: str,
     *,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> int:
     """在回答生成前保存用户消息，返回消息 ID；会话的第一条消息同时决定会话标题。"""
     with application_db.connect(database_file(container)) as conn:
@@ -214,7 +214,7 @@ def discard_user_message(
     session_id: str,
     message_id: int,
     *,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> bool:
     """撤回没有得到任何回答的用户消息；会话因此变空时一并删除，返回会话是否已删除。"""
     with application_db.connect(database_file(container)) as conn:
@@ -238,7 +238,7 @@ def save_assistant_message(
     content: str,
     sources: list[ChatSource],
     *,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> int:
     """保存助手回答和引用，并同步会话的最近更新时间，返回消息 ID。"""
     now = application_config.db_now()
@@ -271,11 +271,12 @@ def resolve_session(
     owner: SessionOwner,
     kb_id: str,
     *,
-    force_new: bool = False,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> SessionResolution:
-    """解析或创建会话，并告知调用方是否需要在前置失败时清理新会话。"""
-    created = False
+    """解析指定会话；不带 session_id 时总是新建，告知调用方是否需要在前置失败时清理。
+
+    不能自动续接最近的会话：前端会话列表加载失败时界面是空白对话，消息却会追加进旧会话。
+    """
     with application_db.connect(database_file(container)) as conn:
         conn.execute("BEGIN IMMEDIATE")
         lifecycle.require_active_kb(conn, kb_id)
@@ -295,38 +296,22 @@ def resolve_session(
             )
             return SessionResolution(session_id=session_id, created=False)
 
-        existing = None
-        if not force_new:
-            existing = conn.execute(
-                "SELECT id FROM chat_sessions "
-                "WHERE account_id = ? AND kb_id = ? "
-                "ORDER BY updated_at DESC LIMIT 1",
-                (owner.account_id, kb_id),
-            ).fetchone()
-        if existing:
-            session_id = str(existing[0])
-            conn.execute(
-                "UPDATE chat_sessions SET updated_at = ? WHERE id = ?",
-                (application_config.db_now(), session_id),
-            )
-        else:
-            session_id = str(uuid.uuid4())
-            created = True
-            conn.execute(
-                "INSERT INTO chat_sessions "
-                "(id, account_id, username, kb_id, title, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    session_id,
-                    owner.account_id,
-                    owner.username,
-                    kb_id,
-                    "新会话",
-                    application_config.db_now(),
-                    application_config.db_now(),
-                ),
-            )
-    return SessionResolution(session_id=session_id, created=created)
+        session_id = str(uuid.uuid4())
+        conn.execute(
+            "INSERT INTO chat_sessions "
+            "(id, account_id, username, kb_id, title, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id,
+                owner.account_id,
+                owner.username,
+                kb_id,
+                "新会话",
+                application_config.db_now(),
+                application_config.db_now(),
+            ),
+        )
+    return SessionResolution(session_id=session_id, created=True)
 
 
 RECENT_DOCUMENT_ANSWER_COUNT = 3
@@ -343,7 +328,9 @@ def clip_message(role: str, text: str, limit: int) -> str:
     if role != "assistant":
         return text[:limit]
     marker = "\n……\n"
-    available = max(0, limit - len(marker))
+    if limit <= len(marker):
+        return text[:limit]
+    available = limit - len(marker)
     head = (available + 1) // 2
     tail = available // 2
     return text[:head] + marker + (text[-tail:] if tail else "")
@@ -407,13 +394,16 @@ def _pack_recent_turns(
     history: list[tuple[str, str]] = []
     oldest_kept_id: int | None = None
     used_chars = 0
-    for turn in _group_recent_turns(rows):
+    for turn_index, turn in enumerate(_group_recent_turns(rows)):
+        # 最近一轮的回答可以用满整个预算：“翻译、改写、总结上一条回答”需要它的全文，
+        # 按单条上限截断会丢掉中段。更早的轮次仍按单条上限截断。
+        message_limit = (
+            recent_max_chars
+            if turn_index == 0
+            else application_config.CHAT_MEMORY_RECENT_MESSAGE_MAX_CHARS
+        )
         bounded_turn = [
-            (
-                message_id,
-                role,
-                clip_message(role, text, application_config.CHAT_MEMORY_RECENT_MESSAGE_MAX_CHARS),
-            )
+            (message_id, role, clip_message(role, text, message_limit))
             for message_id, role, text in turn
         ]
         turn_chars = sum(len(text) for _, _, text in bounded_turn)
@@ -428,7 +418,7 @@ def _pack_recent_turns(
                 if remaining <= 0:
                     break
                 message_id, role, text = bounded_turn[index]
-                clipped = text[:remaining]
+                clipped = clip_message(role, text, remaining)
                 clipped_by_index[index] = (message_id, role, clipped)
                 remaining -= len(clipped)
             kept = [clipped_by_index[index] for index in sorted(clipped_by_index)]
@@ -457,7 +447,7 @@ def load_conversation_memory(
     recent_limit: int,
     recent_max_chars: int,
     *,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> ConversationMemory:
     """读取会话摘要，并按消息数和字符数限制近期原文。"""
     with application_db.connect(database_file(container)) as conn:
@@ -496,7 +486,7 @@ def load_summary_batch(
     *,
     recent_limit: int = application_config.CHAT_MEMORY_RECENT_MESSAGE_LIMIT,
     recent_max_chars: int = application_config.CHAT_MEMORY_RECENT_MAX_CHARS,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> SummaryBatch | None:
     """读取需要并入摘要的较早消息；没有需要并入的消息时返回 None。
 
@@ -540,7 +530,7 @@ def save_conversation_summary(
     *,
     expected_message_id: int,
     through_message_id: int,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> bool:
     """以乐观并发方式保存摘要，旧状态已变化时放弃覆盖。"""
     now = application_config.db_now()

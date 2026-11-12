@@ -29,8 +29,6 @@ class RetrievalQueryPlan:
     query: str
     used_history: bool = False
     inherited_focus: str = ""
-    # 与 query 并行检索的书面化补充查询；为空表示本轮只用 query。
-    variant_query: str = ""
 
 
 def original_query_plan(question: str) -> RetrievalQueryPlan:
@@ -38,45 +36,27 @@ def original_query_plan(question: str) -> RetrievalQueryPlan:
     return RetrievalQueryPlan(query=question)
 
 
-# 只匹配明确依赖上文的措辞；单独的“这”“那”“该”会命中大量完整问句（如“该制度适用范围”），不再单独触发。
+# 有历史时，不超过这个长度的问题一律交给改写模型判断是否依赖上文。省略主语的短追问
+# （“实习生也适用吗”“审批不通过怎么办”）没有可靠的字面特征，规则补不全；提示词里
+# “问题完整则原样返回”的出口负责放过完整的短问题。
+_SHORT_QUESTION_LENGTH = 30
+# 更长的问题通常自带对象，只有出现明确依赖上文的措辞才改写。单独的“这”“那”“该”
+# 会命中大量完整问句（如“该制度适用范围”），不单独触发。
 _FOLLOW_UP_PATTERN = re.compile(
     r"上述|上面|前面|刚才|之前|继续|其中|这个|那个|这些|那些|这种|那种|它们?|他们?|她们?"
     r"|^\s*(?:那么?|还有|另外|再|然后|其次)"
     r"|呢\s*[？?]?\s*$"
 )
-# 极短的片段（如“乙型号”“多久”）本身无法独立检索，视为可能的追问。
-_FOLLOW_UP_FRAGMENT_LENGTH = 6
-# 省略主语的短追问（“具体流程是什么”“需要哪些材料”）没有指代词，但离开上文无法检索。
-_SHORT_QUESTION_LENGTH = 15
-# 只描述提问维度、不指明对象的泛化词；短问题去掉它们后几乎不剩字，说明对象在上文里。
-_GENERIC_QUESTION_WORDS = re.compile(
-    r"具体|详细|一下|请问|需要|要求|要|有没有|有哪些|有什么|有|是否|能否|可以|可不可以|会不会|能不能"
-    r"|怎么|怎样|如何|多久|多长时间|多少钱?|几天|几次|什么时候|什么|哪些|哪个|哪里|为什么|谁"
-    r"|流程|步骤|手续|材料|资料|条件|标准|规定|要求|期限|时间|费用|金额|例外|情况|范围|对象"
-    r"|注意事项|区别|审批|申请|办理|提交|是|的|吗|呢|了|么|吧|啊|还"
-    r"|[\s，。？！?!、：:；;]"
-)
-_SUBJECTLESS_RESIDUE_CHARS = 1
-
-
-def _looks_like_follow_up(question: str) -> bool:
-    """根据指代词、承接语气、片段长度和省略主语的短问句判断问题是否可能依赖上文。"""
-    text = question.strip()
-    if len(text) <= _FOLLOW_UP_FRAGMENT_LENGTH or _FOLLOW_UP_PATTERN.search(text):
-        return True
-    if len(text) > _SHORT_QUESTION_LENGTH:
-        return False
-    # 去掉泛化词后剩下的就是问题自带的对象；“如何报销差旅费”剩“报销差旅费”，不算追问。
-    return len(_GENERIC_QUESTION_WORDS.sub("", text)) <= _SUBJECTLESS_RESIDUE_CHARS
 
 
 def _should_rewrite_query(
     question: str, history: list[tuple[str, str]], conversation_summary: str = ""
 ) -> bool:
-    """有历史或早期摘要可参考，且问题像追问时才值得多调用一次改写模型。"""
+    """有历史或早期摘要可参考，且问题较短或含明确指代时，才多调用一次改写模型。"""
     if not history and not conversation_summary.strip():
         return False
-    return _looks_like_follow_up(question)
+    text = question.strip()
+    return len(text) <= _SHORT_QUESTION_LENGTH or bool(_FOLLOW_UP_PATTERN.search(text))
 
 
 def _json_object_from_response(content: Any) -> dict | None:
@@ -206,6 +186,10 @@ async def build_retrieval_query_plan(
             llm.ainvoke(messages), timeout=application_config.CHAT_QUERY_MODEL_TIMEOUT_SECONDS
         )
         plan = _rewrite_query_from_response(response.content)
+        finish_reason = (getattr(response, "response_metadata", None) or {}).get("finish_reason")
+        if plan is None and finish_reason == "length":
+            # 输出被长度上限截断（多半是推理模型思考用完额度），不是普通的格式错误，值得告警。
+            logger.warning("Query rewrite hit the token limit; falling back to the original question")
         if plan is None or not plan.used_history:
             return original_query_plan(question)
         return plan

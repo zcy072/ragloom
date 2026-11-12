@@ -186,6 +186,47 @@ class IndexConcurrencyTest(IsolatedStorageTestCase):
         self.assertEqual(self._document("甲.pdf")[0], "ready")
         self.assertEqual(self._document("乙.pdf")[0], "ready")
 
+    def test_parse_slots_cap_parallel_parsing_across_jobs(self):
+        """上传与重建共用全局解析名额，各自的线程池不会让解析并行度叠加。"""
+        active = 0
+        peak = 0
+        counter_lock = threading.Lock()
+
+        def track(path, filename):
+            nonlocal active, peak
+            with counter_lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.05)
+            with counter_lock:
+                active -= 1
+
+        self.on_load = track
+        upload_id, upload_path = self._add_document("甲.pdf")
+        self._add_document("乙.pdf", status="ready")
+        self._add_document("丙.pdf", status="ready")
+        rebuild_id = app_storage.index_jobs.prepare_rebuild(self.kb_id)
+
+        def rebuild():
+            try:
+                knowledge_base.run_rebuild_job(
+                    rebuild_id, self.kb_id, container=self._container()
+                )
+            except BaseException as exc:  # surfaced by _join
+                self.errors.append(exc)
+
+        with patch.object(knowledge_base, "_parse_slots", threading.BoundedSemaphore(1)):
+            threads = [
+                self._start(upload_id, "甲.pdf", upload_path),
+                threading.Thread(target=rebuild, daemon=True),
+            ]
+            threads[1].start()
+            self._join(*threads)
+
+        self.assertEqual(peak, 1)
+        for filename in ("甲.pdf", "乙.pdf", "丙.pdf"):
+            self.assertEqual(self._document(filename)[0], "ready")
+
     def test_knowledge_base_lock_is_free_while_a_document_parses(self):
         entered = threading.Event()
         release = threading.Event()

@@ -227,6 +227,7 @@ class ApplicationStorageTest(unittest.TestCase):
                     "chat_session_memory",
                 }.issubset(tables)
             )
+            self.assertNotIn("app_settings", tables)
             self.assertIn("idx_documents_kb_status", indexes)
             self.assertIn("idx_chat_sessions_account_updated", session_indexes)
 

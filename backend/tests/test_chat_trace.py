@@ -13,6 +13,8 @@ from services.chat import sessions as chat_sessions
 from services.chat import trace as chat_trace
 from services.chat.diagnostics import RetrievalDiagnostics
 from services.core import config as application_config
+from services.core import llm_config
+from services.core.container import get_application_container
 from services.core.errors import ResourceNotFoundError
 from services.retrieval import context as context_builder
 from tests.support import (
@@ -120,7 +122,7 @@ class TraceStorageTest(IsolatedStorageTestCase):
             account_id=account_id,
             session_id="s",
             run_id=run_id,
-            assistant_message_id=None,
+            assistant_message_id=None, container=get_application_container(),
         )
 
     def test_save_load_feedback_and_export(self):
@@ -133,14 +135,14 @@ class TraceStorageTest(IsolatedStorageTestCase):
             ],
         )
         self._save(payload)
-        stored = chat_trace.load_trace(payload["id"])
+        stored = chat_trace.load_trace(payload["id"], container=get_application_container())
         self.assertEqual((stored.account_id, stored.kb_id), (1, self.tech_id))
         self.assertEqual(stored.payload["question"], "问题")
 
         with self.assertRaises(ResourceNotFoundError):
-            chat_trace.set_feedback(payload["id"], 2, -1)
-        chat_trace.set_feedback(payload["id"], 1, -1)
-        (row,) = chat_trace.evaluation_rows(-1, limit=10)
+            chat_trace.set_feedback(payload["id"], 2, -1, container=get_application_container())
+        chat_trace.set_feedback(payload["id"], 1, -1, container=get_application_container())
+        (row,) = chat_trace.evaluation_rows(-1, limit=10, container=get_application_container())
         self.assertEqual(
             chat_trace.evaluation_question(row.payload),
             {
@@ -151,7 +153,7 @@ class TraceStorageTest(IsolatedStorageTestCase):
                 "kb_id": self.tech_id,
             },
         )
-        self.assertEqual(chat_trace.evaluation_rows(1, limit=10), [])
+        self.assertEqual(chat_trace.evaluation_rows(1, limit=10, container=get_application_container()), [])
 
     def test_export_gold_keeps_same_name_documents_apart(self):
         payload = _payload(
@@ -176,41 +178,41 @@ class TraceStorageTest(IsolatedStorageTestCase):
         for index in range(3):
             payload = _payload(self.finance_id, id=f"hidden-{index}")
             self._save(payload)
-            chat_trace.set_feedback(payload["id"], 1, -1)
+            chat_trace.set_feedback(payload["id"], 1, -1, container=get_application_container())
         visible = _payload(self.tech_id, id="visible")
         self._save(visible)
-        chat_trace.set_feedback(visible["id"], 1, -1)
+        chat_trace.set_feedback(visible["id"], 1, -1, container=get_application_container())
         # 可见记录最旧：先 LIMIT 再过滤会只取到不可见记录。
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             conn.execute("UPDATE chat_traces SET created_at = '2000-01-01' WHERE id = 'visible'")
 
-        rows = chat_trace.evaluation_rows(-1, limit=1, kb_ids=(self.tech_id,))
+        rows = chat_trace.evaluation_rows(-1, limit=1, kb_ids=(self.tech_id,), container=get_application_container())
 
         self.assertEqual([row.payload["id"] for row in rows], ["visible"])
-        self.assertEqual(chat_trace.evaluation_rows(-1, limit=10, kb_ids=()), [])
+        self.assertEqual(chat_trace.evaluation_rows(-1, limit=10, kb_ids=(), container=get_application_container()), [])
 
     def test_missing_trace_raises_not_found(self):
         with self.assertRaises(ResourceNotFoundError):
-            chat_trace.load_trace("nope")
+            chat_trace.load_trace("nope", container=get_application_container())
 
     def test_runs_list_carries_trace_id_and_filters_by_feedback(self):
         recorder = chat_runs.ChatRunRecorder(
             1, "alice", self.tech_id, question="问", status="answered"
         )
-        run_id = chat_runs.record_run(recorder)
-        chat_runs.record_run(chat_runs.ChatRunRecorder(1, "alice", self.tech_id, question="问"))
+        run_id = chat_runs.record_run(recorder, container=get_application_container())
+        chat_runs.record_run(chat_runs.ChatRunRecorder(1, "alice", self.tech_id, question="问"), container=get_application_container())
         payload = _payload(self.tech_id)
         self._save(payload, run_id=run_id)
-        chat_trace.set_feedback(payload["id"], 1, -1)
-        total, items = chat_runs.list_runs(feedback=-1)
+        chat_trace.set_feedback(payload["id"], 1, -1, container=get_application_container())
+        total, items = chat_runs.list_runs(feedback=-1, container=get_application_container())
         self.assertEqual((total, items[0]["trace_id"]), (1, payload["id"]))
-        total, items = chat_runs.list_runs(feedback=0)
+        total, items = chat_runs.list_runs(feedback=0, container=get_application_container())
         self.assertEqual((total, items[0]["trace_id"]), (1, ""))
 
     def test_prune_removes_expired_traces_with_runs(self):
         self._save(_payload(self.tech_id, created_at="2000-01-01T00:00:00+00:00"))
         self._save(_payload(self.tech_id, id="fresh"))
-        chat_runs.prune(90)
+        chat_runs.prune(app_storage.DB_FILE, 90)
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             ids = [row[0] for row in conn.execute("SELECT id FROM chat_traces")]
         self.assertEqual(ids, ["fresh"])
@@ -267,7 +269,6 @@ class ChatTraceFlowTest(ChatFlowTestCase):
             source="/data/手册.pdf",
             content="上下文" + context_builder.CONTEXT_TRUNCATION_MARKER,
             pages=("3",),
-            page_unit="页",
             rank=0,
             kb_id=self.tech_id,
             chunk_routes=("fixed",),
@@ -278,11 +279,11 @@ class ChatTraceFlowTest(ChatFlowTestCase):
                 yield SimpleNamespace(content="结论。[来源 1]")
 
         async def consume():
-            stream = await chat_service.chat(request, owner)
+            stream = await chat_service.chat(request, owner, container=get_application_container())
             return [event async for event in stream.events]
 
         with (
-            patch.object(chat_service, "select_model_config", return_value=MODEL_CONFIG),
+            patch.object(llm_config, "select_model_config", return_value=MODEL_CONFIG),
             patch.object(
                 chat_service, "prepare_chat_image", new=AsyncMock(return_value=("", "", ""))
             ),
@@ -291,7 +292,7 @@ class ChatTraceFlowTest(ChatFlowTestCase):
             ),
             patch.object(chat_service, "rerank", new=AsyncMock(return_value=[])),
             patch.object(chat_service.context_builder, "build_context_spans", return_value=[span]),
-            patch.object(chat_service, "create_answer_llm", return_value=Model()),
+            patch.object(llm_config, "create_answer_llm", return_value=Model()),
         ):
             return asyncio.run(consume())
 
@@ -310,7 +311,7 @@ class ChatTraceFlowTest(ChatFlowTestCase):
         self.assertTrue(final["is_end"])
         self.assertIn("diagnostics", final)
 
-        stored = chat_trace.load_trace(final["trace_id"])
+        stored = chat_trace.load_trace(final["trace_id"], container=get_application_container())
         self.assertEqual(stored.account_id, self.plain_id)
         payload = stored.payload
         self.assertEqual(payload["status"], "answered")
@@ -320,10 +321,10 @@ class ChatTraceFlowTest(ChatFlowTestCase):
         self.assertGreater(payload["prompt_chars"], 0)
         self.assertEqual(payload["stages"][-1]["detail"]["cited"], 1)
 
-        _, items = chat_runs.list_runs()
+        _, items = chat_runs.list_runs(container=get_application_container())
         self.assertEqual(items[0]["trace_id"], final["trace_id"])
         _, history = chat_sessions.load_owned_session_messages(
-            final["session_id"], chat_service.SessionOwner(self.plain_id, "user")
+            final["session_id"], chat_service.SessionOwner(self.plain_id, "user"), container=get_application_container()
         )
         self.assertEqual(history[-1]["trace_id"], final["trace_id"])
         self.assertEqual(history[-1]["feedback"], 0)
@@ -331,8 +332,8 @@ class ChatTraceFlowTest(ChatFlowTestCase):
     def test_pre_stream_failure_saves_trace_with_failed_stage(self):
         with self.assertRaises(RuntimeError):
             self._run_chat(self.plain_id, AsyncMock(side_effect=RuntimeError("index down")))
-        _, items = chat_runs.list_runs()
-        payload = chat_trace.load_trace(items[0]["trace_id"]).payload
+        _, items = chat_runs.list_runs(container=get_application_container())
+        payload = chat_trace.load_trace(items[0]["trace_id"], container=get_application_container()).payload
         self.assertEqual(payload["status"], "error")
         self.assertEqual(payload["stages"][-1]["status"], "error")
         self.assertEqual(payload["stages"][-1]["detail"]["error"], "RuntimeError")
@@ -342,10 +343,10 @@ class ChatTraceFlowTest(ChatFlowTestCase):
         own = _payload(self.tech_id, id="own")
         other = _payload(self.tech_id, id="other")
         chat_trace.save_trace(
-            own, account_id=self.plain_id, session_id="s", run_id=None, assistant_message_id=None
+            own, account_id=self.plain_id, session_id="s", run_id=None, assistant_message_id=None, container=get_application_container()
         )
         chat_trace.save_trace(
-            other, account_id=9999, session_id="s", run_id=None, assistant_message_id=None
+            other, account_id=9999, session_id="s", run_id=None, assistant_message_id=None, container=get_application_container()
         )
         read_own, read_other, rate_own, rate_other, rate_bad, export = self._request(
             "plain",
@@ -386,7 +387,7 @@ class ChatTraceFlowTest(ChatFlowTestCase):
             account_id=self.plain_id,
             session_id="s",
             run_id=None,
-            assistant_message_id=None,
+            assistant_message_id=None, container=get_application_container(),
         )
         common_id = app_storage.knowledge_bases.common_kb_id()
         with sqlite3.connect(app_storage.DB_FILE) as conn:
@@ -435,7 +436,11 @@ class CommonKnowledgeBasePermissionTest(ChatFlowTestCase):
         async def empty_events():
             yield ""
 
-        stream = SimpleNamespace(events=empty_events(), refresh_summary=lambda: None)
+        stream = SimpleNamespace(
+            events=empty_events(),
+            refresh_summary=lambda: asyncio.sleep(0),
+            abandon=lambda: asyncio.sleep(0),
+        )
         with patch.object(chat_service, "chat", new=AsyncMock(return_value=stream)) as chat:
             responses = self._request(
                 "plain",
@@ -461,8 +466,8 @@ class SourceLevelPermissionTest(ChatFlowTestCase):
         super().setUp()
         self.common_id = app_storage.knowledge_bases.common_kb_id()
         owner = chat_sessions.SessionOwner(self.plain_id, "plain")
-        self.session_id = chat_sessions.resolve_session(None, owner, self.tech_id).session_id
-        chat_sessions.save_user_message(self.session_id, "问题")
+        self.session_id = chat_sessions.resolve_session(None, owner, self.tech_id, container=get_application_container()).session_id
+        chat_sessions.save_user_message(self.session_id, "问题", container=get_application_container())
 
         def evidence(index, kb_id, text):
             return {
@@ -505,7 +510,7 @@ class SourceLevelPermissionTest(ChatFlowTestCase):
                 source(1, self.tech_id, "本库原文"),
                 source(2, self.common_id, "通用库原文"),
                 web,
-            ],
+            ], container=get_application_container(),
         )
 
         def doc(kb_id, snippet):
@@ -530,7 +535,7 @@ class SourceLevelPermissionTest(ChatFlowTestCase):
             account_id=self.plain_id,
             session_id=self.session_id,
             run_id=None,
-            assistant_message_id=None,
+            assistant_message_id=None, container=get_application_container(),
         )
 
     def _grant(self, kb_ids):
@@ -601,7 +606,7 @@ class SourceLevelPermissionTest(ChatFlowTestCase):
                 "'$.context[0].document_id', 'common-doc', '$.context[0].source', '通用.pdf', "
                 "'$.context[1].document_id', 'tech-doc') WHERE id = 'mixed'"
             )
-        chat_trace.set_feedback("mixed", self.plain_id, -1)
+        chat_trace.set_feedback("mixed", self.plain_id, -1, container=get_application_container())
         (export,) = self._request(
             "plain", "user-password", [("GET", "/api/ops/chat-traces/export", None)]
         )

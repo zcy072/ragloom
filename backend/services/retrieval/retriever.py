@@ -21,7 +21,7 @@ from services.core.config import (
     RETRIEVAL_LEXICAL_K,
     RETRIEVAL_ROUTE_WEIGHTS,
 )
-from services.core.container import ApplicationContainer, get_application_container
+from services.core.container import ApplicationContainer
 from services.core.contracts import RetrievalFilters
 from services.core.settings import get_settings
 from services.indexing.chunking import (
@@ -231,10 +231,9 @@ def clear_retriever_cache() -> None:
     _route_cache.clear()
 
 
-def warm_retriever_cache(container: ApplicationContainer | None = None) -> int:
+def warm_retriever_cache(container: ApplicationContainer) -> int:
     """为文档均已就绪的知识库预热检索图，不会调用嵌入 API。"""
-    dependencies = container or get_application_container()
-    with application_db.connect(str(dependencies.database_path())) as conn:
+    with application_db.connect(str(container.database_path())) as conn:
         knowledge_bases = [
             row[0]
             for row in conn.execute(
@@ -256,7 +255,7 @@ def warm_retriever_cache(container: ApplicationContainer | None = None) -> int:
             continue
         version = retriever_cache_version()
         try:
-            retriever = build_retriever(kb_id, include_common=True, container=dependencies)
+            retriever = build_retriever(kb_id, include_common=True, container=container)
         except Exception as exc:
             logger.debug("Retriever warmup skipped for %s: %s", kb_id, exc)
             continue
@@ -268,7 +267,7 @@ def warm_retriever_cache(container: ApplicationContainer | None = None) -> int:
 
 
 def start_retriever_cache_warmup(
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> threading.Thread:
     """在后台线程中启动检索器缓存预热，并返回该线程。"""
     thread = threading.Thread(
@@ -281,14 +280,14 @@ def start_retriever_cache_warmup(
     return thread
 
 
-def drop_cached_retriever(kb_id: str) -> None:
+def drop_cached_retriever(kb_id: str, container: ApplicationContainer) -> None:
     """移除一个知识库的缓存检索图，使下次查询按最新索引重建。
 
     部门库的检索图在构建时固定了通用知识库的路线计划，所以通用知识库变化时要清空全部缓存。
     """
     _invalidate_retriever_cache()
     _route_cache.drop(kb_id)
-    if kb_id == source_state.common_kb_id():
+    if kb_id == source_state.common_kb_id(container):
         _retriever_cache.clear()
     else:
         _retriever_cache.drop((kb_id, False))
@@ -354,12 +353,11 @@ def deduplicate_chunk_routes(documents: list[LCDocument]) -> list[LCDocument]:
 def _retrieval_document_ids(
     kb_id: str,
     filters: RetrievalFilters | None,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> list[str]:
     """在 SQLite 权威源文件允许列表内解析用户传入的过滤条件。"""
-    dependencies = container or get_application_container()
-    current_document_ids = source_state.ready_document_ids(kb_id, dependencies)
-    filtered_document_ids = dependencies.documents.filtered_document_ids(kb_id, filters)
+    current_document_ids = source_state.ready_document_ids(kb_id, container)
+    filtered_document_ids = container.documents.filtered_document_ids(kb_id, filters)
     if filtered_document_ids is None:
         return list(current_document_ids)
     current_set = set(current_document_ids)
@@ -390,8 +388,15 @@ class WeightedRouteRetriever:
     补充）和路线权重（固定、结构化、视觉），与原先 EnsembleRetriever 的分层一致。
     """
 
-    def __init__(self, index: ChunkIndex, embeddings, plans: list[_RoutePlan]) -> None:
+    def __init__(
+        self,
+        index: ChunkIndex,
+        embeddings,
+        plans: list[_RoutePlan],
+        container: ApplicationContainer,
+    ) -> None:
         """保存索引、共享的查询向量缓存和已按存在路线归一化的检索计划。"""
+        self._container = container
         self._index = index
         self._embeddings = embeddings
         self._plans = plans
@@ -402,7 +407,7 @@ class WeightedRouteRetriever:
         # 文件白名单读取请求级快照，必须在当前线程内解析。
         allowlists = {
             plan.kb_id: source_state.current_document_allowlist(
-                plan.kb_id, plan.requested_document_ids
+                plan.kb_id, plan.requested_document_ids, self._container
             )
             for plan in self._plans
         }
@@ -441,14 +446,16 @@ class WeightedRouteRetriever:
 
 
 def _route_plans(
-    dependencies: ApplicationContainer,
+    container: ApplicationContainer,
     index: ChunkIndex,
     kb_id: str,
     requested_document_ids: list[str] | None,
     total_weight: float,
 ) -> list[_RoutePlan]:
     """探测一个知识库实际存在的路线，并把总权重按路线权重重新归一分配。"""
-    current_document_ids = source_state.current_document_allowlist(kb_id, requested_document_ids)
+    current_document_ids = source_state.current_document_allowlist(
+        kb_id, requested_document_ids, container
+    )
     if not current_document_ids:
         return []
     routes = _route_cache.routes(
@@ -469,7 +476,7 @@ def _route_plans(
 
 
 def _retrieve_lexical_candidates_for_base(
-    dependencies: ApplicationContainer,
+    container: ApplicationContainer,
     kb_id: str,
     query: str,
     allowed_sources: list[str] | None,
@@ -480,7 +487,9 @@ def _retrieve_lexical_candidates_for_base(
     该受限路径保护包含编号、日期或产品名的问题，避免其精确性被向量相似度稀释；
     结果稍后与主候选集合合并，不作为第二套最终排序。
     """
-    document_ids = source_state.current_document_allowlist(kb_id, allowed_sources)
+    document_ids = source_state.current_document_allowlist(
+        kb_id, allowed_sources, container
+    )
     if not document_ids:
         return []
     index = get_chunk_index()
@@ -507,27 +516,26 @@ def retrieve_lexical_candidates(
     *,
     per_route: int = RETRIEVAL_LEXICAL_K,
     include_common: bool = False,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ) -> list[LCDocument]:
     """保留小规模 BM25 证据池，让精确术语穿过向量融合噪声；失败时只记录日志。"""
     try:
-        dependencies = container or get_application_container()
         kb_id = application_config.validate_kb_id(kb_id)
-        if not dependencies.documents.knowledge_base_exists(kb_id):
+        if not container.documents.knowledge_base_exists(kb_id):
             return []
         candidates = _retrieve_lexical_candidates_for_base(
-            dependencies,
+            container,
             kb_id,
             query,
-            _retrieval_document_ids(kb_id, filters, dependencies),
+            _retrieval_document_ids(kb_id, filters, container),
             per_route,
         )
         # 能读取通用知识库时补充通用政策材料；查询通用知识库本身时不重复加入。
-        common_id = source_state.supplements_common(kb_id, include_common, dependencies)
+        common_id = source_state.supplements_common(kb_id, include_common, container)
         if common_id:
             candidates.extend(
                 _retrieve_lexical_candidates_for_base(
-                    dependencies,
+                    container,
                     common_id,
                     query,
                     _retrieval_document_ids(
@@ -537,7 +545,7 @@ def retrieve_lexical_candidates(
                             for key, value in (filters or {}).items()
                             if key != "document_ids"
                         },
-                        dependencies,
+                        container,
                     ),
                     per_route,
                 )
@@ -553,7 +561,7 @@ def build_retriever(
     filters: RetrievalFilters | None = None,
     *,
     include_common: bool = False,
-    container: ApplicationContainer | None = None,
+    container: ApplicationContainer,
 ):
     """为一次请求或缓存项构建加权检索器；没有可检索文档时返回 None。
 
@@ -561,27 +569,26 @@ def build_retriever(
     政策文档可回答部门问题，无需把同一文件复制到每个部门。调用方负责确认提问者能读取
     通用知识库。
     """
-    dependencies = container or get_application_container()
     kb_id = application_config.validate_kb_id(kb_id)
-    if not dependencies.documents.knowledge_base_exists(kb_id):
+    if not container.documents.knowledge_base_exists(kb_id):
         raise ValueError("知识库不存在")
 
     index = get_chunk_index()
-    embeddings = CachedQueryEmbeddings(dependencies.create_query_embeddings())
-    document_ids = _retrieval_document_ids(kb_id, filters, dependencies)
+    embeddings = CachedQueryEmbeddings(container.create_query_embeddings())
+    document_ids = _retrieval_document_ids(kb_id, filters, container)
     # 当前知识库主导召回，通用知识库负责补充；缺失路线会重新归一化权重。
-    plans = _route_plans(dependencies, index, kb_id, document_ids, RETRIEVAL_KB_WEIGHT_CURRENT)
+    plans = _route_plans(container, index, kb_id, document_ids, RETRIEVAL_KB_WEIGHT_CURRENT)
 
-    common_id = source_state.supplements_common(kb_id, include_common, dependencies)
+    common_id = source_state.supplements_common(kb_id, include_common, container)
     if common_id:
         common_document_ids = _retrieval_document_ids(
             common_id,
             {key: value for key, value in (filters or {}).items() if key != "document_ids"},
-            dependencies,
+            container,
         )
         plans.extend(
             _route_plans(
-                dependencies,
+                container,
                 index,
                 common_id,
                 common_document_ids,
@@ -601,4 +608,4 @@ def build_retriever(
         )
         for plan in plans
     ]
-    return WeightedRouteRetriever(index, embeddings, normalized)
+    return WeightedRouteRetriever(index, embeddings, normalized, container)

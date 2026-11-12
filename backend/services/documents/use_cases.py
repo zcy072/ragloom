@@ -152,7 +152,7 @@ def upload_document(
                 raise
     finally:
         _remove_new_directory(upload_dir)
-    retriever.drop_cached_retriever(kb_id)
+    retriever.drop_cached_retriever(kb_id, get_application_container())
     _wake_worker(job_id)
     return DocumentMutationResult(job_id, document_id, normalized_metadata, normalized_parser)
 
@@ -194,7 +194,7 @@ def reindex_document(
         if not os.path.isfile(documents.document_path(kb_id, document_id)):
             raise ResourceNotFoundError("原文件不存在", code="document_not_found")
         job_id = documents.schedule_reindex(kb_id, document_id, parser_mode=normalized_parser)
-    retriever.drop_cached_retriever(kb_id)
+    retriever.drop_cached_retriever(kb_id, get_application_container())
     _wake_worker(job_id)
     return DocumentMutationResult(job_id, document_id, parser_mode=normalized_parser)
 
@@ -209,6 +209,6 @@ def delete_document(kb_id: str, document_id: str) -> DocumentMutationResult:
     documents = get_application_container().documents
     with indexing_pipeline.document_lock(kb_id, document_id):
         job_id = documents.schedule_document_delete(kb_id, document_id)
-    retriever.drop_cached_retriever(kb_id)
+    retriever.drop_cached_retriever(kb_id, get_application_container())
     _wake_worker(job_id)
     return DocumentMutationResult(job_id, document_id)

@@ -201,48 +201,39 @@ class ChatServiceTest(IsolatedStorageTestCase):
         self.assertEqual(history[1], "甲的年假为 5 天 ，满一年后增加。")
 
     def test_session_title_comes_from_the_first_question_only(self):
-        session_id = chat_sessions.resolve_session(None, self.owner, self.tech_id).session_id
+        session_id = chat_sessions.resolve_session(None, self.owner, self.tech_id, container=get_application_container()).session_id
         first_question = "请问迁移方案的回滚步骤是什么？" + "补充说明" * 10
 
-        chat_sessions.save_user_message(session_id, first_question)
-        chat_sessions.save_user_message(session_id, "第二个问题不应改标题")
+        chat_sessions.save_user_message(session_id, first_question, container=get_application_container())
+        chat_sessions.save_user_message(session_id, "第二个问题不应改标题", container=get_application_container())
 
-        title = chat_sessions.list_owned_sessions(self.owner)[0]["title"]
+        title = chat_sessions.list_owned_sessions(self.owner, container=get_application_container())[0]["title"]
         self.assertTrue(title.startswith("请问迁移方案的回滚步骤是什么？"))
         self.assertTrue(title.endswith("…"))
         self.assertEqual(len(title), chat_sessions.SESSION_TITLE_MAX_CHARS + 1)
         self.assertEqual(chat_sessions.session_title_from_question("  \n "), "新会话")
 
-    def test_explicit_new_session_does_not_reuse_recent_session_memory(self):
-        existing_session_id = chat_sessions.resolve_session(
-            None, self.owner, self.tech_id
-        ).session_id
-        reused_session_id = chat_sessions.resolve_session(None, self.owner, self.tech_id).session_id
-        new_session_id = chat_sessions.resolve_session(
-            None, self.owner, self.tech_id, force_new=True
-        ).session_id
+    def test_request_without_session_id_always_creates_a_new_session(self):
+        """不带 session_id 不能续接最近的会话，否则前端空白对话会写进旧会话。"""
+        first = chat_sessions.resolve_session(None, self.owner, self.tech_id, container=get_application_container())
+        second = chat_sessions.resolve_session(None, self.owner, self.tech_id, container=get_application_container())
 
-        self.assertEqual(reused_session_id, existing_session_id)
-        self.assertNotEqual(new_session_id, existing_session_id)
-
-    def test_chat_request_rejects_existing_and_new_session_together(self):
-        with self.assertRaises(ValueError):
-            chat_service.ChatRequest(
-                question="测试",
-                kb_id=self.tech_id,
-                session_id="session-1",
-                new_session=True,
-            )
+        self.assertTrue(first.created)
+        self.assertTrue(second.created)
+        self.assertNotEqual(first.session_id, second.session_id)
+        self.assertFalse(
+            chat_sessions.resolve_session(first.session_id, self.owner, self.tech_id, container=get_application_container()).created
+        )
 
     def test_new_session_is_removed_when_pre_stream_processing_fails(self):
         """首次请求在返回 SSE 前失败时不应遗留空会话或孤立用户消息。"""
         request = chat_service.ChatRequest(
-            question="测试问题", kb_id=self.tech_id, new_session=True
+            question="测试问题", kb_id=self.tech_id
         )
 
         with (
             patch.object(
-                chat_service,
+                model_config,
                 "select_model_config",
                 return_value={"api_key": "key", "base_url": "url", "model": "model"},
             ),
@@ -254,7 +245,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
             ),
         ):
             with self.assertRaisesRegex(RuntimeError, "检索准备失败"):
-                asyncio.run(chat_service.chat(request, self.owner))
+                asyncio.run(chat_service.chat(request, self.owner, container=get_application_container()))
 
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM chat_sessions").fetchone()[0], 0)
@@ -262,7 +253,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
 
     def test_pre_stream_failure_cleanup_runs_off_the_event_loop_thread(self):
         request = chat_service.ChatRequest(
-            question="测试问题", kb_id=self.tech_id, new_session=True
+            question="测试问题", kb_id=self.tech_id
         )
         loop_threads: list[int] = []
         cleanup_threads: list[int] = []
@@ -279,7 +270,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
 
         with (
             patch.object(
-                chat_service,
+                model_config,
                 "select_model_config",
                 return_value={"api_key": "key", "base_url": "url", "model": "model"},
             ),
@@ -292,7 +283,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
             ),
         ):
             with self.assertRaisesRegex(RuntimeError, "检索准备失败"):
-                asyncio.run(chat_service.chat(request, self.owner))
+                asyncio.run(chat_service.chat(request, self.owner, container=get_application_container()))
 
         self.assertEqual(len(cleanup_threads), 1)
         self.assertNotEqual(cleanup_threads[0], loop_threads[0])
@@ -305,7 +296,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
 
         with (
             patch.object(
-                chat_service,
+                model_config,
                 "select_model_config",
                 return_value={"api_key": "key", "base_url": "url", "model": "model"},
             ),
@@ -326,7 +317,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
             patch.object(chat_service, "refine_evidence", new=refine),
             patch.object(chat_service.context_builder, "build_context_spans", return_value=[]),
         ):
-            asyncio.run(chat_service.chat(request, self.owner))
+            asyncio.run(chat_service.chat(request, self.owner, container=get_application_container()))
 
         question, first_query = refine.await_args.args[1:3]
         self.assertEqual(question, "请假怎么批？")
@@ -334,14 +325,14 @@ class ChatServiceTest(IsolatedStorageTestCase):
 
     def test_existing_session_does_not_save_half_turn_when_pre_stream_processing_fails(self):
         """已有会话在流式前置阶段失败时也不应提前保存用户问题。"""
-        session_id = chat_sessions.resolve_session(None, self.owner, self.tech_id).session_id
+        session_id = chat_sessions.resolve_session(None, self.owner, self.tech_id, container=get_application_container()).session_id
         request = chat_service.ChatRequest(
             question="测试问题", kb_id=self.tech_id, session_id=session_id
         )
 
         with (
             patch.object(
-                chat_service,
+                model_config,
                 "select_model_config",
                 return_value={"api_key": "key", "base_url": "url", "model": "model"},
             ),
@@ -358,7 +349,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
             ),
         ):
             with self.assertRaisesRegex(RuntimeError, "重排失败"):
-                asyncio.run(chat_service.chat(request, self.owner))
+                asyncio.run(chat_service.chat(request, self.owner, container=get_application_container()))
 
         with sqlite3.connect(app_storage.DB_FILE) as conn:
             self.assertEqual(
@@ -406,14 +397,14 @@ class ChatServiceTest(IsolatedStorageTestCase):
             )
 
         self.assertEqual(
-            chat_sessions.resolve_session("session-1", self.owner, self.tech_id).session_id,
+            chat_sessions.resolve_session("session-1", self.owner, self.tech_id, container=get_application_container()).session_id,
             "session-1",
         )
         with self.assertRaises(ResourceNotFoundError) as missing:
-            chat_sessions.resolve_session("missing", self.owner, self.tech_id)
+            chat_sessions.resolve_session("missing", self.owner, self.tech_id, container=get_application_container())
         self.assertEqual(missing.exception.code, "chat_session_not_found")
         with self.assertRaises(AccessDeniedError) as forbidden:
-            chat_sessions.resolve_session("session-1", self.owner, self.hr_id)
+            chat_sessions.resolve_session("session-1", self.owner, self.hr_id, container=get_application_container())
         self.assertEqual(forbidden.exception.code, "chat_session_access_denied")
 
     def test_same_username_with_a_different_account_id_cannot_reuse_session(self):
@@ -433,7 +424,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
 
         other_account = chat_service.SessionOwner(2, "alice")
         with self.assertRaises(AccessDeniedError) as forbidden:
-            chat_sessions.resolve_session("session-identity", other_account, self.tech_id)
+            chat_sessions.resolve_session("session-identity", other_account, self.tech_id, container=get_application_container())
 
         self.assertEqual(forbidden.exception.code, "chat_session_access_denied")
 
@@ -442,7 +433,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
             question="测试问题", kb_id="00000000-0000-4000-8000-000000000000"
         )
         with patch.object(
-            chat_service,
+            model_config,
             "select_model_config",
             return_value={
                 "api_key": "test-key",
@@ -451,7 +442,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
             },
         ):
             with self.assertRaises(ResourceNotFoundError) as raised:
-                asyncio.run(chat_service.chat(request, self.owner))
+                asyncio.run(chat_service.chat(request, self.owner, container=get_application_container()))
         self.assertEqual(raised.exception.code, "knowledge_base_not_found")
 
     def test_chat_validation_uses_the_explicit_application_container(self):
@@ -488,18 +479,16 @@ class ChatServiceTest(IsolatedStorageTestCase):
         connect.assert_called_once_with("/tmp/explicit-chat.sqlite3")
 
     def test_session_rows_are_mapped_to_history_contracts(self):
-        session_id = chat_sessions.resolve_session(
-            None, self.owner, self.tech_id, force_new=True
-        ).session_id
-        chat_sessions.save_user_message(session_id, "制度是什么？")
+        session_id = chat_sessions.resolve_session(None, self.owner, self.tech_id, container=get_application_container()).session_id
+        chat_sessions.save_user_message(session_id, "制度是什么？", container=get_application_container())
         chat_sessions.save_assistant_message(
             session_id,
             "请参见制度。[来源 1]",
-            [{"id": 1, "source": "制度.pdf", "kb_id": self.tech_id}],
+            [{"id": 1, "source": "制度.pdf", "kb_id": self.tech_id}], container=get_application_container(),
         )
 
-        summaries = chat_sessions.list_owned_sessions(self.owner)
-        kb_id, messages = chat_sessions.load_owned_session_messages(session_id, self.owner)
+        summaries = chat_sessions.list_owned_sessions(self.owner, container=get_application_container())
+        kb_id, messages = chat_sessions.load_owned_session_messages(session_id, self.owner, container=get_application_container())
 
         self.assertEqual(set(summaries[0]), {"id", "username", "kb_id", "kb_name", "title", "date"})
         self.assertEqual(kb_id, self.tech_id)
@@ -538,7 +527,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
             patch.object(chat_query, "retrieve_rerank_candidates", new=AsyncMock(return_value=[])),
             patch.object(chat_service, "rerank", new=AsyncMock(return_value=[])),
         ):
-            stream = asyncio.run(chat_service.chat(request, self.owner))
+            stream = asyncio.run(chat_service.chat(request, self.owner, container=get_application_container()))
         self.assertIsNotNone(stream.events)
 
     def test_retrieval_fallback_keeps_nonempty_rewritten_results(self):
@@ -548,14 +537,19 @@ class ChatServiceTest(IsolatedStorageTestCase):
         with patch.object(chat_query, "retrieve_rerank_candidates", retrieve):
             documents, used_query = asyncio.run(
                 chat_service.retrieve_candidates_with_query_fallback(
-                    self.tech_id, "原问题", "改写后的问题", False, include_common=True
+                    self.tech_id, "原问题", "改写后的问题", False, include_common=True, container=get_application_container()
                 )
             )
 
         self.assertEqual(documents, primary)
         self.assertEqual(used_query, "改写后的问题")
         retrieve.assert_awaited_once_with(
-            self.tech_id, "改写后的问题", False, None, include_common=True
+            self.tech_id,
+            "改写后的问题",
+            False,
+            None,
+            include_common=True,
+            container=get_application_container(),
         )
 
     def test_retrieval_fallback_uses_original_question_after_empty_rewrite(self):
@@ -565,7 +559,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
         with patch.object(chat_query, "retrieve_rerank_candidates", retrieve):
             documents, used_query = asyncio.run(
                 chat_service.retrieve_candidates_with_query_fallback(
-                    self.tech_id, "原问题", "改写后的问题", False
+                    self.tech_id, "原问题", "改写后的问题", False, container=get_application_container()
                 )
             )
 
@@ -574,8 +568,14 @@ class ChatServiceTest(IsolatedStorageTestCase):
         self.assertEqual(
             retrieve.await_args_list,
             [
-                ((self.tech_id, "改写后的问题", False, None), {"include_common": False}),
-                ((self.tech_id, "原问题", False, None), {"include_common": False}),
+                (
+                    (self.tech_id, "改写后的问题", False, None),
+                    {"include_common": False, "container": get_application_container()},
+                ),
+                (
+                    (self.tech_id, "原问题", False, None),
+                    {"include_common": False, "container": get_application_container()},
+                ),
             ],
         )
 
@@ -606,7 +606,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 return_value="test-key",
             ),
         ):
-            ranked = asyncio.run(chat_service.rerank("候选内容", documents))
+            ranked = asyncio.run(chat_service.rerank("候选内容", documents, container=get_application_container()))
 
         payload = client.post.await_args.kwargs["json"]
         self.assertIn("documents", payload)
@@ -664,7 +664,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
             patch.object(chat_ranking, "_get_rerank_client", new=AsyncMock(return_value=client)),
             patch.object(model_config, "get_siliconflow_api_key", return_value="test-key"),
         ):
-            ranked = asyncio.run(chat_service.rerank("问题", documents, diagnostics=diagnostics))
+            ranked = asyncio.run(chat_service.rerank("问题", documents, diagnostics=diagnostics, container=get_application_container()))
         self.assertEqual(
             [doc.page_content for doc in ranked], ["候选内容 0", "候选内容 1", "候选内容 2"]
         )
@@ -693,7 +693,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
             patch.object(chat_ranking, "_get_rerank_client", new=AsyncMock(return_value=client)),
             patch.object(model_config, "get_siliconflow_api_key", return_value="test-key"),
         ):
-            ranked = asyncio.run(chat_service.rerank("年假几天", documents, diagnostics=diagnostics))
+            ranked = asyncio.run(chat_service.rerank("年假几天", documents, diagnostics=diagnostics, container=get_application_container()))
         self.assertEqual(ranked, [])
         self.assertEqual(diagnostics.counts["rerank_below_threshold"], 2)
         self.assertFalse(any(doc["kept"] for doc in diagnostics.rerank_results))
@@ -726,7 +726,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
             patch.object(model_config, "get_siliconflow_api_key", return_value="test-key"),
         ):
             ranked = asyncio.run(
-                chat_service.rerank("AB1234 2026 manual", documents, diagnostics=diagnostics)
+                chat_service.rerank("AB1234 2026 manual", documents, diagnostics=diagnostics, container=get_application_container())
             )
         self.assertEqual([doc.page_content for doc in ranked], ["2026 manual", "ab1234", "AB12345"])
         self.assertEqual(ranked[0].metadata["exact_identifiers"], [])
@@ -745,7 +745,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
             patch.object(chat_ranking, "_get_rerank_client", new=AsyncMock(return_value=client)),
             patch.object(model_config, "get_siliconflow_api_key", return_value="test-key"),
         ):
-            ranked = asyncio.run(chat_service.rerank("AB1234", documents, diagnostics=diagnostics))
+            ranked = asyncio.run(chat_service.rerank("AB1234", documents, diagnostics=diagnostics, container=get_application_container()))
         self.assertEqual(ranked, documents)
         self.assertEqual(diagnostics.rerank_status, "degraded")
         self.assertEqual(diagnostics.ranking, [])
@@ -772,7 +772,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 return_value="test-key",
             ),
         ):
-            ranked = asyncio.run(chat_service.rerank("测试", documents))
+            ranked = asyncio.run(chat_service.rerank("测试", documents, container=get_application_container()))
 
         self.assertEqual(ranked, documents[: chat_ranking.RERANK_TOP_N])
 
@@ -787,7 +787,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
             patch.object(model_config, "get_siliconflow_api_key", return_value="test-key"),
             self.assertLogs(chat_ranking.logger, level="WARNING"),
         ):
-            ranked = asyncio.run(chat_service.rerank("测试", documents))
+            ranked = asyncio.run(chat_service.rerank("测试", documents, container=get_application_container()))
 
         self.assertEqual(ranked, documents[: chat_ranking.RERANK_TOP_N])
 
@@ -873,7 +873,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
 
         with (
             patch.object(
-                chat_query.get_application_container().documents,
+                get_application_container().documents,
                 "has_filters",
                 return_value=False,
             ),
@@ -895,7 +895,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
             ),
         ):
             documents = asyncio.run(
-                chat_query.retrieve_rerank_candidates(self.tech_id, "高血压诊断标准", False)
+                chat_query.retrieve_rerank_candidates(self.tech_id, "高血压诊断标准", False, container=get_application_container())
             )
 
         self.assertEqual(documents, [lexical, semantic])
@@ -919,7 +919,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
 
         with (
             patch.object(
-                chat_query.get_application_container().documents,
+                get_application_container().documents,
                 "has_filters",
                 return_value=False,
             ),
@@ -941,7 +941,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
             ),
         ):
             documents = asyncio.run(
-                chat_query.retrieve_rerank_candidates(self.tech_id, "高血压诊断标准", False)
+                chat_query.retrieve_rerank_candidates(self.tech_id, "高血压诊断标准", False, container=get_application_container())
             )
 
         self.assertEqual(len(documents), RETRIEVAL_RERANK_MAX_CANDIDATES)
@@ -959,14 +959,12 @@ class ChatServiceTest(IsolatedStorageTestCase):
                     + "高血压诊断标准参见《国家基层高血压防治管理指南》。后续内容。"
                 ),
                 pages=("0",),
-                page_unit="页",
                 rank=0,
             ),
             context_builder.ContextSpan(
                 source="second.pdf",
                 content="第二段上下文",
                 pages=("1",),
-                page_unit="页",
                 rank=1,
             ),
         ]
@@ -1021,7 +1019,6 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 source="manual.pdf",
                 content=text,
                 pages=(page,),
-                page_unit="页",
                 rank=index,
                 kb_id="kb-rd",
             )
@@ -1041,7 +1038,6 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 source="制度.pdf",
                 content="部门制度",
                 pages=("0",),
-                page_unit="页",
                 rank=0,
                 kb_id="kb-rd",
             ),
@@ -1049,7 +1045,6 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 source="制度.pdf",
                 content="通用制度",
                 pages=("1",),
-                page_unit="页",
                 rank=1,
                 kb_id="kb-common",
             ),
@@ -1075,7 +1070,6 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 document_id=fixture_document_id(self.tech_id, "手册.pdf"),
                 content="第一条上下文",
                 pages=("0",),
-                page_unit="页",
                 rank=0,
             ),
             context_builder.ContextSpan(
@@ -1084,7 +1078,6 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 document_id=fixture_document_id(self.tech_id, "手册.pdf"),
                 content="第二条上下文，包含结论依据。",
                 pages=("3",),
-                page_unit="页",
                 rank=1,
             ),
         ]
@@ -1098,7 +1091,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
 
         with (
             patch.object(
-                chat_service,
+                model_config,
                 "select_model_config",
                 return_value={
                     "api_key": "test-key",
@@ -1112,9 +1105,9 @@ class ChatServiceTest(IsolatedStorageTestCase):
             patch.object(chat_query, "retrieve_rerank_candidates", new=AsyncMock(return_value=[])),
             patch.object(chat_service, "rerank", new=AsyncMock(return_value=[])),
             patch.object(chat_service.context_builder, "build_context_spans", return_value=spans),
-            patch.object(chat_service, "create_answer_llm", return_value=FakeStreamingModel()),
+            patch.object(model_config, "create_answer_llm", return_value=FakeStreamingModel()),
         ):
-            stream = asyncio.run(chat_service.chat(request, self.owner))
+            stream = asyncio.run(chat_service.chat(request, self.owner, container=get_application_container()))
             events = asyncio.run(collect_events(stream))
 
         end_event = json.loads(next(event[6:] for event in events if '"is_end": true' in event))
@@ -1166,7 +1159,6 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 source="手册.pdf",
                 content="用于触发回答模型的上下文。",
                 pages=("0",),
-                page_unit="页",
                 rank=0,
             )
         ]
@@ -1178,7 +1170,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
 
         with (
             patch.object(
-                chat_service,
+                model_config,
                 "select_model_config",
                 return_value={
                     "api_key": "test-key",
@@ -1192,9 +1184,9 @@ class ChatServiceTest(IsolatedStorageTestCase):
             patch.object(chat_query, "retrieve_rerank_candidates", new=AsyncMock(return_value=[])),
             patch.object(chat_service, "rerank", new=AsyncMock(return_value=[])),
             patch.object(chat_service.context_builder, "build_context_spans", return_value=spans),
-            patch.object(chat_service, "create_answer_llm", return_value=CancelledStreamingModel()),
+            patch.object(model_config, "create_answer_llm", return_value=CancelledStreamingModel()),
         ):
-            stream = asyncio.run(chat_service.chat(request, self.owner))
+            stream = asyncio.run(chat_service.chat(request, self.owner, container=get_application_container()))
             with self.assertRaises(asyncio.CancelledError):
                 asyncio.run(consume(stream))
 
@@ -1231,12 +1223,12 @@ class ChatServiceTest(IsolatedStorageTestCase):
                     None,
                     "",
                     allow_answer_without_evidence=True,
-                    recorder=recorder,
+                    recorder=recorder, container=get_application_container(),
                 )
             ]
 
         with (
-            patch.object(chat_service, "create_answer_llm", return_value=OneChunkModel()),
+            patch.object(model_config, "create_answer_llm", return_value=OneChunkModel()),
             patch.object(
                 chat_service.chat_sessions,
                 "save_assistant_message",
@@ -1261,7 +1253,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
             return inner
 
         cached = SimpleNamespace(invoke=record("invoke", []))
-        documents = chat_query.get_application_container().documents
+        documents = get_application_container().documents
 
         with (
             patch.object(documents, "has_filters", side_effect=record("has_filters", False)),
@@ -1281,7 +1273,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 side_effect=record("lexical", []),
             ),
         ):
-            asyncio.run(chat_query.retrieve_rerank_candidates(self.tech_id, "问题", False))
+            asyncio.run(chat_query.retrieve_rerank_candidates(self.tech_id, "问题", False, container=get_application_container()))
 
         self.assertEqual(set(seen), {"has_filters", "build", "invoke", "lexical"})
         self.assertNotIn(loop_thread, seen.values())
@@ -1323,7 +1315,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
                     source_catalog,
                     [SimpleNamespace(content="multimodal")],
                     [SimpleNamespace(content="text-only")],
-                    "base64-image",
+                    "base64-image", container=get_application_container(),
                 )
             ]
 
@@ -1341,7 +1333,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 ),
             )
 
-        with patch.object(chat_service, "create_answer_llm", return_value=model):
+        with patch.object(model_config, "create_answer_llm", return_value=model):
             events = asyncio.run(collect_events())
 
         self.assertEqual(model.calls, 1)
@@ -1379,9 +1371,9 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 ("session-failed", 1, "alice", self.tech_id, "测试", "2026-01-01", "2026-01-01"),
             )
         # 一条更早的完整问答，证明撤回只影响本轮没有回答的问题。
-        chat_sessions.save_user_message("session-failed", "更早的问题")
-        chat_sessions.save_assistant_message("session-failed", "更早的回答", [])
-        user_message_id = chat_sessions.save_user_message("session-failed", "本轮问题")
+        chat_sessions.save_user_message("session-failed", "更早的问题", container=get_application_container())
+        chat_sessions.save_assistant_message("session-failed", "更早的回答", [], container=get_application_container())
+        user_message_id = chat_sessions.save_user_message("session-failed", "本轮问题", container=get_application_container())
 
         async def collect_events():
             return [
@@ -1393,11 +1385,11 @@ class ChatServiceTest(IsolatedStorageTestCase):
                     [SimpleNamespace(content="multimodal")],
                     [SimpleNamespace(content="text-only")],
                     "base64-image",
-                    user_message_id=user_message_id,
+                    user_message_id=user_message_id, container=get_application_container(),
                 )
             ]
 
-        with patch.object(chat_service, "create_answer_llm", return_value=FailingStreamingModel()):
+        with patch.object(model_config, "create_answer_llm", return_value=FailingStreamingModel()):
             events = asyncio.run(collect_events())
 
         self.assertEqual(len(events), 1)
@@ -1419,8 +1411,8 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 raise RuntimeError("upstream down")
                 yield SimpleNamespace(content="unreachable")
 
-        resolution = chat_sessions.resolve_session(None, self.owner, self.tech_id)
-        user_message_id = chat_sessions.save_user_message(resolution.session_id, "第一个问题")
+        resolution = chat_sessions.resolve_session(None, self.owner, self.tech_id, container=get_application_container())
+        user_message_id = chat_sessions.save_user_message(resolution.session_id, "第一个问题", container=get_application_container())
 
         async def collect_events():
             return [
@@ -1441,22 +1433,22 @@ class ChatServiceTest(IsolatedStorageTestCase):
                     [SimpleNamespace(content="q")],
                     None,
                     None,
-                    user_message_id=user_message_id,
+                    user_message_id=user_message_id, container=get_application_container(),
                 )
             ]
 
-        with patch.object(chat_service, "create_answer_llm", return_value=FailingStreamingModel()):
+        with patch.object(model_config, "create_answer_llm", return_value=FailingStreamingModel()):
             events = asyncio.run(collect_events())
 
         payload = json.loads(events[0][6:])
         self.assertEqual(payload["error"], chat_service.ANSWER_ERROR_MESSAGE)
         # 会话已被删除，不能再把它的 ID 交给前端当作当前会话。
         self.assertNotIn("session_id", payload)
-        self.assertEqual(chat_sessions.list_owned_sessions(self.owner), [])
+        self.assertEqual(chat_sessions.list_owned_sessions(self.owner, container=get_application_container()), [])
 
     def test_answer_client_creation_failure_discards_the_question(self):
-        resolution = chat_sessions.resolve_session(None, self.owner, self.tech_id)
-        user_message_id = chat_sessions.save_user_message(resolution.session_id, "问题")
+        resolution = chat_sessions.resolve_session(None, self.owner, self.tech_id, container=get_application_container())
+        user_message_id = chat_sessions.save_user_message(resolution.session_id, "问题", container=get_application_container())
 
         async def collect_events():
             return [
@@ -1469,18 +1461,18 @@ class ChatServiceTest(IsolatedStorageTestCase):
                     None,
                     None,
                     allow_answer_without_evidence=True,
-                    user_message_id=user_message_id,
+                    user_message_id=user_message_id, container=get_application_container(),
                 )
             ]
 
-        with patch.object(chat_service, "create_answer_llm", side_effect=ValueError("bad config")):
+        with patch.object(model_config, "create_answer_llm", side_effect=ValueError("bad config")):
             events = asyncio.run(collect_events())
 
         payload = json.loads(events[0][6:])
         self.assertEqual(payload["error"], chat_service.ANSWER_ERROR_MESSAGE)
         self.assertNotIn("bad config", events[0])
         self.assertNotIn("session_id", payload)
-        self.assertEqual(chat_sessions.list_owned_sessions(self.owner), [])
+        self.assertEqual(chat_sessions.list_owned_sessions(self.owner, container=get_application_container()), [])
 
     def test_partial_answer_keeps_the_user_message(self):
         class BreaksAfterFirstChunk:
@@ -1488,8 +1480,8 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 yield SimpleNamespace(content="部分")
                 raise RuntimeError("connection reset")
 
-        resolution = chat_sessions.resolve_session(None, self.owner, self.tech_id)
-        user_message_id = chat_sessions.save_user_message(resolution.session_id, "问题")
+        resolution = chat_sessions.resolve_session(None, self.owner, self.tech_id, container=get_application_container())
+        user_message_id = chat_sessions.save_user_message(resolution.session_id, "问题", container=get_application_container())
 
         async def collect_events():
             return [
@@ -1502,39 +1494,37 @@ class ChatServiceTest(IsolatedStorageTestCase):
                     None,
                     None,
                     allow_answer_without_evidence=True,
-                    user_message_id=user_message_id,
+                    user_message_id=user_message_id, container=get_application_container(),
                 )
             ]
 
-        with patch.object(chat_service, "create_answer_llm", return_value=BreaksAfterFirstChunk()):
+        with patch.object(model_config, "create_answer_llm", return_value=BreaksAfterFirstChunk()):
             asyncio.run(collect_events())
 
-        _, messages = chat_sessions.load_owned_session_messages(resolution.session_id, self.owner)
+        _, messages = chat_sessions.load_owned_session_messages(resolution.session_id, self.owner, container=get_application_container())
         self.assertEqual(
             [(m["role"], m["content"]) for m in messages], [("user", "问题"), ("assistant", "部分")]
         )
 
     def test_discard_user_message_only_removes_that_user_message(self):
-        session_id = chat_sessions.resolve_session(None, self.owner, self.tech_id).session_id
-        chat_sessions.save_user_message(session_id, "问题一")
-        chat_sessions.save_assistant_message(session_id, "回答一", [])
-        second_id = chat_sessions.save_user_message(session_id, "问题二")
+        session_id = chat_sessions.resolve_session(None, self.owner, self.tech_id, container=get_application_container()).session_id
+        chat_sessions.save_user_message(session_id, "问题一", container=get_application_container())
+        chat_sessions.save_assistant_message(session_id, "回答一", [], container=get_application_container())
+        second_id = chat_sessions.save_user_message(session_id, "问题二", container=get_application_container())
 
         # 还有其他消息时只删这一条，会话保留。
-        self.assertFalse(chat_sessions.discard_user_message(session_id, second_id))
+        self.assertFalse(chat_sessions.discard_user_message(session_id, second_id, container=get_application_container()))
         # 不存在的消息 ID 是空操作。
-        self.assertFalse(chat_sessions.discard_user_message(session_id, 10_000))
-        _, messages = chat_sessions.load_owned_session_messages(session_id, self.owner)
+        self.assertFalse(chat_sessions.discard_user_message(session_id, 10_000, container=get_application_container()))
+        _, messages = chat_sessions.load_owned_session_messages(session_id, self.owner, container=get_application_container())
         self.assertEqual([m["content"] for m in messages], ["问题一", "回答一"])
 
         # 会话里最后一条消息被撤回后，空会话连同摘要记忆一起删除。
-        lone_session_id = chat_sessions.resolve_session(
-            None, self.owner, self.hr_id, force_new=True
-        ).session_id
-        lone_id = chat_sessions.save_user_message(lone_session_id, "孤立问题")
-        self.assertTrue(chat_sessions.discard_user_message(lone_session_id, lone_id))
+        lone_session_id = chat_sessions.resolve_session(None, self.owner, self.hr_id, container=get_application_container()).session_id
+        lone_id = chat_sessions.save_user_message(lone_session_id, "孤立问题", container=get_application_container())
+        self.assertTrue(chat_sessions.discard_user_message(lone_session_id, lone_id, container=get_application_container()))
         self.assertEqual(
-            [s["id"] for s in chat_sessions.list_owned_sessions(self.owner)], [session_id]
+            [s["id"] for s in chat_sessions.list_owned_sessions(self.owner, container=get_application_container())], [session_id]
         )
 
     def test_chat_returns_no_answer_without_retrieval_evidence(self):
@@ -1548,7 +1538,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
 
         with (
             patch.object(
-                chat_service,
+                model_config,
                 "select_model_config",
                 return_value={
                     "api_key": "test-key",
@@ -1567,9 +1557,9 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 "refresh_conversation_summary",
                 new=AsyncMock(return_value=False),
             ) as memory_refresh,
-            patch.object(chat_service, "create_answer_llm") as llm_factory,
+            patch.object(model_config, "create_answer_llm") as llm_factory,
         ):
-            stream = asyncio.run(chat_service.chat(request, self.owner))
+            stream = asyncio.run(chat_service.chat(request, self.owner, container=get_application_container()))
             events = asyncio.run(collect_events(stream))
             asyncio.run(stream.refresh_summary())
 
@@ -1627,7 +1617,6 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 source="员工手册.pdf",
                 content="实习生年假规定",
                 pages=("0",),
-                page_unit="页",
                 rank=0,
             )
         ]
@@ -1639,7 +1628,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
 
         with (
             patch.object(
-                chat_service,
+                model_config,
                 "select_model_config",
                 return_value={
                     "api_key": "test-key",
@@ -1651,7 +1640,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 chat_service, "prepare_chat_image", new=AsyncMock(return_value=("", "", ""))
             ),
             patch.object(
-                chat_service.get_application_container().knowledge_base_settings,
+                get_application_container().knowledge_base_settings,
                 "query_rewrite_enabled",
                 return_value=True,
             ),
@@ -1665,9 +1654,9 @@ class ChatServiceTest(IsolatedStorageTestCase):
             ),
             patch.object(chat_service, "rerank", new=AsyncMock(return_value=[document])),
             patch.object(chat_service.context_builder, "build_context_spans", return_value=spans),
-            patch.object(chat_service, "create_answer_llm", return_value=model),
+            patch.object(model_config, "create_answer_llm", return_value=model),
         ):
-            stream = asyncio.run(chat_service.chat(request, self.owner))
+            stream = asyncio.run(chat_service.chat(request, self.owner, container=get_application_container()))
             asyncio.run(collect_events(stream))
 
         final_prompt = model.messages[-1].content
@@ -1852,33 +1841,38 @@ class ChatServiceTest(IsolatedStorageTestCase):
             ):
                 self.assertEqual(chat_service._aux_model_config(answer, container), expected)
 
-    def test_complete_questions_with_demonstratives_do_not_trigger_rewrite(self):
+    def test_short_questions_with_history_go_to_the_rewrite_model(self):
         history = [("user", "员工如何请假？"), ("assistant", "请参考手册。")]
         for question in (
-            "该制度适用于哪些部门的员工以及外包人员是否也在范围内",
-            "这份合同约定的违约金比例是多少以及如何计算滞纳金",
-            "在试用期内离职的员工是否可以领取当月全额工资",
-            "病假需要什么材料",
-            "如何报销差旅费",
-            "HT-2023-018 怎么办",
-        ):
-            with self.subTest(question=question):
-                self.assertFalse(chat_rewrite._should_rewrite_query(question, history))
-
-    def test_follow_up_questions_still_trigger_rewrite(self):
-        history = [("user", "员工如何请假？")]
-        for question in (
+            # 省略主语、没有指代词的追问，原先的字面规则识别不了。
+            "实习生也适用吗",
+            "审批不通过怎么办",
+            "需要部门领导签字吗",
+            "超过三天怎么处理",
+            "第二点展开说说",
             "那它的流程呢",
             "乙型号呢？",
-            "上面提到的审批需要几天",
-            "还有别的条件吗",
             "具体流程是什么",
-            "需要哪些材料？",
-            "有没有例外情况",
+            # 完整的短问题也交给模型，由提示词里“问题完整则原样返回”放过。
+            "如何报销差旅费",
+            "HT-2023-018 怎么办",
+            "该制度适用于哪些部门的员工以及外包人员是否也在范围内",
         ):
             with self.subTest(question=question):
                 self.assertTrue(chat_rewrite._should_rewrite_query(question, history))
+
+    def test_long_questions_rewrite_only_with_explicit_references(self):
+        history = [("user", "员工如何请假？")]
+        long_complete = "在试用期内离职的员工是否可以领取当月全额工资以及未休年假应当如何折算补偿"
+        long_reference = "上面提到的审批流程如果部门负责人出差不在公司期间应当由谁代为签字确认"
+        self.assertGreater(len(long_complete), chat_rewrite._SHORT_QUESTION_LENGTH)
+        self.assertGreater(len(long_reference), chat_rewrite._SHORT_QUESTION_LENGTH)
+        self.assertFalse(chat_rewrite._should_rewrite_query(long_complete, history))
+        self.assertTrue(chat_rewrite._should_rewrite_query(long_reference, history))
+
+    def test_rewrite_requires_history_or_summary(self):
         self.assertFalse(chat_rewrite._should_rewrite_query("那它的流程呢", []))
+        self.assertFalse(chat_rewrite._should_rewrite_query("实习生也适用吗", [], "  "))
         self.assertTrue(chat_rewrite._should_rewrite_query("乙型号呢", [], "此前询问甲型号。"))
 
     # ------------------------------------------------------------------
@@ -2010,7 +2004,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
                     "原问题",
                     False,
                     variant_query="书面问题",
-                    diagnostics=diagnostics,
+                    diagnostics=diagnostics, container=get_application_container(),
                 )
             )
 
@@ -2030,7 +2024,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
         with patch.object(chat_query, "retrieve_rerank_candidates", side_effect=retrieve):
             documents, used_query = asyncio.run(
                 chat_query.retrieve_candidates_with_query_fallback(
-                    self.tech_id, "原问题", "原问题", False, variant_query="书面问题"
+                    self.tech_id, "原问题", "原问题", False, variant_query="书面问题", container=get_application_container()
                 )
             )
 
@@ -2042,7 +2036,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
         with patch.object(chat_query, "retrieve_rerank_candidates", retrieve):
             asyncio.run(
                 chat_query.retrieve_candidates_with_query_fallback(
-                    self.tech_id, "原问题", "原问题", False, variant_query="原问题"
+                    self.tech_id, "原问题", "原问题", False, variant_query="原问题", container=get_application_container()
                 )
             )
         retrieve.assert_awaited_once()
@@ -2056,7 +2050,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
         with patch.object(chat_query, "retrieve_rerank_candidates", side_effect=retrieve):
             documents, used_query = asyncio.run(
                 chat_query.retrieve_candidates_with_query_fallback(
-                    self.tech_id, "原问题", "改写后的问题", False, variant_query="书面问题"
+                    self.tech_id, "原问题", "改写后的问题", False, variant_query="书面问题", container=get_application_container()
                 )
             )
 
@@ -2081,7 +2075,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 tool_calls=[
                     {
                         "name": "search_knowledge_base",
-                        "args": {"query": "乙型号的保修期多久"},
+                        "args": {"query": "乙型号的保修期多久", "used_history": True},
                     }
                 ],
                 additional_kwargs={},
@@ -2098,6 +2092,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
 
         self.assertTrue(decision.should_search)
         self.assertEqual(decision.query, "乙型号的保修期多久")
+        self.assertTrue(decision.used_history)
         self.assertIn("甲型号的保修期多久", bound.ainvoke.await_args.args[0][1].content)
 
     def test_planner_reads_tool_calls_from_additional_kwargs(self):
@@ -2127,6 +2122,8 @@ class ChatServiceTest(IsolatedStorageTestCase):
 
         self.assertTrue(decision.should_search)
         self.assertEqual(decision.query, "年假天数规定")
+        # 缺少 used_history 时按未结合历史处理。
+        self.assertFalse(decision.used_history)
 
     def test_planner_skips_retrieval_for_an_explicit_direct_answer_call(self):
         llm, _ = self._planner_llm(
@@ -2201,7 +2198,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
         )
         with (
             patch.object(
-                chat_service.get_application_container().knowledge_base_settings,
+                get_application_container().knowledge_base_settings,
                 "query_rewrite_enabled",
                 return_value=True,
             ),
@@ -2222,7 +2219,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
                     [("user", "甲型号的保修期多久？")],
                     "",
                     {"api_key": "k", "base_url": "https://example.test/v1", "model": "m"},
-                    None,
+                    None, container=get_application_container(),
                 )
             )
 
@@ -2234,7 +2231,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
         plan = chat_rewrite.RetrievalQueryPlan(query="改写后的问题", used_history=True)
         with (
             patch.object(
-                chat_service.get_application_container().knowledge_base_settings,
+                get_application_container().knowledge_base_settings,
                 "query_rewrite_enabled",
                 return_value=True,
             ),
@@ -2255,7 +2252,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
                     [],
                     "",
                     {"api_key": "k", "base_url": "https://example.test/v1", "model": "m"},
-                    None,
+                    None, container=get_application_container(),
                 )
             )
 
@@ -2265,7 +2262,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
     def _plan_with_planner_decision(self, question, history, decision, summary=""):
         with (
             patch.object(
-                chat_service.get_application_container().knowledge_base_settings,
+                get_application_container().knowledge_base_settings,
                 "query_rewrite_enabled",
                 return_value=True,
             ),
@@ -2284,7 +2281,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
                     history,
                     summary,
                     {"api_key": "k", "base_url": "https://example.test/v1", "model": "m"},
-                    None,
+                    None, container=get_application_container(),
                 )
             )
         rewriter.assert_not_called()
@@ -2302,19 +2299,29 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 self.assertFalse(plan.used_history)
 
     def test_planner_completed_follow_up_is_a_resolved_question(self):
-        decision = chat_planner.RetrievalDecision(should_search=True, query="乙型号的保修期多久")
+        decision = chat_planner.RetrievalDecision(
+            should_search=True, query="实习生也适用年假规定吗", used_history=True
+        )
         plan, should_search = self._plan_with_planner_decision(
-            "乙型号呢？", [("user", "甲型号的保修期多久？")], decision
+            "实习生也适用吗", [("user", "正式员工年假有几天？")], decision
         )
 
         self.assertTrue(should_search)
-        self.assertEqual(plan.query, "乙型号的保修期多久")
+        self.assertEqual(plan.query, "实习生也适用年假规定吗")
         self.assertTrue(plan.used_history)
+
+    def test_planner_used_history_is_ignored_without_any_history(self):
+        decision = chat_planner.RetrievalDecision(
+            should_search=True, query="乙型号的保修期多久", used_history=True
+        )
+        plan, _ = self._plan_with_planner_decision("乙型号呢？", [], decision)
+
+        self.assertFalse(plan.used_history)
 
     def test_plan_query_does_not_consult_the_planner_for_image_requests(self):
         with (
             patch.object(
-                chat_service.get_application_container().knowledge_base_settings,
+                get_application_container().knowledge_base_settings,
                 "query_rewrite_enabled",
                 return_value=True,
             ),
@@ -2333,7 +2340,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
                     [],
                     "",
                     {"api_key": "k", "base_url": "https://example.test/v1", "model": "m"},
-                    "base64-image",
+                    "base64-image", container=get_application_container(),
                 )
             )
 
@@ -2378,13 +2385,13 @@ class ChatServiceTest(IsolatedStorageTestCase):
                     [chat_service.HumanMessage(content="[问题]: 谢谢你")],
                     None,
                     None,
-                    allow_answer_without_evidence=True,
+                    allow_answer_without_evidence=True, container=get_application_container(),
                 )
             ]
 
         model = DirectStreamingModel()
         with (
-            patch.object(chat_service, "create_answer_llm", return_value=model),
+            patch.object(model_config, "create_answer_llm", return_value=model),
             patch.object(chat_service.chat_sessions, "save_assistant_message") as save,
         ):
             events = asyncio.run(collect())
@@ -2416,13 +2423,13 @@ class ChatServiceTest(IsolatedStorageTestCase):
         self.last_events = []
 
         async def drive():
-            stream = await chat_service.chat(request, self.owner)
+            stream = await chat_service.chat(request, self.owner, container=get_application_container())
             async for chunk in stream.events:
                 self.last_events.append(chunk.decode() if isinstance(chunk, bytes) else chunk)
 
         with (
             patch.object(
-                chat_service,
+                model_config,
                 "select_model_config",
                 return_value={"api_key": "k", "base_url": "https://example.test/v1", "model": "m"},
             ),
@@ -2430,7 +2437,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 chat_service, "prepare_chat_image", new=AsyncMock(return_value=("", "", ""))
             ),
             patch.object(
-                chat_service.get_application_container().knowledge_base_settings,
+                get_application_container().knowledge_base_settings,
                 "query_rewrite_enabled",
                 return_value=True,
             ),
@@ -2445,7 +2452,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 "retrieve_candidates_with_query_fallback",
                 new=AsyncMock(return_value=([], "")),
             ) as retrieve,
-            patch.object(chat_service, "create_answer_llm", return_value=model),
+            patch.object(model_config, "create_answer_llm", return_value=model),
         ):
             asyncio.run(drive())
         return retrieve, model
@@ -2491,7 +2498,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
 
         with (
             patch.object(
-                chat_service,
+                model_config,
                 "select_model_config",
                 return_value={"api_key": "k", "base_url": "https://example.test/v1", "model": "m"},
             ),
@@ -2501,7 +2508,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
             patch.object(chat_query, "retrieve_rerank_candidates", new=AsyncMock(return_value=[])),
             patch.object(chat_service.context_builder, "build_context_spans", return_value=[]),
         ):
-            stream = asyncio.run(chat_service.chat(request, self.owner))
+            stream = asyncio.run(chat_service.chat(request, self.owner, container=get_application_container()))
             events = asyncio.run(collect(stream))
 
         end_event = self._end_event(events)
@@ -2524,7 +2531,6 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 source="手册.pdf",
                 content="第一条上下文",
                 pages=("0",),
-                page_unit="页",
                 rank=0,
                 kb_id=self.tech_id,
                 chunk_routes=("fixed",),
@@ -2533,7 +2539,6 @@ class ChatServiceTest(IsolatedStorageTestCase):
                 source="手册.pdf",
                 content="第二条上下文，包含结论依据。",
                 pages=("3",),
-                page_unit="页",
                 rank=1,
                 kb_id=self.tech_id,
                 chunk_routes=("fixed", "structured"),
@@ -2546,7 +2551,7 @@ class ChatServiceTest(IsolatedStorageTestCase):
 
         with (
             patch.object(
-                chat_service,
+                model_config,
                 "select_model_config",
                 return_value={"api_key": "k", "base_url": "https://example.test/v1", "model": "m"},
             ),
@@ -2556,9 +2561,9 @@ class ChatServiceTest(IsolatedStorageTestCase):
             patch.object(chat_query, "retrieve_rerank_candidates", new=AsyncMock(return_value=[])),
             patch.object(chat_service, "rerank", new=AsyncMock(return_value=[])),
             patch.object(chat_service.context_builder, "build_context_spans", return_value=spans),
-            patch.object(chat_service, "create_answer_llm", return_value=CitingModel()),
+            patch.object(model_config, "create_answer_llm", return_value=CitingModel()),
         ):
-            stream = asyncio.run(chat_service.chat(request, self.owner))
+            stream = asyncio.run(chat_service.chat(request, self.owner, container=get_application_container()))
             events = asyncio.run(collect(stream))
 
         end_event = self._end_event(events)

@@ -8,6 +8,7 @@ import app_storage
 from services.analytics import user_activity
 from services.chat import runs as chat_runs
 from services.core import config as application_config
+from services.core.container import get_application_container
 from services.identity import accounts, login_events
 from services.retrieval.chunk_index import get_chunk_index
 from tests.support import (
@@ -88,7 +89,7 @@ class UserAnalyticsTestBase(IsolatedStorageTestCase):
                 session_id=session_id,
                 question=f"{username} 的问题",
                 status=status,
-            )
+            ), container=get_application_container()
         )
         with sqlite3.connect(self.db) as conn:
             if created_at:

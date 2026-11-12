@@ -178,7 +178,6 @@ test('explicit new chat does not send the previous session id', async ({ page })
   await expect(page.getByText('冒烟回答')).toBeVisible();
 
   expect(chatRequests).toHaveLength(1);
-  expect(chatRequests[0].new_session).toBe(true);
   expect(chatRequests[0]).not.toHaveProperty('session_id');
   expect(errors).toEqual([]);
 });
